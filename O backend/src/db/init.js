@@ -66,6 +66,7 @@ db.exec(`
     years_of_experience TEXT,
     education           TEXT,
     languages           TEXT,
+    status_override     TEXT,
     created_at          TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -137,6 +138,7 @@ safeAlter("ALTER TABLE users ADD COLUMN phone TEXT");
 safeAlter("ALTER TABLE users ADD COLUMN phone_verified INTEGER NOT NULL DEFAULT 0");
 safeAlter("ALTER TABLE bookings ADD COLUMN razorpay_order_id TEXT");
 safeAlter("ALTER TABLE bookings ADD COLUMN razorpay_payment_id TEXT");
+safeAlter("ALTER TABLE doctors ADD COLUMN status_override TEXT");
 
 // ── Pre-compiled hot queries ──────────────────────────────────────────────────
 db.stmts = {

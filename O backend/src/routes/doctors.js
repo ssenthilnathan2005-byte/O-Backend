@@ -79,6 +79,7 @@ function row2doctor(r) {
     yearsOfExperience: r.years_of_experience || "",
     education: r.education || "",
     languages: r.languages ? JSON.parse(r.languages) : [],
+    statusOverride: r.status_override || "not_yet_arrived",
   };
 }
 
@@ -159,6 +160,7 @@ router.patch("/:id", requireDoctorOrAdmin, (req, res) => {
       specialty, hospitalId, isAvailable, bio, sessionTimings,
       yearsOfExperience, education, languages, tokensPerSession,
       phone, contactPhone, photo, name, sessions, price, consultationFee, code,
+      statusOverride,
     } = req.body;
 
     if (code !== undefined && req.user.role !== "admin") {
@@ -195,7 +197,8 @@ router.patch("/:id", requireDoctorOrAdmin, (req, res) => {
         price               = COALESCE(?, price),
         consultation_fee    = COALESCE(?, consultation_fee),
         phone               = COALESCE(?, phone),
-        code                = COALESCE(?, code)
+        code                = COALESCE(?, code),
+        status_override     = COALESCE(?, status_override)
       WHERE id=?
     `).run(
       name         || null,
@@ -214,6 +217,7 @@ router.patch("/:id", requireDoctorOrAdmin, (req, res) => {
       consultationFee ?? price ?? null,
       finalPhone,
       finalCode,
+      statusOverride ?? null,
       req.params.id
     );
 
