@@ -9,7 +9,10 @@ const db = require("../db/init");
 const { sendOTP, generateOTP, normalisePhone, IS_DEV } = require("../services/sms");
 const { Resend } = require("resend");
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
+if (!resend) {
+  console.warn("[auth] RESEND_API_KEY not set — password reset emails are disabled (server will still start).");
+}
 
 const router = express.Router();
 
@@ -50,6 +53,10 @@ async function sendResetPasswordEmail(toEmail, name, resetLink) {
   const safeName = name || "there";
 
   try {
+    if (!resend) {
+      console.warn(`[auth forgot-password] Email service not configured — skipping reset email to ${toEmail}. Set RESEND_API_KEY in .env to enable this.`);
+      throw new Error("Password reset email is not configured on this server yet.");
+    }
     await resend.emails.send({
       from: "Doctor Booked <noreply@doctorbooked.in>",
       to: toEmail,
