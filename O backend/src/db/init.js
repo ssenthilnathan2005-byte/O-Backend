@@ -44,6 +44,7 @@ db.exec(`
     rating      REAL NOT NULL DEFAULT 4.0,
     gradient    TEXT NOT NULL DEFAULT 'from-slate-400 to-slate-600',
     photo_url   TEXT,
+    is_free     INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
@@ -139,6 +140,7 @@ safeAlter("ALTER TABLE users ADD COLUMN phone_verified INTEGER NOT NULL DEFAULT 
 safeAlter("ALTER TABLE bookings ADD COLUMN razorpay_order_id TEXT");
 safeAlter("ALTER TABLE bookings ADD COLUMN razorpay_payment_id TEXT");
 safeAlter("ALTER TABLE doctors ADD COLUMN status_override TEXT");
+safeAlter("ALTER TABLE hospitals ADD COLUMN is_free INTEGER NOT NULL DEFAULT 0");
 
 // ── Pre-compiled hot queries ──────────────────────────────────────────────────
 db.stmts = {

@@ -50,6 +50,7 @@ function row2hospital(r, req) {
     address: r.address || "", phone: r.phone || "",
     rating: r.rating, gradient: r.gradient,
     photoUrl,
+    isFree: r.is_free === 1,
     doctorCount,
   };
 }
@@ -100,10 +101,17 @@ router.patch("/:id", requireAdmin, (req, res) => {
     const row = db.prepare("SELECT * FROM hospitals WHERE id=?").get(req.params.id);
     if (!row) return res.status(404).json({ error: "Hospital not found" });
 
-    const { name, area, address, phone } = req.body;
+    const { name, area, address, phone, isFree } = req.body;
     db.prepare(
-      "UPDATE hospitals SET name=COALESCE(?,name), area=COALESCE(?,area), address=COALESCE(?,address), phone=COALESCE(?,phone) WHERE id=?"
-    ).run(name || null, area || null, address ?? null, phone ?? null, req.params.id);
+      "UPDATE hospitals SET name=COALESCE(?,name), area=COALESCE(?,area), address=COALESCE(?,address), phone=COALESCE(?,phone), is_free=COALESCE(?,is_free) WHERE id=?"
+    ).run(
+      name || null,
+      area || null,
+      address ?? null,
+      phone ?? null,
+      isFree !== undefined ? (isFree ? 1 : 0) : null,
+      req.params.id
+    );
 
     res.json(row2hospital(db.prepare("SELECT * FROM hospitals WHERE id=?").get(req.params.id), req));
   } catch (err) {

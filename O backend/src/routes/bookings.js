@@ -65,7 +65,12 @@ router.post("/", requireAuth, (req, res) => {
     if (!doctor)   return res.status(404).json({ error: "Doctor not found" });
     if (!doctor.is_available) return res.status(409).json({ error: "Doctor is not available" });
 
-    const hospital = db.prepare("SELECT name FROM hospitals WHERE id=?").get(doctor.hospital_id);
+    const hospital = db.prepare("SELECT name, is_free FROM hospitals WHERE id=?").get(doctor.hospital_id);
+    if (!hospital || hospital.is_free !== 1) {
+      return res.status(403).json({
+        error: "This hospital requires payment for bookings. Use the payment flow instead.",
+      });
+    }
     const sessionId = `${doctorId}_${date}_${session}`;
     const patient   = db.prepare("SELECT name FROM users WHERE id=?").get(req.user.id);
     const id        = `b_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
