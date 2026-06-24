@@ -1,6 +1,7 @@
 "use strict";
 const { refundBooking } = require("./payments");
 const { sendTokenCalled } = require("../services/whatsapp");
+const { sendPushToPatient } = require("../services/push");
 const express = require("express");
 const db      = require("../db/init");
 const { requireDoctorOrAdmin } = require("../middleware/auth");
@@ -108,6 +109,14 @@ router.post("/:sessionId/regulate", requireDoctorOrAdmin, (req, res) => {
         const doc = db.prepare("SELECT * FROM doctors WHERE id=?").get(parts[0]);
         const hosp = doc ? db.prepare("SELECT name FROM hospitals WHERE id=?").get(doc.hospital_id) : null;
         sendTokenCalled({ phone: booking.phone || booking.uphone, patientName: booking.patient_name, tokenNumber: clicked, doctorName: booking.doctor_name, hospitalName: hosp?.name || "" }).catch(() => {});
+        sendPushToPatient(booking.patient_id, { title: "Your turn has arrived!", body: "Token #" + clicked + " - Dr. " + booking.doctor_name + " is ready for you. Please come in now.", data: { tag: "token-orange" } }).catch(() => {});
+      }
+      if (nextRed !== null) {
+        const nextBooking = db.prepare("SELECT * FROM bookings WHERE session_id=? AND token_number=? AND status!='cancelled' LIMIT 1").get(req.params.sessionId, nextRed);
+        if (nextBooking) sendPushToPatient(nextBooking.patient_id, { title: "Get Ready!", body: "Token #" + nextRed + " - You are next. Dr. " + nextBooking.doctor_name + " will call you soon.", data: { tag: "token-yellow" } }).catch(() => {});
+      }
+      if (nextRed !== null) {
+        const nextBooking = db.prepare("SELECT * FROM bookings WHERE session_id=? AND token_number=? AND status!='cancelled' LIMIT 1").get(req.params.sessionId, nextRed);
       }
     } catch(_) {}
   });
