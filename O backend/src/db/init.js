@@ -61,6 +61,7 @@ db.exec(`
     price               REAL NOT NULL DEFAULT 10,
     consultation_fee    REAL NOT NULL DEFAULT 10,
     tokens_per_session  INTEGER NOT NULL DEFAULT 20,
+    walk_in_interval    INTEGER NOT NULL DEFAULT 5,
     sessions            TEXT NOT NULL DEFAULT 'morning,afternoon',
     session_timings     TEXT,
     is_available        INTEGER NOT NULL DEFAULT 1,
@@ -141,6 +142,7 @@ safeAlter("ALTER TABLE bookings ADD COLUMN razorpay_order_id TEXT");
 safeAlter("ALTER TABLE bookings ADD COLUMN razorpay_payment_id TEXT");
 safeAlter("ALTER TABLE doctors ADD COLUMN status_override TEXT");
 safeAlter("ALTER TABLE hospitals ADD COLUMN is_free INTEGER NOT NULL DEFAULT 0");
+safeAlter("ALTER TABLE doctors ADD COLUMN walk_in_interval INTEGER NOT NULL DEFAULT 5");
 
 // ── Pre-compiled hot queries ──────────────────────────────────────────────────
 db.stmts = {

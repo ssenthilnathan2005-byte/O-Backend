@@ -73,6 +73,7 @@ function row2doctor(r) {
     bio: r.bio || "", photo: r.photo || null,
     price: r.price, consultationFee: r.consultation_fee,
     tokensPerSession: r.tokens_per_session,
+    walkInInterval: r.walk_in_interval ?? 5,
     sessions: r.sessions ? r.sessions.split(",") : ["morning","afternoon"],
     sessionTimings: r.session_timings ? JSON.parse(r.session_timings) : null,
     isAvailable: r.is_available === 1,
@@ -160,7 +161,7 @@ router.patch("/:id", requireDoctorOrAdmin, (req, res) => {
       specialty, hospitalId, isAvailable, bio, sessionTimings,
       yearsOfExperience, education, languages, tokensPerSession,
       phone, contactPhone, photo, name, sessions, price, consultationFee, code,
-      statusOverride,
+      statusOverride, walkInInterval,
     } = req.body;
 
     if (code !== undefined && req.user.role !== "admin") {
@@ -194,6 +195,7 @@ router.patch("/:id", requireDoctorOrAdmin, (req, res) => {
         education           = COALESCE(?, education),
         languages           = COALESCE(?, languages),
         tokens_per_session  = COALESCE(?, tokens_per_session),
+        walk_in_interval    = COALESCE(?, walk_in_interval),
         price               = COALESCE(?, price),
         consultation_fee    = COALESCE(?, consultation_fee),
         phone               = COALESCE(?, phone),
@@ -213,6 +215,7 @@ router.patch("/:id", requireDoctorOrAdmin, (req, res) => {
       education    ?? null,
       languages    ? JSON.stringify(languages) : null,
       tokensPerSession ?? null,
+      walkInInterval ?? null,
       price        ?? null,
       consultationFee ?? price ?? null,
       finalPhone,
