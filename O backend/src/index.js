@@ -41,6 +41,7 @@ const bookingRoutes  = require("./routes/bookings");
 const tokenRoutes    = require("./routes/tokens");
 const patientRoutes  = require("./routes/patients");
 const paymentRoutes  = require("./routes/payments");
+const pushRoutes = require("./routes/push");
 
 const app  = express();
 const PORT = process.env.PORT || 4000;
@@ -146,6 +147,7 @@ app.use("/api/bookings",  bookingRoutes);
 app.use("/api/tokens",    tokenRoutes);
 app.use("/api/patients",  patientRoutes);
 app.use("/api/payments",  paymentRoutes);
+app.use("/api/push", pushRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", (_req, res) => {

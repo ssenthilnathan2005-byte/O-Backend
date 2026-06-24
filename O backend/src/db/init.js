@@ -118,6 +118,12 @@ db.exec(`
     created_at  TEXT NOT NULL DEFAULT (datetime('now'))
   );
 
+  CREATE TABLE IF NOT EXISTS fcm_tokens (
+    token       TEXT PRIMARY KEY,
+    patient_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+
   -- ── Indexes ───────────────────────────────────────────────────────────────
   CREATE INDEX IF NOT EXISTS idx_bookings_patient     ON bookings(patient_id);
   CREATE INDEX IF NOT EXISTS idx_bookings_session     ON bookings(session_id);
