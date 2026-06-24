@@ -9,8 +9,7 @@ if (!IS_DEV) {
     if (getApps().length === 0) {
       const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
       if (serviceAccount.private_key) {
-        serviceAccount.private_key = serviceAccount.private_key.replace(/\n/g, "
-");
+        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
       }
       initializeApp({ credential: cert(serviceAccount) });
     }
@@ -21,7 +20,7 @@ if (!IS_DEV) {
     messaging = null;
   }
 } else {
-  console.warn("[push] FIREBASE_SERVICE_ACCOUNT not set - push notifications DEV mode");
+  console.warn("[push] FIREBASE_SERVICE_ACCOUNT not set - DEV mode");
 }
 function removeDeadToken(token) {
   try {
@@ -57,15 +56,14 @@ async function sendPushToPatient(patientId, { title, body, data = {} }) {
     });
     response.responses.forEach((r, i) => {
       if (r.success) return;
-      const code = r.error?.code || "";
-      console.error("[push] Failed for token:", r.error?.message);
+      const code = r.error && r.error.code ? r.error.code : "";
       if (code === "messaging/invalid-registration-token" || code === "messaging/registration-token-not-registered") {
         removeDeadToken(tokens[i]);
       }
     });
     console.log("[push] Sent to " + response.successCount + "/" + tokens.length + " devices for patient " + patientId);
   } catch (err) {
-    console.error("[push] Send error for patient " + patientId + ":", err.message);
+    console.error("[push] Send error:", err.message);
   }
 }
 module.exports = { sendPushToPatient };
