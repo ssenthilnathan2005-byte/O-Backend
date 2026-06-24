@@ -1,7 +1,7 @@
 "use strict";
 const db = require("../db/init");
 let messaging = null;
-const IS_DEV = !process.env.FIRE@¡SE_SERVICE_ACCOUNT;
+const IS_DEV = !process.env.FIREBASE_SERVICE_ACCOUNT;
 if (!IS_DEV) {
   try {
     const { initializeApp, cert, getApps } = require("firebase-admin/app");
@@ -9,23 +9,23 @@ if (!IS_DEV) {
     if (getApps().length === 0) {
       const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
       if (serviceAccount.private_key) {
-        serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
+        serviceAccount.private_key = serviceAccount.private_key.replace(/\n/g, "
+");
       }
       initializeApp({ credential: cert(serviceAccount) });
     }
     messaging = getMessaging();
-    console.log("\u2705  Firebase Admin initialized \u2014 push notifications ENABLED");
+    console.log("Firebase Admin initialized - push notifications ENABLED");
   } catch (err) {
     console.error("[push] Failed to initialize Firebase Admin:", err.message);
     messaging = null;
   }
 } else {
-  console.warn("[push] FIREBASE_SERVICE_ACCOUNT not set \u2014 push notifications DEV mode (console only)");
+  console.warn("[push] FIREBASE_SERVICE_ACCOUNT not set - push notifications DEV mode");
 }
 function removeDeadToken(token) {
   try {
     db.prepare("DELETE FROM fcm_tokens WHERE token=?").run(token);
-    console.log(`[push] Removed dead token: ${token.slice(0, 20)}...`);
   } catch (_) {}
 }
 async function sendPushToPatient(patientId, { title, body, data = {} }) {
@@ -37,12 +37,9 @@ async function sendPushToPatient(patientId, { title, body, data = {} }) {
     console.error("[push] DB read error:", err.message);
     return;
   }
-  if (!rows.length) {
-    if (IS_DEV) console.log(`\n\u2534 [Push/DEV] To patient ${patientId} (number of device tokens): ${title} \u2014 ${body}\n`);
-    return;
-  }
+  if (!rows.length) return;
   if (IS_DEV || !messaging) {
-    console.log(`\n\u2534 [Push/DEV] To patient ${patientId} (${rows.length} device(s)): ${title} \u2014 ${body}\n`, data);
+    console.log("[Push/DEV] To patient " + patientId + ": " + title + " - " + body);
     return;
   }
   const tokens = rows.map(r => r.token);
@@ -61,14 +58,14 @@ async function sendPushToPatient(patientId, { title, body, data = {} }) {
     response.responses.forEach((r, i) => {
       if (r.success) return;
       const code = r.error?.code || "";
-      console.error(`[push] Failed for token ${tokens[i].slice(0, 20)}...: ${r.error?.message}`);
+      console.error("[push] Failed for token:", r.error?.message);
       if (code === "messaging/invalid-registration-token" || code === "messaging/registration-token-not-registered") {
         removeDeadToken(tokens[i]);
       }
     });
-    console.log(`[push] Sent "${title}" to ${response.successCount}/${tokens.length} device(s) for patient ${patientId}`);
+    console.log("[push] Sent to " + response.successCount + "/" + tokens.length + " devices for patient " + patientId);
   } catch (err) {
-    console.error(`[push] Send error for patient ${patientId}:`, err.message);
+    console.error("[push] Send error for patient " + patientId + ":", err.message);
   }
 }
 module.exports = { sendPushToPatient };
