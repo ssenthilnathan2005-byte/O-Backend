@@ -18,7 +18,7 @@ const IS_DEV = !process.env.FIREBASE_SERVICE_ACCOUNT;
 if (!IS_DEV) {
   try {
     admin = require("firebase-admin");
-    if (!admin.apps.length) {
+    if (!admin.apps || !admin.apps.length) {
       const serviceAccount = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT);
       if (serviceAccount.private_key) serviceAccount.private_key = serviceAccount.private_key.replace(/\\n/g, "\n");
       admin.initializeApp({
