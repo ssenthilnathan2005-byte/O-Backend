@@ -1,4 +1,3 @@
-require("dotenv").config();
 "use strict";
 require("dotenv").config();
 const express    = require("express");
