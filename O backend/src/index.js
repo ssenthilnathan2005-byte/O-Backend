@@ -12,7 +12,7 @@ const fs         = require("fs");
 
 const db = require("./db/init");
 const { setupWebSocket } = require("./services/ws");
-const { startScheduler } = require("./services/scheduler");
+const { startScheduler, expireStaleBookings } = require("./services/scheduler");
 
 // ── Global crash guards ───────────────────────────────────────────────────────
 process.on("uncaughtException", (err) => {
@@ -181,6 +181,7 @@ app.use((err, _req, res, _next) => {
 const server = http.createServer(app);
 setupWebSocket(server);
 startScheduler();
+void expireStaleBookings(); // catch up immediately in case the server was down at midnight
 
 server.maxConnections  = 1000;
 server.keepAliveTimeout = 65000;

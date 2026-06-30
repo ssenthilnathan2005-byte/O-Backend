@@ -4,6 +4,7 @@ const express = require("express");
 const db      = require("../db/init");
 const { requireAuth, requireAdmin, requireDoctorOrAdmin } = require("../middleware/auth");
 const { broadcast } = require("../services/ws");
+const { markStaleConfirmedAsUnvisited, refundExpiredBookings } = require("../services/scheduler");
 
 const router = express.Router();
 
@@ -22,6 +23,19 @@ function row2booking(r) {
 // ── GET bookings ──────────────────────────────────────────────────────────────
 router.get("/", requireAuth, (req, res) => {
   try {
+    // Lazily self-heal stale "confirmed" bookings from past dates into
+    // "unvisited" — cheap synchronous DB update, safe to run on every
+    // request. Refunds (network calls) are processed afterwards in the
+    // background so they never delay this response.
+    const justExpired = markStaleConfirmedAsUnvisited();
+    if (justExpired.length > 0) {
+      setImmediate(() => {
+        refundExpiredBookings(justExpired).catch((err) =>
+          console.error("[bookings] background refund error:", err.message)
+        );
+      });
+    }
+
     let rows;
     if (req.user.role === "admin") {
       rows = db.prepare("SELECT * FROM bookings ORDER BY created_at DESC LIMIT 500").all();
