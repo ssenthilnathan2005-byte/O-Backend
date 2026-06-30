@@ -48,7 +48,7 @@ async function razorpayWithRetry(fn, attempts = 2) {
 router.post("/create-order", requireAuth, async (req, res) => {
   if (!ensureRazorpay(res)) return;
   try {
-    const { doctorId, date, session, complaint = "", phone = "" } = req.body;
+    const { doctorId, date, session, complaint = "", phone = "", patientName: submittedName = "", patientAge = "" } = req.body;
     if (!doctorId || !date || !session)
       return res.status(400).json({ error: "doctorId, date and session are required." });
 
@@ -96,6 +96,8 @@ router.post("/create-order", requireAuth, async (req, res) => {
           sessionId,
           complaint:    (complaint || "").slice(0, 200),
           phone:        (phone || "").slice(0, 20),
+          patientName:  (submittedName || "").slice(0, 100),
+          patientAge:   String(patientAge || "").slice(0, 5),
         },
       })
     );
@@ -161,7 +163,8 @@ router.post("/verify", requireAuth, async (req, res) => {
     const notes = order.notes || {};
 
     const { doctorId, date, session, patientId, sessionId,
-            doctorName, hospitalName, complaint = "", phone = "" } = notes;
+            doctorName, hospitalName, complaint = "", phone = "",
+            patientName: submittedName = "", patientAge = "" } = notes;
 
     if (!doctorId || !date || !session || !patientId || !sessionId)
       return res.status(400).json({ error: "Invalid payment order data." });
@@ -200,14 +203,15 @@ router.post("/verify", requireAuth, async (req, res) => {
         INSERT INTO bookings
           (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name,
            date, session, token_number, session_id, payment_done, status,
-           phone, complaint, razorpay_order_id, razorpay_payment_id)
-        VALUES (?,?,?,?,?,?,?,?,?,?,1,'confirmed',?,?,?,?)
+           phone, complaint, razorpay_order_id, razorpay_payment_id, patient_age)
+        VALUES (?,?,?,?,?,?,?,?,?,?,1,'confirmed',?,?,?,?,?)
       `).run(
-        bookingId, req.user.id, patient.name,
+        bookingId, req.user.id, (submittedName || patient.name),
         doctorId, doctorName || doctor.name, hospitalName || "",
         date, session, tokenNumber, sessionId,
         phone, complaint,
-        razorpay_order_id, razorpay_payment_id
+        razorpay_order_id, razorpay_payment_id,
+        patientAge !== "" && patientAge != null ? Number(patientAge) : null
       );
 
       // Update token state
@@ -263,7 +267,7 @@ function formatBooking(b) {
     hospitalName: b.hospital_name, date: b.date,
     session: b.session, tokenNumber: b.token_number,
     sessionId: b.session_id, paymentDone: !!b.payment_done, status: b.status,
-    phone: b.phone || "", complaint: b.complaint || "",
+    phone: b.phone || "", complaint: b.complaint || "", patientAge: b.patient_age ?? null,
     createdAt: b.created_at,
   };
 }

@@ -14,7 +14,8 @@ function row2booking(r) {
     doctorId: r.doctor_id, doctorName: r.doctor_name, hospitalName: r.hospital_name,
     date: r.date, session: r.session, tokenNumber: r.token_number,
     sessionId: r.session_id, paymentDone: r.payment_done === 1, status: r.status,
-    phone: r.phone || "", complaint: r.complaint || "", createdAt: r.created_at,
+    phone: r.phone || "", complaint: r.complaint || "", patientAge: r.patient_age ?? null,
+    createdAt: r.created_at,
   };
 }
 
@@ -56,7 +57,7 @@ router.post("/", requireAuth, (req, res) => {
   if (req.user.role !== "patient")
     return res.status(403).json({ error: "Only patients can create bookings" });
 
-  const { doctorId, date, session, complaint = "", phone = "" } = req.body;
+  const { doctorId, date, session, complaint = "", phone = "", patientName: submittedName = "", patientAge = null } = req.body;
   if (!doctorId || !date || !session)
     return res.status(400).json({ error: "doctorId, date, and session are required" });
 
@@ -95,12 +96,13 @@ router.post("/", requireAuth, (req, res) => {
       db.prepare(`
         INSERT INTO bookings
           (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name,
-           date, session, token_number, session_id, payment_done, status, phone, complaint)
-        VALUES (?,?,?,?,?,?,?,?,?,?,1,'confirmed',?,?)
+           date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age)
+        VALUES (?,?,?,?,?,?,?,?,?,?,1,'confirmed',?,?,?)
       `).run(
-        id, req.user.id, patient?.name || "Unknown",
+        id, req.user.id, (submittedName || patient?.name || "Unknown"),
         doctorId, doctor.name, hospital?.name || "Unknown",
-        date, session, finalTokenNumber, sessionId, phone, complaint
+        date, session, finalTokenNumber, sessionId, phone, complaint,
+        patientAge != null && patientAge !== "" ? Number(patientAge) : null
       );
 
       // Update or create token state
