@@ -282,7 +282,7 @@ async function refundBooking(bookingId) {
     if (booking.refund_id) { console.warn("[Refund] Already refunded:", bookingId); return; }
     const payment = await razorpayWithRetry(() => razorpay.payments.fetch(booking.razorpay_payment_id));
     const refund = await razorpayWithRetry(() => razorpay.payments.refund(booking.razorpay_payment_id, { amount: payment.amount, speed: "optimum", notes: { bookingId, reason: "Session cancelled or patient unavailable" } }));
-    db.prepare("UPDATE bookings SET refund_id=?, status='refunded' WHERE id=?").run(refund.id, bookingId);
+    db.prepare("UPDATE bookings SET refund_id=? WHERE id=?").run(refund.id, bookingId);
     console.log("[Refund] Refunded booking", bookingId, "refund ID:", refund.id);
   } catch(err) {
     console.error("[Refund] Failed for booking", bookingId, err.message);
