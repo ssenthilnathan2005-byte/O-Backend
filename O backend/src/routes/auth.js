@@ -1,7 +1,7 @@
 "use strict";
 
 const express = require("express");
-const bcrypt = require("bcryptjs");
+const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { body, validationResult } = require("express-validator");
 const { OAuth2Client } = require("google-auth-library");
@@ -109,7 +109,7 @@ router.post(
         return res.status(400).json({ error: "Please provide an email address or a 10-digit phone number." });
       }
 
-      const hash = bcrypt.hashSync(password, 12);
+      const hash = await bcrypt.hash(password, 10);
 
       // ── Phone-only signup ────────────────────────────────────────────────
       if (!rawEmail && rawPhone) {
@@ -201,7 +201,7 @@ router.post(
       if (!user) {
         return res.status(401).json({ error: "No account found with this email." });
       }
-      if (!bcrypt.compareSync(password, user.password)) {
+      if (!(await bcrypt.compare(password, user.password))) {
         return res.status(401).json({ error: "Incorrect password." });
       }
 
@@ -361,7 +361,7 @@ router.post("/patient/google", async (req, res) => {
 
     if (!user) {
       const id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      const hash = bcrypt.hashSync(`google_${googleId}_${Date.now()}`, 10);
+      const hash = await bcrypt.hash(`google_${googleId}_${Date.now()}`, 10);
       db.prepare(
         `INSERT INTO users (id, email, name, password, role, phone_verified)
          VALUES (?, ?, ?, ?, 'patient', 0)`
@@ -474,7 +474,7 @@ router.post(
 router.post(
   "/admin/login",
   [body("code").trim().notEmpty(), body("password").notEmpty()],
-  (req, res) => {
+  async (req, res) => {
     if (!validate(req, res)) return;
 
     try {
@@ -491,7 +491,7 @@ router.post(
       }
 
       const admin = db.prepare("SELECT * FROM users WHERE role='admin' LIMIT 1").get();
-      if (!admin || !bcrypt.compareSync(password, admin.password)) {
+      if (!admin || !(await bcrypt.compare(password, admin.password))) {
         return res.status(401).json({ error: "Invalid admin password" });
       }
 
@@ -589,7 +589,7 @@ router.post("/patient/reset-password-by-token", async (req, res) => {
       return res.status(400).json({ error: "Invalid reset token." });
     }
 
-    const hash = bcrypt.hashSync(newPassword, 12);
+    const hash = await bcrypt.hash(newPassword, 10);
     db.prepare("UPDATE users SET password=? WHERE id=?").run(hash, decoded.id);
 
     return res.json({
@@ -647,7 +647,7 @@ router.post("/patient/reset-password", async (req, res) => {
     const data = JSON.parse(pending.data || "{}");
     db.prepare("DELETE FROM otp_pending WHERE id=?").run(otpId);
 
-    const hash = bcrypt.hashSync(String(newPassword), 12);
+    const hash = await bcrypt.hash(String(newPassword), 10);
     db.prepare("UPDATE users SET password=? WHERE id=?").run(hash, data.userId);
 
     return res.json({

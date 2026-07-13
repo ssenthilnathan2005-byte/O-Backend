@@ -1,6 +1,6 @@
 "use strict";
 require("dotenv").config();
-const bcrypt = require("bcryptjs");
+const bcrypt = require("bcrypt");
 const db = require("./init");
 
 const ADMIN_CODE = process.env.ADMIN_CODE || "ADMIN-001";

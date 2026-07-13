@@ -11,7 +11,7 @@
     "db:seed": "node src/db/seed.js"
   },
   "dependencies": {
-    "bcryptjs": "^2.4.3",
+    "bcrypt": "^5.1.1",
     "better-sqlite3": "^11.1.2",
     "compression": "^1.8.1",
     "cors": "^2.8.5",
