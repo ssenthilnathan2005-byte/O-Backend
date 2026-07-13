@@ -98,6 +98,7 @@ router.post(
   ],
   async (req, res) => {
     if (!validate(req, res)) return;
+    const t0 = Date.now();
 
     try {
       const name     = String(req.body.name || "").trim();
@@ -109,7 +110,10 @@ router.post(
         return res.status(400).json({ error: "Please provide an email address or a 10-digit phone number." });
       }
 
+      const tHashStart = Date.now();
       const hash = await bcrypt.hash(password, 10);
+      const tHashEnd = Date.now();
+      console.log(`[TIMING signup] validate+parse: ${tHashStart - t0}ms | bcrypt.hash: ${tHashEnd - tHashStart}ms`);
 
       // ── Phone-only signup ────────────────────────────────────────────────
       if (!rawEmail && rawPhone) {
@@ -117,6 +121,7 @@ router.post(
         if (!/^\+91\d{10}$/.test(normPhone)) {
           return res.status(400).json({ error: "Please enter a valid 10-digit Indian mobile number." });
         }
+        const tDbStart = Date.now();
         const exists = db.prepare("SELECT id FROM users WHERE phone=? AND role='patient'").get(normPhone);
         if (exists) {
           return res.status(409).json({ error: "Phone number already registered. Please log in." });
@@ -127,6 +132,7 @@ router.post(
            VALUES (?, ?, ?, 'patient', ?, 1)`
         ).run(id, name, hash, normPhone);
         const user = db.prepare("SELECT * FROM users WHERE id=?").get(id);
+        console.log(`[TIMING signup] db work: ${Date.now() - tDbStart}ms | TOTAL: ${Date.now() - t0}ms`);
         return res.json({
           token: sign({ id: user.id, name: user.name, phone: normPhone, role: "patient" }),
           user:  { id: user.id, name: user.name, phone: normPhone, role: "patient" },
@@ -138,6 +144,7 @@ router.post(
       if (!isGmailAddress(rawEmail)) {
         return res.status(400).json({ error: "Please use a Gmail address." });
       }
+      const tDbStart = Date.now();
       const exists = db.prepare("SELECT id FROM users WHERE email=? AND role='patient'").get(rawEmail);
       if (exists) {
         return res.status(409).json({ error: "Email already registered. Please log in." });
@@ -148,6 +155,7 @@ router.post(
          VALUES (?, ?, ?, ?, 'patient', 0)`
       ).run(id, rawEmail, name, hash);
       const user = db.prepare("SELECT * FROM users WHERE id=?").get(id);
+      console.log(`[TIMING signup] db work: ${Date.now() - tDbStart}ms | TOTAL: ${Date.now() - t0}ms`);
       return res.json({
         token: sign({ id: user.id, email: user.email, name: user.name, role: "patient" }),
         user:  { id: user.id, email: user.email, name: user.name, role: "patient" },
@@ -176,6 +184,7 @@ router.post(
   ],
   async (req, res) => {
     if (!validate(req, res)) return;
+    const t0 = Date.now();
 
     try {
       const identifier = String(req.body.email || req.body.identifier || "").trim();
@@ -197,11 +206,16 @@ router.post(
           user = null;
         }
       }
+      const tDbEnd = Date.now();
 
       if (!user) {
         return res.status(401).json({ error: "No account found with this email." });
       }
-      if (!(await bcrypt.compare(password, user.password))) {
+      const tCompareStart = Date.now();
+      const ok = await bcrypt.compare(password, user.password);
+      const tCompareEnd = Date.now();
+      console.log(`[TIMING login] db lookup: ${tDbEnd - t0}ms | bcrypt.compare: ${tCompareEnd - tCompareStart}ms | TOTAL: ${tCompareEnd - t0}ms`);
+      if (!ok) {
         return res.status(401).json({ error: "Incorrect password." });
       }
 
