@@ -87,7 +87,7 @@ async function sendResetPasswordEmail(toEmail, name, resetLink) {
   }
 }
 
-// ── Patient Signup — email/password ──────────────────────────────────────────
+// ── Patient Signup — email/password OR phone/password ────────────────────────
 router.post(
   "/patient/signup",
   [
@@ -95,48 +95,65 @@ router.post(
     body("password")
       .isLength({ min: 6 })
       .withMessage("Password must be at least 6 chars"),
-    body("email")
-      .trim()
-      .isEmail()
-      .withMessage("Valid email is required")
-      .bail()
-      .custom((value) => {
-        if (!isGmailAddress(value)) {
-          throw new Error("Please use a Gmail address");
-        }
-        return true;
-      }),
   ],
   async (req, res) => {
     if (!validate(req, res)) return;
 
     try {
-      const name = String(req.body.name || "").trim();
-      const email = String(req.body.email || "").trim().toLowerCase();
+      const name     = String(req.body.name || "").trim();
       const password = String(req.body.password || "");
+      const rawEmail = String(req.body.email || "").trim().toLowerCase();
+      const rawPhone = String(req.body.phone || "").trim();
 
-      const exists = db
-        .prepare("SELECT id FROM users WHERE email=? AND role='patient'")
-        .get(email);
-      if (exists) {
-        return res.status(409).json({ error: "Email already registered. Please log in." });
+      if (!rawEmail && !rawPhone) {
+        return res.status(400).json({ error: "Please provide an email address or a 10-digit phone number." });
       }
 
       const hash = bcrypt.hashSync(password, 12);
-      const id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
 
+      // ── Phone-only signup ────────────────────────────────────────────────
+      if (!rawEmail && rawPhone) {
+        const normPhone = normalisePhone(rawPhone);
+        if (!/^\+91\d{10}$/.test(normPhone)) {
+          return res.status(400).json({ error: "Please enter a valid 10-digit Indian mobile number." });
+        }
+        const exists = db.prepare("SELECT id FROM users WHERE phone=? AND role='patient'").get(normPhone);
+        if (exists) {
+          return res.status(409).json({ error: "Phone number already registered. Please log in." });
+        }
+        const id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+        db.prepare(
+          `INSERT INTO users (id, name, password, role, phone, phone_verified)
+           VALUES (?, ?, ?, 'patient', ?, 1)`
+        ).run(id, name, hash, normPhone);
+        const user = db.prepare("SELECT * FROM users WHERE id=?").get(id);
+        return res.json({
+          token: sign({ id: user.id, name: user.name, phone: normPhone, role: "patient" }),
+          user:  { id: user.id, name: user.name, phone: normPhone, role: "patient" },
+          message: "Account created successfully.",
+        });
+      }
+
+      // ── Email signup ─────────────────────────────────────────────────────
+      if (!isGmailAddress(rawEmail)) {
+        return res.status(400).json({ error: "Please use a Gmail address." });
+      }
+      const exists = db.prepare("SELECT id FROM users WHERE email=? AND role='patient'").get(rawEmail);
+      if (exists) {
+        return res.status(409).json({ error: "Email already registered. Please log in." });
+      }
+      const id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       db.prepare(
         `INSERT INTO users (id, email, name, password, role, phone_verified)
          VALUES (?, ?, ?, ?, 'patient', 0)`
-      ).run(id, email, name, hash);
-
+      ).run(id, rawEmail, name, hash);
       const user = db.prepare("SELECT * FROM users WHERE id=?").get(id);
-
       return res.json({
         token: sign({ id: user.id, email: user.email, name: user.name, role: "patient" }),
-        user: { id: user.id, email: user.email, name: user.name, role: "patient" },
+        user:  { id: user.id, email: user.email, name: user.name, role: "patient" },
         message: "Account created successfully.",
       });
+
     } catch (err) {
       console.error("[auth signup]", err.message);
       return res.status(500).json({ error: err.message || "Signup failed." });
