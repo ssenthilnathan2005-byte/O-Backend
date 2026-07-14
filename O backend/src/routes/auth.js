@@ -118,7 +118,7 @@ router.post(
       // ── Phone-only signup ────────────────────────────────────────────────
       if (!rawEmail && rawPhone) {
         const normPhone = normalisePhone(rawPhone);
-        if (!/^\+91\d{10}$/.test(normPhone)) {
+        if (!/^91\d{10}$/.test(normPhone)) {
           return res.status(400).json({ error: "Please enter a valid 10-digit Indian mobile number." });
         }
         const tDbStart = Date.now();
