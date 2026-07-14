@@ -16,6 +16,7 @@ function row2booking(r) {
     date: r.date, session: r.session, tokenNumber: r.token_number,
     sessionId: r.session_id, paymentDone: r.payment_done === 1, status: r.status,
     phone: r.phone || "", complaint: r.complaint || "", patientAge: r.patient_age ?? null,
+    closeReason: r.close_reason || null,
     createdAt: r.created_at,
   };
 }

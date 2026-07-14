@@ -206,20 +206,51 @@ router.post("/:sessionId/complete-skipped", requireDoctorOrAdmin, (req, res) => 
 });
 
 // ── POST close session ────────────────────────────────────────────────────────
-router.post("/:sessionId/close", requireDoctorOrAdmin, (req, res) => {
-  withTx(req.params.sessionId, res, (state) => {
+router.post("/:sessionId/close", requireDoctorOrAdmin, async (req, res) => {
+  const sessionId = req.params.sessionId;
+  const reason = String(req.body.reason || "").trim();
+
+  // Find patients still waiting BEFORE we touch anything, so we know whether
+  // a reason is actually required and who needs to be notified.
+  const affected = db.prepare(
+    "SELECT * FROM bookings WHERE session_id=? AND status='confirmed'"
+  ).all(sessionId);
+
+  if (affected.length > 0 && !reason) {
+    return res.status(400).json({
+      error: "Please provide a reason for ending the session early — it will be shown to the patients who didn't get seen.",
+    });
+  }
+
+  withTx(sessionId, res, (state) => {
     const statuses = { ...state.tokenStatuses };
     for (const [n, s] of Object.entries(statuses))
       if (s === "red" || s === "yellow") statuses[Number(n)] = "unvisited";
 
-    saveState(req.params.sessionId, statuses, state.prioritySlots, null, null, true);
-    const untouchedBookings = db.prepare(
-      "SELECT id FROM bookings WHERE session_id=? AND status='confirmed' AND payment_done=1"
-    ).all(req.params.sessionId);
-    db.prepare("UPDATE bookings SET status='unvisited' WHERE session_id=? AND status='confirmed'")
-      .run(req.params.sessionId);
-    for (const b of untouchedBookings) refundBooking(b.id).catch(() => {});
+    saveState(sessionId, statuses, state.prioritySlots, null, null, true);
+
+    db.prepare(
+      "UPDATE bookings SET status='unvisited', close_reason=? WHERE session_id=? AND status='confirmed'"
+    ).run(reason || null, sessionId);
   });
+
+  // Notify every affected patient — paid bookings also get refunded.
+  for (const b of affected) {
+    if (b.payment_done === 1) {
+      refundBooking(b.id).catch(() => {});
+      sendPushToPatient(b.patient_id, {
+        title: "Session ended early — refund on the way",
+        body: `Dr. ${b.doctor_name} had to end today's session early${reason ? ` (${reason})` : ""}. Your payment will be refunded within a few days.`,
+        data: { tag: "session-closed-early", bookingId: b.id },
+      }).catch(() => {});
+    } else {
+      sendPushToPatient(b.patient_id, {
+        title: "Session ended early",
+        body: `Dr. ${b.doctor_name} had to end today's session early${reason ? ` (${reason})` : ""}. We're sorry for the inconvenience — please rebook for another available slot.`,
+        data: { tag: "session-closed-early", bookingId: b.id },
+      }).catch(() => {});
+    }
+  }
 });
 
 // ── POST priority-slot ────────────────────────────────────────────────────────
