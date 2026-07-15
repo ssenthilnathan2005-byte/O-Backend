@@ -108,7 +108,7 @@ export const bookings = {
   forSession: (sessionId: string)       => get<Booking[]>(`/bookings/session/${sessionId}`),
   create: (data: {
     doctorId: string; date: string; session: string;
-    complaint?: string; phone?: string;
+    complaint?: string; phone: string;
   })                                    => post<Booking>("/bookings", data),
   updateStatus: (id: string, status: string) =>
     patch<Booking>(`/bookings/${id}/status`, { status }),
@@ -198,7 +198,7 @@ export interface Booking {
   doctorId: string; doctorName: string; hospitalName: string;
   date: string; session: string; tokenNumber: number; sessionId: string;
   paymentDone: boolean; status: "confirmed" | "completed" | "unvisited" | "cancelled";
-  phone?: string; complaint?: string; createdAt: string;
+  phone: string; complaint?: string; createdAt: string;
 }
 
 export type TokenStatus = "white" | "red" | "orange" | "yellow" | "green" | "unvisited";

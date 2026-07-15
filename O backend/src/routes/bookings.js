@@ -5,6 +5,7 @@ const db      = require("../db/init");
 const { requireAuth, requireAdmin, requireDoctorOrAdmin } = require("../middleware/auth");
 const { broadcast } = require("../services/ws");
 const { markStaleConfirmedAsUnvisited, refundExpiredBookings } = require("../services/scheduler");
+const { validateRequiredIndianPhone } = require("../utils/phone");
 
 const router = express.Router();
 
@@ -72,9 +73,14 @@ router.post("/", requireAuth, (req, res) => {
   if (req.user.role !== "patient")
     return res.status(403).json({ error: "Only patients can create bookings" });
 
-  const { doctorId, date, session, complaint = "", phone = "", patientName: submittedName = "", patientAge = null } = req.body;
+  const { doctorId, date, session, complaint = "", phone, patientName: submittedName = "", patientAge = null } = req.body;
   if (!doctorId || !date || !session)
     return res.status(400).json({ error: "doctorId, date, and session are required" });
+
+  const phoneValidation = validateRequiredIndianPhone(phone);
+  if (!phoneValidation.ok) {
+    return res.status(400).json({ error: phoneValidation.error });
+  }
 
   try {
     const doctor   = db.prepare("SELECT * FROM doctors WHERE id=?").get(doctorId);
@@ -116,7 +122,7 @@ router.post("/", requireAuth, (req, res) => {
       `).run(
         id, req.user.id, (submittedName || patient?.name || "Unknown"),
         doctorId, doctor.name, hospital?.name || "Unknown",
-        date, session, finalTokenNumber, sessionId, phone, complaint,
+        date, session, finalTokenNumber, sessionId, phoneValidation.phone, complaint,
         patientAge != null && patientAge !== "" ? Number(patientAge) : null
       );
 

@@ -173,7 +173,7 @@ db.stmts = {
 };
 
 // ── Auto-clean expired OTPs every 10 minutes ─────────────────────────────────
-setInterval(() => {
+const otpCleanupInterval = setInterval(() => {
   try {
     const result = db.stmts.cleanExpiredOTPs.run(Date.now());
     if (result.changes > 0) console.log(`[DB] Cleaned ${result.changes} expired OTPs`);
@@ -181,15 +181,17 @@ setInterval(() => {
     console.error("[DB] OTP cleanup error:", err.message);
   }
 }, 10 * 60 * 1000);
+otpCleanupInterval.unref();
 
 // ── WAL checkpoint every 30 minutes to keep file size in check ───────────────
-setInterval(() => {
+const walCheckpointInterval = setInterval(() => {
   try {
     db.pragma("wal_checkpoint(PASSIVE)");
   } catch (err) {
     console.error("[DB] WAL checkpoint error:", err.message);
   }
 }, 30 * 60 * 1000);
+walCheckpointInterval.unref();
 
 console.log("✅  Database ready:", path.resolve(DB_PATH));
 console.log("   WAL mode     :", db.pragma("journal_mode", { simple: true }));

@@ -146,6 +146,67 @@ Test in this order:
 | PATCH | `/api/bookings/:id/status` | Doctor/Admin |
 | GET | `/api/bookings/stats/summary` | Admin |
 
+`POST /api/bookings` request body:
+```json
+{
+    "doctorId": "d_123",
+    "date": "2026-07-20",
+    "session": "morning",
+    "phone": "9876543210",
+    "complaint": "Fever"
+}
+```
+
+Validation:
+- `phone` is mandatory.
+- Valid values are Indian mobile numbers normalized to `91XXXXXXXXXX`.
+- Requests with missing or invalid `phone` return `400`.
+
+Response shape (create/list/session):
+```json
+{
+    "id": "b_xxx",
+    "patientId": "p_xxx",
+    "patientName": "Patient",
+    "doctorId": "d_xxx",
+    "doctorName": "Doctor",
+    "hospitalName": "Hospital",
+    "date": "2026-07-20",
+    "session": "morning",
+    "tokenNumber": 1,
+    "sessionId": "d_xxx_2026-07-20_morning",
+    "paymentDone": true,
+    "status": "confirmed",
+    "phone": "919876543210",
+    "complaint": "Fever",
+    "patientAge": 30,
+    "createdAt": "2026-07-15 10:00:00"
+}
+```
+
+### Payments
+| Method | Endpoint | Auth |
+|--------|----------|------|
+| POST | `/api/payments/create-order` | Bearer |
+| POST | `/api/payments/verify` | Bearer |
+
+`POST /api/payments/create-order` request body:
+```json
+{
+    "doctorId": "d_123",
+    "date": "2026-07-20",
+    "session": "morning",
+    "phone": "9876543210",
+    "complaint": "Fever"
+}
+```
+
+Validation:
+- `phone` is mandatory and validated with the same rule as booking creation.
+- Normalized phone is persisted in Razorpay order notes and reused during `/api/payments/verify` booking creation.
+
+`POST /api/payments/verify` response includes `booking.phone` in the `booking` object.
+
 ### Token States
 | Method | Endpoint | Auth |
 |--------|----------|------|

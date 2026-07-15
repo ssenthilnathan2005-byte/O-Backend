@@ -47,7 +47,7 @@ interface Store {
   // bookings
   bookings: Booking[];
   loadBookings: () => Promise<void>;
-  addBooking: (data: { doctorId: string; date: string; session: string; complaint?: string; phone?: string }) => Promise<Booking>;
+  addBooking: (data: { doctorId: string; date: string; session: string; complaint?: string; phone: string }) => Promise<Booking>;
   getBookingsForPatient: (patientId: string) => Booking[];
   getBookingsForSession: (sessionId: string) => Booking[];
   // patients
@@ -215,7 +215,7 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // ── Bookings ──────────────────────────────────────────────────────────────
-  const addBooking = useCallback(async (data: { doctorId: string; date: string; session: string; complaint?: string; phone?: string }) => {
+  const addBooking = useCallback(async (data: { doctorId: string; date: string; session: string; complaint?: string; phone: string }) => {
     const b = await api.bookings.create(data);
     setBookings(prev => [...prev, b]);
     // Subscribe to live updates for this session

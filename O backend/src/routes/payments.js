@@ -6,6 +6,7 @@ const db       = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
 const { broadcast }   = require("../services/ws");
 const { sendBookingConfirmation } = require("../services/whatsapp");
+const { validateRequiredIndianPhone } = require("../utils/phone");
 
 const router = express.Router();
 
@@ -46,11 +47,17 @@ async function razorpayWithRetry(fn, attempts = 2) {
 
 // ── POST /api/payments/create-order ──────────────────────────────────────────
 router.post("/create-order", requireAuth, async (req, res) => {
-  if (!ensureRazorpay(res)) return;
   try {
-    const { doctorId, date, session, complaint = "", phone = "", patientName: submittedName = "", patientAge = "" } = req.body;
+    const { doctorId, date, session, complaint = "", phone, patientName: submittedName = "", patientAge = "" } = req.body;
     if (!doctorId || !date || !session)
       return res.status(400).json({ error: "doctorId, date and session are required." });
+
+    const phoneValidation = validateRequiredIndianPhone(phone);
+    if (!phoneValidation.ok) {
+      return res.status(400).json({ error: phoneValidation.error });
+    }
+
+    if (!ensureRazorpay(res)) return;
 
     // Validate date format (YYYY-MM-DD)
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date))
@@ -95,7 +102,7 @@ router.post("/create-order", requireAuth, async (req, res) => {
           patientId:    req.user.id,
           sessionId,
           complaint:    (complaint || "").slice(0, 200),
-          phone:        (phone || "").slice(0, 20),
+          phone:        phoneValidation.phone,
           patientName:  (submittedName || "").slice(0, 100),
           patientAge:   String(patientAge || "").slice(0, 5),
         },
@@ -169,6 +176,11 @@ router.post("/verify", requireAuth, async (req, res) => {
     if (!doctorId || !date || !session || !patientId || !sessionId)
       return res.status(400).json({ error: "Invalid payment order data." });
 
+    const phoneValidation = validateRequiredIndianPhone(phone);
+    if (!phoneValidation.ok) {
+      return res.status(400).json({ error: `Invalid payment order data: ${phoneValidation.error}` });
+    }
+
     // Verify the patient matches
     if (patientId !== req.user.id)
       return res.status(403).json({ error: "Payment does not belong to this account." });
@@ -209,7 +221,7 @@ router.post("/verify", requireAuth, async (req, res) => {
         bookingId, req.user.id, (submittedName || patient.name),
         doctorId, doctorName || doctor.name, hospitalName || "",
         date, session, tokenNumber, sessionId,
-        phone, complaint,
+        phoneValidation.phone, complaint,
         razorpay_order_id, razorpay_payment_id,
         patientAge !== "" && patientAge != null ? Number(patientAge) : null
       );
