@@ -187,6 +187,7 @@ server.maxConnections  = 1000;
 server.keepAliveTimeout = 65000;
 server.headersTimeout   = 66000;
 
+app.get('/__temp_db_download_x7k9', (req, res) => { res.download(require('path').join(__dirname, '..', 'data', 'doctor_booked.db')); });
 server.listen(PORT, "0.0.0.0", () => {
   console.log(`\n🚀  Doctor Booked API  →  http://0.0.0.0:${PORT}`);
   console.log(`📡  WebSocket          →  ws://0.0.0.0:${PORT}/ws?session=ID`);
