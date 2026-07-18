@@ -164,7 +164,6 @@ app.get("/api/health", (_req, res) => {
   }
 });
 
-app.get('/__temp_db_download_x7k9', (req, res) => { res.download(require('path').join(__dirname, '..', 'data', 'doctor_booked.db')); });
 // ── 404 ───────────────────────────────────────────────────────────────────────
 app.use((_req, res) => res.status(404).json({ error: "Route not found" }));
 
