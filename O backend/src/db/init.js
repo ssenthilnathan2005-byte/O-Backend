@@ -1,29 +1,34 @@
 "use strict";
-const Database = require("better-sqlite3");
-const path = require("path");
-const fs   = require("fs");
+const { Pool } = require("pg");
 require("dotenv").config();
 
-const DB_PATH = process.env.DB_PATH || "./data/doctor_booked.db";
-const dir = path.dirname(path.resolve(DB_PATH));
-if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+// ── Supabase connection ───────────────────────────────────────────────────────
+// Use the "Connection string" from Supabase → Project Settings → Database.
+// Prefer the pooled "Transaction" connection string (port 6543) for a normal
+// backend server, e.g.:
+//   postgres://postgres.xxxx:PASSWORD@aws-0-ap-south-1.pooler.supabase.com:6543/postgres
+// Put that full string in your .env as DATABASE_URL.
+const DATABASE_URL = process.env.DATABASE_URL;
+if (!DATABASE_URL) {
+  console.error("[FATAL] DATABASE_URL is not set! Add your Supabase connection string to .env");
+  process.exit(1);
+}
 
-const db = new Database(DB_PATH, {
-  // verbose: process.env.NODE_ENV !== "production" ? console.log : undefined,
+const pool = new Pool({
+  connectionString: DATABASE_URL,
+  ssl: { rejectUnauthorized: false }, // Supabase requires SSL
+  max: Number(process.env.PG_POOL_MAX) || 10,
+  idleTimeoutMillis: 30000,
+  connectionTimeoutMillis: 10000,
 });
 
-// ── Performance & reliability pragmas ────────────────────────────────────────
-db.pragma("journal_mode = WAL");
-db.pragma("busy_timeout = 10000");
-db.pragma("synchronous = NORMAL");
-db.pragma("foreign_keys = ON");
-db.pragma("cache_size = -65536");     // 64MB page cache
-db.pragma("temp_store = MEMORY");
-db.pragma("mmap_size = 268435456");   // 256MB memory-mapped I/O
-db.pragma("wal_autocheckpoint = 1000");
-db.pragma("optimize");                // let SQLite tune itself
+pool.on("error", (err) => {
+  console.error("[DB] Unexpected error on idle client:", err.message);
+});
 
-db.exec(`
+// ── Schema ────────────────────────────────────────────────────────────────────
+// Runs once at startup. CREATE TABLE IF NOT EXISTS is idempotent, same as before.
+const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS users (
     id            TEXT PRIMARY KEY,
     email         TEXT UNIQUE,
@@ -32,7 +37,7 @@ db.exec(`
     role          TEXT NOT NULL CHECK(role IN ('patient','doctor','admin')),
     phone         TEXT,
     phone_verified INTEGER NOT NULL DEFAULT 0,
-    created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   CREATE TABLE IF NOT EXISTS hospitals (
@@ -45,7 +50,7 @@ db.exec(`
     gradient    TEXT NOT NULL DEFAULT 'from-slate-400 to-slate-600',
     photo_url   TEXT,
     is_free     INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   CREATE TABLE IF NOT EXISTS doctors (
@@ -69,7 +74,7 @@ db.exec(`
     education           TEXT,
     languages           TEXT,
     status_override     TEXT,
-    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   CREATE TABLE IF NOT EXISTS bookings (
@@ -92,7 +97,8 @@ db.exec(`
     razorpay_order_id   TEXT,
     razorpay_payment_id TEXT,
     refund_id           TEXT,
-    created_at          TEXT NOT NULL DEFAULT (datetime('now'))
+    close_reason        TEXT,
+    created_at          TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   CREATE TABLE IF NOT EXISTS token_states (
@@ -106,7 +112,7 @@ db.exec(`
     next_token      INTEGER,
     is_closed       INTEGER NOT NULL DEFAULT 0,
     cancelled_keys  TEXT NOT NULL DEFAULT '[]',
-    updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   CREATE TABLE IF NOT EXISTS otp_pending (
@@ -115,15 +121,15 @@ db.exec(`
     otp         TEXT NOT NULL,
     context     TEXT NOT NULL,
     data        TEXT,
-    expires_at  INTEGER NOT NULL,
+    expires_at  BIGINT NOT NULL,
     attempts    INTEGER NOT NULL DEFAULT 0,
-    created_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   CREATE TABLE IF NOT EXISTS fcm_tokens (
     token       TEXT PRIMARY KEY,
     patient_id  TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-    updated_at  TEXT NOT NULL DEFAULT (datetime('now'))
+    updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
   -- ── Indexes ───────────────────────────────────────────────────────────────
@@ -140,61 +146,53 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_users_phone          ON users(phone);
   CREATE INDEX IF NOT EXISTS idx_otp_phone            ON otp_pending(phone);
   CREATE INDEX IF NOT EXISTS idx_otp_expires          ON otp_pending(expires_at);
-`);
+`;
 
-// ── Safe migrations ───────────────────────────────────────────────────────────
-const safeAlter = (sql) => { try { db.prepare(sql).run(); } catch (_) {} };
-safeAlter("ALTER TABLE users ADD COLUMN phone TEXT");
-safeAlter("ALTER TABLE users ADD COLUMN phone_verified INTEGER NOT NULL DEFAULT 0");
-safeAlter("ALTER TABLE bookings ADD COLUMN razorpay_order_id TEXT");
-safeAlter("ALTER TABLE bookings ADD COLUMN razorpay_payment_id TEXT");
-safeAlter("ALTER TABLE bookings ADD COLUMN refund_id TEXT");
-safeAlter("ALTER TABLE doctors ADD COLUMN status_override TEXT");
-safeAlter("ALTER TABLE hospitals ADD COLUMN is_free INTEGER NOT NULL DEFAULT 0");
-safeAlter("ALTER TABLE doctors ADD COLUMN walk_in_interval INTEGER NOT NULL DEFAULT 5");
-safeAlter("ALTER TABLE bookings ADD COLUMN patient_age INTEGER");
-safeAlter("ALTER TABLE bookings ADD COLUMN close_reason TEXT");
+// Safe "add column if missing" migrations (Postgres supports IF NOT EXISTS
+// directly, unlike SQLite, so this is actually simpler than the old version).
+const MIGRATIONS = [
+  "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT",
+  "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS razorpay_order_id TEXT",
+  "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS razorpay_payment_id TEXT",
+  "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS refund_id TEXT",
+  "ALTER TABLE doctors ADD COLUMN IF NOT EXISTS status_override TEXT",
+  "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS is_free INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE doctors ADD COLUMN IF NOT EXISTS walk_in_interval INTEGER NOT NULL DEFAULT 5",
+  "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS patient_age INTEGER",
+  "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS close_reason TEXT",
+  "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS photo_data TEXT",
+];
 
-// ── Pre-compiled hot queries ──────────────────────────────────────────────────
-db.stmts = {
-  getTokenState: db.prepare("SELECT * FROM token_states WHERE session_id=?"),
-  updateTokenState: db.prepare(`
-    UPDATE token_states SET token_statuses=?, priority_slots=?,
-    current_token=?, next_token=?, is_closed=?, updated_at=datetime('now')
-    WHERE session_id=?
-  `),
-  getBookingsForSession: db.prepare(
-    "SELECT * FROM bookings WHERE session_id=? AND status!='cancelled' ORDER BY token_number ASC"
-  ),
-  countBookingsForSession: db.prepare(
-    "SELECT COUNT(*) as c FROM bookings WHERE session_id=? AND payment_done=1 AND status!='cancelled'"
-  ),
-  cleanExpiredOTPs: db.prepare("DELETE FROM otp_pending WHERE expires_at < ?"),
-};
+let ready = false;
+async function init() {
+  if (ready) return;
+  const client = await pool.connect();
+  try {
+    await client.query(SCHEMA_SQL);
+    for (const sql of MIGRATIONS) {
+      try {
+        await client.query(sql);
+      } catch (err) {
+        console.warn("[DB] migration skipped:", err.message);
+      }
+    }
+    ready = true;
+    console.log("✅  Database ready (Supabase Postgres)");
+  } finally {
+    client.release();
+  }
+}
 
 // ── Auto-clean expired OTPs every 10 minutes ─────────────────────────────────
-const otpCleanupInterval = setInterval(() => {
+const otpCleanupInterval = setInterval(async () => {
   try {
-    const result = db.stmts.cleanExpiredOTPs.run(Date.now());
-    if (result.changes > 0) console.log(`[DB] Cleaned ${result.changes} expired OTPs`);
+    const result = await pool.query("DELETE FROM otp_pending WHERE expires_at < $1", [Date.now()]);
+    if (result.rowCount > 0) console.log(`[DB] Cleaned ${result.rowCount} expired OTPs`);
   } catch (err) {
     console.error("[DB] OTP cleanup error:", err.message);
   }
 }, 10 * 60 * 1000);
 otpCleanupInterval.unref();
 
-// ── WAL checkpoint every 30 minutes to keep file size in check ───────────────
-const walCheckpointInterval = setInterval(() => {
-  try {
-    db.pragma("wal_checkpoint(PASSIVE)");
-  } catch (err) {
-    console.error("[DB] WAL checkpoint error:", err.message);
-  }
-}, 30 * 60 * 1000);
-walCheckpointInterval.unref();
-
-console.log("✅  Database ready:", path.resolve(DB_PATH));
-console.log("   WAL mode     :", db.pragma("journal_mode", { simple: true }));
-console.log("   Busy timeout :", db.pragma("busy_timeout",  { simple: true }), "ms");
-
-module.exports = db;
+module.exports = { pool, init };

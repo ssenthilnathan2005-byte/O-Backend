@@ -2,7 +2,7 @@
 const express  = require("express");
 const crypto   = require("crypto");
 const Razorpay = require("razorpay");
-const db       = require("../db/init");
+const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
 const { broadcast }   = require("../services/ws");
 const { sendBookingConfirmation } = require("../services/whatsapp");
@@ -63,24 +63,31 @@ router.post("/create-order", requireAuth, async (req, res) => {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date))
       return res.status(400).json({ error: "Invalid date format. Use YYYY-MM-DD." });
 
-    const doctor = db.prepare("SELECT * FROM doctors WHERE id=?").get(doctorId);
+    const { rows: doctorRows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [doctorId]);
+    const doctor = doctorRows[0];
     if (!doctor)   return res.status(404).json({ error: "Doctor not found." });
     if (!doctor.is_available)
       return res.status(409).json({ error: "Doctor is not available." });
 
-    const hospital  = db.prepare("SELECT name FROM hospitals WHERE id=?").get(doctor.hospital_id);
+    const { rows: hospitalRows } = await pool.query("SELECT name FROM hospitals WHERE id=$1", [doctor.hospital_id]);
+    const hospital  = hospitalRows[0];
     const sessionId = `${doctorId}_${date}_${session}`;
 
     // Check capacity
-    const count = db.stmts.countBookingsForSession.get(sessionId).c;
+    const { rows: countRows } = await pool.query(
+      "SELECT COUNT(*) as c FROM bookings WHERE session_id=$1 AND payment_done=1 AND status!='cancelled'",
+      [sessionId]
+    );
+    const count = Number(countRows[0].c);
     if (count >= doctor.tokens_per_session)
       return res.status(409).json({ error: "This session is fully booked." });
 
     // Check duplicate booking
-    const dup = db.prepare(
-      "SELECT id FROM bookings WHERE session_id=? AND patient_id=? AND status!='cancelled'"
-    ).get(sessionId, req.user.id);
-    if (dup) return res.status(409).json({ error: "You already have a booking in this session." });
+    const { rows: dupRows } = await pool.query(
+      "SELECT id FROM bookings WHERE session_id=$1 AND patient_id=$2 AND status!='cancelled'",
+      [sessionId, req.user.id]
+    );
+    if (dupRows[0]) return res.status(409).json({ error: "You already have a booking in this session." });
 
     const amountRupees = doctor.consultation_fee || doctor.price || 10;
     const amountPaise  = Math.round(amountRupees * 100);
@@ -137,9 +144,11 @@ router.post("/verify", requireAuth, async (req, res) => {
       return res.status(400).json({ error: "Missing payment verification fields." });
 
     // ── Idempotency — if booking already exists for this order, return it ────
-    const existingBooking = db.prepare(
-      "SELECT * FROM bookings WHERE razorpay_order_id=?"
-    ).get(razorpay_order_id);
+    const { rows: existingBookingRows } = await pool.query(
+      "SELECT * FROM bookings WHERE razorpay_order_id=$1",
+      [razorpay_order_id]
+    );
+    const existingBooking = existingBookingRows[0];
     if (existingBooking) {
       console.log(`[Razorpay] Duplicate verify for order ${razorpay_order_id} — returning existing booking`);
       return res.json({
@@ -185,16 +194,25 @@ router.post("/verify", requireAuth, async (req, res) => {
     if (patientId !== req.user.id)
       return res.status(403).json({ error: "Payment does not belong to this account." });
 
-    const doctor  = db.prepare("SELECT * FROM doctors WHERE id=?").get(doctorId);
-    const patient = db.prepare("SELECT * FROM users WHERE id=?").get(req.user.id);
+    const { rows: doctorRows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [doctorId]);
+    const { rows: patientRows } = await pool.query("SELECT * FROM users WHERE id=$1", [req.user.id]);
+    const doctor  = doctorRows[0];
+    const patient = patientRows[0];
     if (!doctor || !patient)
       return res.status(404).json({ error: "Doctor or patient not found." });
 
     // ── Create booking in a transaction (race-condition safe) ─────────────────
     let booking;
-    db.transaction(() => {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
       // Re-check capacity
-      const freshCount = db.stmts.countBookingsForSession.get(sessionId).c;
+      const { rows: freshCountRows } = await client.query(
+        "SELECT COUNT(*) as c FROM bookings WHERE session_id=$1 AND payment_done=1 AND status!='cancelled'",
+        [sessionId]
+      );
+      const freshCount = Number(freshCountRows[0].c);
       if (freshCount >= doctor.tokens_per_session)
         throw Object.assign(
           new Error("Session became fully booked during payment. You will be refunded within 5-7 business days."),
@@ -202,48 +220,68 @@ router.post("/verify", requireAuth, async (req, res) => {
         );
 
       // Re-check duplicate
-      const dup = db.prepare(
-        "SELECT id FROM bookings WHERE session_id=? AND patient_id=? AND status!='cancelled'"
-      ).get(sessionId, req.user.id);
-      if (dup)
+      const { rows: dupRows } = await client.query(
+        "SELECT id FROM bookings WHERE session_id=$1 AND patient_id=$2 AND status!='cancelled'",
+        [sessionId, req.user.id]
+      );
+      if (dupRows[0])
         throw Object.assign(new Error("You already have a booking in this session."), { status: 409 });
 
       const tokenNumber = freshCount + 1;
       const bookingId   = `b_${Date.now()}_${Math.random().toString(36).slice(2,7)}`;
 
-      db.prepare(`
-        INSERT INTO bookings
+      await client.query(
+        `INSERT INTO bookings
           (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name,
            date, session, token_number, session_id, payment_done, status,
            phone, complaint, razorpay_order_id, razorpay_payment_id, patient_age)
-        VALUES (?,?,?,?,?,?,?,?,?,?,1,'confirmed',?,?,?,?,?)
-      `).run(
-        bookingId, req.user.id, (submittedName || patient.name),
-        doctorId, doctorName || doctor.name, hospitalName || "",
-        date, session, tokenNumber, sessionId,
-        phoneValidation.phone, complaint,
-        razorpay_order_id, razorpay_payment_id,
-        patientAge !== "" && patientAge != null ? Number(patientAge) : null
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,$15)`,
+        [
+          bookingId, req.user.id, (submittedName || patient.name),
+          doctorId, doctorName || doctor.name, hospitalName || "",
+          date, session, tokenNumber, sessionId,
+          phoneValidation.phone, complaint,
+          razorpay_order_id, razorpay_payment_id,
+          patientAge !== "" && patientAge != null ? Number(patientAge) : null,
+        ]
       );
 
       // Update token state
-      const existing = db.stmts.getTokenState.get(sessionId);
+      const { rows: existingRows } = await client.query(
+        "SELECT * FROM token_states WHERE session_id=$1",
+        [sessionId]
+      );
+      const existing = existingRows[0];
       if (existing) {
         const statuses = JSON.parse(existing.token_statuses || "{}");
         statuses[tokenNumber] = "red";
-        db.stmts.updateTokenState.run(
-          JSON.stringify(statuses), existing.priority_slots,
-          existing.current_token, existing.next_token, existing.is_closed, sessionId
+        await client.query(
+          `UPDATE token_states SET token_statuses=$1, priority_slots=$2,
+           current_token=$3, next_token=$4, is_closed=$5, updated_at=now()
+           WHERE session_id=$6`,
+          [
+            JSON.stringify(statuses), existing.priority_slots,
+            existing.current_token, existing.next_token, existing.is_closed, sessionId,
+          ]
         );
       } else {
-        db.prepare(
-          "INSERT INTO token_states (session_id, doctor_id, date, session, token_statuses) VALUES (?,?,?,?,?)"
-        ).run(sessionId, doctorId, date, session, JSON.stringify({ [tokenNumber]: "red" }));
+        await client.query(
+          "INSERT INTO token_states (session_id, doctor_id, date, session, token_statuses) VALUES ($1,$2,$3,$4,$5)",
+          [sessionId, doctorId, date, session, JSON.stringify({ [tokenNumber]: "red" })]
+        );
       }
 
-      booking = db.prepare("SELECT * FROM bookings WHERE id=?").get(bookingId);
+      const { rows: bookingRows } = await client.query("SELECT * FROM bookings WHERE id=$1", [bookingId]);
+      booking = bookingRows[0];
       console.log(`[Razorpay] Booking confirmed: ${bookingId} token ${tokenNumber} order ${razorpay_order_id}`);
-    })();
+
+      await client.query("COMMIT");
+    } catch (txErr) {
+      await client.query("ROLLBACK");
+      throw txErr;
+    } finally {
+      client.release();
+    }
 
     res.json({ success: true, booking: formatBooking(booking) });
 
@@ -288,13 +326,14 @@ function formatBooking(b) {
 async function refundBooking(bookingId) {
   if (!razorpay) { console.warn("[Refund] Razorpay not configured", bookingId); return; }
   try {
-    const booking = db.prepare("SELECT * FROM bookings WHERE id=?").get(bookingId);
+    const { rows } = await pool.query("SELECT * FROM bookings WHERE id=$1", [bookingId]);
+    const booking = rows[0];
     if (!booking) { console.warn("[Refund] Booking not found:", bookingId); return; }
     if (!booking.razorpay_payment_id) { console.warn("[Refund] No payment ID:", bookingId); return; }
     if (booking.refund_id) { console.warn("[Refund] Already refunded:", bookingId); return; }
     const payment = await razorpayWithRetry(() => razorpay.payments.fetch(booking.razorpay_payment_id));
     const refund = await razorpayWithRetry(() => razorpay.payments.refund(booking.razorpay_payment_id, { amount: payment.amount, speed: "optimum", notes: { bookingId, reason: "Session cancelled or patient unavailable" } }));
-    db.prepare("UPDATE bookings SET refund_id=? WHERE id=?").run(refund.id, bookingId);
+    await pool.query("UPDATE bookings SET refund_id=$1 WHERE id=$2", [refund.id, bookingId]);
     console.log("[Refund] Refunded booking", bookingId, "refund ID:", refund.id);
   } catch(err) {
     console.error("[Refund] Failed for booking", bookingId, err.message);

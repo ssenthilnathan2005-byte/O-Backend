@@ -2,20 +2,29 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
-const os = require("node:os");
-const path = require("node:path");
-const fs = require("node:fs");
 const express = require("express");
 const request = require("supertest");
 const jwt = require("jsonwebtoken");
 
-const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "obooking-phone-"));
-process.env.DB_PATH = path.join(tempDir, "test.db");
-process.env.JWT_SECRET = "test_secret";
-process.env.RAZORPAY_KEY_ID = "rzp_test_key";
-process.env.RAZORPAY_KEY_SECRET = "rzp_test_secret";
+// ── Postgres test setup ───────────────────────────────────────────────────────
+// Unlike the old SQLite version, we can't spin up a throwaway temp-file DB per
+// test run — Postgres needs a real server to connect to. Point this at a
+// *separate* Supabase project (or a local/test schema) so tests never touch
+// production data. Falls back to DATABASE_URL if no dedicated test DB is set.
+process.env.DATABASE_URL = process.env.TEST_DATABASE_URL || process.env.DATABASE_URL;
+process.env.JWT_SECRET = process.env.JWT_SECRET || "test_secret";
+process.env.RAZORPAY_KEY_ID = process.env.RAZORPAY_KEY_ID || "rzp_test_key";
+process.env.RAZORPAY_KEY_SECRET = process.env.RAZORPAY_KEY_SECRET || "rzp_test_secret";
 
-const db = require("../src/db/init");
+if (!process.env.DATABASE_URL) {
+  console.error(
+    "[test] No DATABASE_URL / TEST_DATABASE_URL set. Point this at a test " +
+    "Supabase/Postgres database before running tests — see README."
+  );
+  process.exit(1);
+}
+
+const { pool, init } = require("../src/db/init");
 const bookingsRouter = require("../src/routes/bookings");
 const paymentsRouter = require("../src/routes/payments");
 
@@ -32,40 +41,49 @@ function authHeader() {
   return `Bearer ${token}`;
 }
 
-function seedBaseData() {
-  db.prepare("DELETE FROM token_states").run();
-  db.prepare("DELETE FROM bookings").run();
-  db.prepare("DELETE FROM doctors").run();
-  db.prepare("DELETE FROM hospitals").run();
-  db.prepare("DELETE FROM users").run();
+async function seedBaseData() {
+  await pool.query("DELETE FROM token_states");
+  await pool.query("DELETE FROM bookings");
+  await pool.query("DELETE FROM doctors");
+  await pool.query("DELETE FROM hospitals");
+  await pool.query("DELETE FROM users");
 
-  db.prepare(
-    "INSERT INTO users (id, name, role, password) VALUES (?, ?, 'patient', ?)"
-  ).run("p1", "Patient One", "hash");
+  await pool.query(
+    "INSERT INTO users (id, name, role, password) VALUES ($1, $2, 'patient', $3)",
+    ["p1", "Patient One", "hash"]
+  );
 
-  db.prepare(
-    "INSERT INTO hospitals (id, name, area, is_free) VALUES (?, ?, ?, 1)"
-  ).run("h_free", "Free Hospital", "Central");
+  await pool.query(
+    "INSERT INTO hospitals (id, name, area, is_free) VALUES ($1, $2, $3, 1)",
+    ["h_free", "Free Hospital", "Central"]
+  );
 
-  db.prepare(
-    "INSERT INTO hospitals (id, name, area, is_free) VALUES (?, ?, ?, 0)"
-  ).run("h_paid", "Paid Hospital", "Central");
+  await pool.query(
+    "INSERT INTO hospitals (id, name, area, is_free) VALUES ($1, $2, $3, 0)",
+    ["h_paid", "Paid Hospital", "Central"]
+  );
 
-  db.prepare(`
-    INSERT INTO doctors
+  await pool.query(
+    `INSERT INTO doctors
       (id, hospital_id, code, name, specialty, consultation_fee, tokens_per_session, is_available)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-  `).run("d_free", "h_free", "DOC-FREE", "Dr Free", "General", 100, 20);
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 1)`,
+    ["d_free", "h_free", "DOC-FREE", "Dr Free", "General", 100, 20]
+  );
 
-  db.prepare(`
-    INSERT INTO doctors
+  await pool.query(
+    `INSERT INTO doctors
       (id, hospital_id, code, name, specialty, consultation_fee, tokens_per_session, is_available)
-    VALUES (?, ?, ?, ?, ?, ?, ?, 1)
-  `).run("d_paid", "h_paid", "DOC-PAID", "Dr Paid", "General", 200, 20);
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 1)`,
+    ["d_paid", "h_paid", "DOC-PAID", "Dr Paid", "General", 200, 20]
+  );
 }
 
-test.beforeEach(() => {
-  seedBaseData();
+test.before(async () => {
+  await init(); // ensure schema/tables exist on the test database
+});
+
+test.beforeEach(async () => {
+  await seedBaseData();
 });
 
 test("booking create rejects missing phone", async () => {
@@ -166,6 +184,6 @@ test("payment create-order rejects missing or invalid phone", async () => {
   assert.equal(invalidPhoneRes.body.error, "Invalid phone number. Use a valid 10-digit Indian mobile number.");
 });
 
-test.after(() => {
-  db.close();
+test.after(async () => {
+  await pool.end();
 });

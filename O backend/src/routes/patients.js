@@ -1,15 +1,15 @@
 "use strict";
 const express = require("express");
-const db      = require("../db/init");
+const { pool } = require("../db/init");
 const { requireAdmin } = require("../middleware/auth");
 
 const router = express.Router();
 
-router.get("/", requireAdmin, (req, res) => {
+router.get("/", requireAdmin, async (req, res) => {
   try {
-    const rows = db.prepare(
+    const { rows } = await pool.query(
       "SELECT id, name, email, created_at FROM users WHERE role='patient' ORDER BY created_at DESC LIMIT 500"
-    ).all();
+    );
     res.json(rows.map(r => ({ id: r.id, name: r.name, email: r.email || "", createdAt: r.created_at })));
   } catch (err) {
     console.error("[patients GET /]", err.message);

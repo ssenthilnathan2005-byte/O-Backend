@@ -10,7 +10,7 @@ const compression = require("compression");
 const path       = require("path");
 const fs         = require("fs");
 
-const db = require("./db/init");
+const { pool, init } = require("./db/init");
 const { setupWebSocket } = require("./services/ws");
 const { startScheduler, expireStaleBookings } = require("./services/scheduler");
 
@@ -21,17 +21,6 @@ process.on("uncaughtException", (err) => {
 });
 process.on("unhandledRejection", (reason) => {
   console.error("[CRASH] unhandledRejection:", reason);
-});
-
-// ── Graceful shutdown ─────────────────────────────────────────────────────────
-process.on("SIGTERM", () => {
-  console.log("[SHUTDOWN] SIGTERM received — closing server gracefully");
-  server.close(() => {
-    console.log("[SHUTDOWN] HTTP server closed");
-    db.close();
-    process.exit(0);
-  });
-  setTimeout(() => process.exit(1), 10000); // force exit after 10s
 });
 
 const authRoutes     = require("./routes/auth");
@@ -150,13 +139,19 @@ app.use("/api/payments",  paymentRoutes);
 app.use("/api/push", pushRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
-app.get("/api/health", (_req, res) => {
+app.get("/api/health", async (_req, res) => {
   try {
+    const [users, hospitals, doctors, bookings] = await Promise.all([
+      pool.query("SELECT COUNT(*) as c FROM users"),
+      pool.query("SELECT COUNT(*) as c FROM hospitals"),
+      pool.query("SELECT COUNT(*) as c FROM doctors"),
+      pool.query("SELECT COUNT(*) as c FROM bookings"),
+    ]);
     const counts = {
-      users:     db.prepare("SELECT COUNT(*) as c FROM users").get().c,
-      hospitals: db.prepare("SELECT COUNT(*) as c FROM hospitals").get().c,
-      doctors:   db.prepare("SELECT COUNT(*) as c FROM doctors").get().c,
-      bookings:  db.prepare("SELECT COUNT(*) as c FROM bookings").get().c,
+      users:     Number(users.rows[0].c),
+      hospitals: Number(hospitals.rows[0].c),
+      doctors:   Number(doctors.rows[0].c),
+      bookings:  Number(bookings.rows[0].c),
     };
     res.json({ status: "ok", timestamp: new Date().toISOString(), counts, uptime: process.uptime() });
   } catch (err) {
@@ -179,20 +174,41 @@ app.use((err, _req, res, _next) => {
 
 // ── HTTP + WebSocket server ───────────────────────────────────────────────────
 const server = http.createServer(app);
-setupWebSocket(server);
-startScheduler();
-void expireStaleBookings(); // catch up immediately in case the server was down at midnight
 
-server.maxConnections  = 1000;
-server.keepAliveTimeout = 65000;
-server.headersTimeout   = 66000;
+// ── Graceful shutdown ─────────────────────────────────────────────────────────
+process.on("SIGTERM", () => {
+  console.log("[SHUTDOWN] SIGTERM received — closing server gracefully");
+  server.close(async () => {
+    console.log("[SHUTDOWN] HTTP server closed");
+    await pool.end();
+    process.exit(0);
+  });
+  setTimeout(() => process.exit(1), 10000); // force exit after 10s
+});
 
-server.listen(PORT, "0.0.0.0", () => {
-  console.log(`\n🚀  Doctor Booked API  →  http://0.0.0.0:${PORT}`);
-  console.log(`📡  WebSocket          →  ws://0.0.0.0:${PORT}/ws?session=ID`);
-  console.log(`🩺  Health             →  http://0.0.0.0:${PORT}/api/health\n`);
+// ── Startup: connect + run schema/migrations before accepting traffic ────────
+async function start() {
+  await init(); // creates tables/migrations on the Supabase Postgres DB
+
+  setupWebSocket(server);
+  startScheduler();
+  void expireStaleBookings(); // catch up immediately in case the server was down at midnight
+
+  server.maxConnections  = 1000;
+  server.keepAliveTimeout = 65000;
+  server.headersTimeout   = 66000;
+
+  server.listen(PORT, "0.0.0.0", () => {
+    console.log(`\n🚀  Doctor Booked API  →  http://0.0.0.0:${PORT}`);
+    console.log(`📡  WebSocket          →  ws://0.0.0.0:${PORT}/ws?session=ID`);
+    console.log(`🩺  Health             →  http://0.0.0.0:${PORT}/api/health\n`);
+  });
+}
+
+start().catch((err) => {
+  console.error("[FATAL] Failed to start server:", err.message);
+  process.exit(1);
 });
 
 // Export for graceful shutdown reference
-const serverRef = server;
-module.exports = serverRef;
+module.exports = server;

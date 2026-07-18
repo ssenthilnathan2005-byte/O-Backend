@@ -5,7 +5,7 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { body, validationResult } = require("express-validator");
 const { OAuth2Client } = require("google-auth-library");
-const db = require("../db/init");
+const { pool } = require("../db/init");
 const { sendOTP, generateOTP, normalisePhone, IS_DEV } = require("../services/sms");
 const { Resend } = require("resend");
 
@@ -37,8 +37,8 @@ function validate(req, res) {
   return true;
 }
 
-function cleanOTPs() {
-  db.prepare("DELETE FROM otp_pending WHERE expires_at < ?").run(Date.now());
+async function cleanOTPs() {
+  await pool.query("DELETE FROM otp_pending WHERE expires_at < $1", [Date.now()]);
 }
 
 function isLikelyEmail(value) {
@@ -122,16 +122,21 @@ router.post(
           return res.status(400).json({ error: "Please enter a valid 10-digit Indian mobile number." });
         }
         const tDbStart = Date.now();
-        const exists = db.prepare("SELECT id FROM users WHERE phone=? AND role='patient'").get(normPhone);
-        if (exists) {
+        const { rows: existsRows } = await pool.query(
+          "SELECT id FROM users WHERE phone=$1 AND role='patient'",
+          [normPhone]
+        );
+        if (existsRows[0]) {
           return res.status(409).json({ error: "Phone number already registered. Please log in." });
         }
         const id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-        db.prepare(
+        await pool.query(
           `INSERT INTO users (id, name, password, role, phone, phone_verified)
-           VALUES (?, ?, ?, 'patient', ?, 1)`
-        ).run(id, name, hash, normPhone);
-        const user = db.prepare("SELECT * FROM users WHERE id=?").get(id);
+           VALUES ($1, $2, $3, 'patient', $4, 1)`,
+          [id, name, hash, normPhone]
+        );
+        const { rows: userRows } = await pool.query("SELECT * FROM users WHERE id=$1", [id]);
+        const user = userRows[0];
         console.log(`[TIMING signup] db work: ${Date.now() - tDbStart}ms | TOTAL: ${Date.now() - t0}ms`);
         return res.json({
           token: sign({ id: user.id, name: user.name, phone: normPhone, role: "patient" }),
@@ -145,16 +150,21 @@ router.post(
         return res.status(400).json({ error: "Please use a Gmail address." });
       }
       const tDbStart = Date.now();
-      const exists = db.prepare("SELECT id FROM users WHERE email=? AND role='patient'").get(rawEmail);
-      if (exists) {
+      const { rows: existsRows } = await pool.query(
+        "SELECT id FROM users WHERE email=$1 AND role='patient'",
+        [rawEmail]
+      );
+      if (existsRows[0]) {
         return res.status(409).json({ error: "Email already registered. Please log in." });
       }
       const id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
-      db.prepare(
+      await pool.query(
         `INSERT INTO users (id, email, name, password, role, phone_verified)
-         VALUES (?, ?, ?, ?, 'patient', 0)`
-      ).run(id, rawEmail, name, hash);
-      const user = db.prepare("SELECT * FROM users WHERE id=?").get(id);
+         VALUES ($1, $2, $3, $4, 'patient', 0)`,
+        [id, rawEmail, name, hash]
+      );
+      const { rows: userRows } = await pool.query("SELECT * FROM users WHERE id=$1", [id]);
+      const user = userRows[0];
       console.log(`[TIMING signup] db work: ${Date.now() - tDbStart}ms | TOTAL: ${Date.now() - t0}ms`);
       return res.json({
         token: sign({ id: user.id, email: user.email, name: user.name, role: "patient" }),
@@ -193,15 +203,19 @@ router.post(
       let user = null;
 
       if (isLikelyEmail(identifier)) {
-        user = db
-          .prepare("SELECT * FROM users WHERE email=? AND role='patient'")
-          .get(identifier.toLowerCase());
+        const { rows } = await pool.query(
+          "SELECT * FROM users WHERE email=$1 AND role='patient'",
+          [identifier.toLowerCase()]
+        );
+        user = rows[0] || null;
       } else {
         try {
           const normPhone = normalisePhone(identifier);
-          user = db
-            .prepare("SELECT * FROM users WHERE phone=? AND role='patient'")
-            .get(normPhone);
+          const { rows } = await pool.query(
+            "SELECT * FROM users WHERE phone=$1 AND role='patient'",
+            [normPhone]
+          );
+          user = rows[0] || null;
         } catch {
           user = null;
         }
@@ -233,34 +247,35 @@ router.post(
 // ── Verify OTP ────────────────────────────────────────────────────────────────
 router.post("/patient/verify-otp", async (req, res) => {
   try {
-    cleanOTPs();
+    await cleanOTPs();
 
     const { otpId, otp } = req.body;
     if (!otpId || !otp) {
       return res.status(400).json({ error: "otpId and otp are required." });
     }
 
-    const pending = db.prepare("SELECT * FROM otp_pending WHERE id=?").get(otpId);
+    const { rows: pendingRows } = await pool.query("SELECT * FROM otp_pending WHERE id=$1", [otpId]);
+    const pending = pendingRows[0];
     if (!pending) {
       return res
         .status(400)
         .json({ error: "OTP session not found or expired. Please request a new OTP." });
     }
 
-    if (Date.now() > pending.expires_at) {
-      db.prepare("DELETE FROM otp_pending WHERE id=?").run(otpId);
+    if (Date.now() > Number(pending.expires_at)) {
+      await pool.query("DELETE FROM otp_pending WHERE id=$1", [otpId]);
       return res.status(400).json({ error: "OTP has expired. Please request a new one." });
     }
 
     if (pending.attempts >= 5) {
-      db.prepare("DELETE FROM otp_pending WHERE id=?").run(otpId);
+      await pool.query("DELETE FROM otp_pending WHERE id=$1", [otpId]);
       return res
         .status(429)
         .json({ error: "Too many wrong attempts. Please request a new OTP." });
     }
 
     if (pending.otp !== String(otp).trim()) {
-      db.prepare("UPDATE otp_pending SET attempts=attempts+1 WHERE id=?").run(otpId);
+      await pool.query("UPDATE otp_pending SET attempts=attempts+1 WHERE id=$1", [otpId]);
       const left = 5 - (pending.attempts + 1);
       return res
         .status(400)
@@ -268,17 +283,19 @@ router.post("/patient/verify-otp", async (req, res) => {
     }
 
     const data = JSON.parse(pending.data || "{}");
-    db.prepare("DELETE FROM otp_pending WHERE id=?").run(otpId);
+    await pool.query("DELETE FROM otp_pending WHERE id=$1", [otpId]);
 
     if (pending.context === "signup") {
       const { name, hash } = data;
       const id = `p_${pending.phone}`;
-      db.prepare(
+      await pool.query(
         `INSERT INTO users (id, email, name, password, role, phone, phone_verified)
-         VALUES (?, NULL, ?, ?, 'patient', ?, 1)`
-      ).run(id, name, hash, pending.phone);
+         VALUES ($1, NULL, $2, $3, 'patient', $4, 1)`,
+        [id, name, hash, pending.phone]
+      );
 
-      const user = db.prepare("SELECT * FROM users WHERE id=?").get(id);
+      const { rows: userRows } = await pool.query("SELECT * FROM users WHERE id=$1", [id]);
+      const user = userRows[0];
       return res.json({
         token: sign({ id: user.id, name: user.name, phone: pending.phone, role: "patient" }),
         user: { id: user.id, name: user.name, phone: pending.phone, role: "patient" },
@@ -286,7 +303,8 @@ router.post("/patient/verify-otp", async (req, res) => {
     }
 
     if (pending.context === "login") {
-      const user = db.prepare("SELECT * FROM users WHERE id=?").get(data.userId);
+      const { rows: userRows } = await pool.query("SELECT * FROM users WHERE id=$1", [data.userId]);
+      const user = userRows[0];
       if (!user) return res.status(404).json({ error: "Account not found." });
 
       return res.json({
@@ -296,12 +314,13 @@ router.post("/patient/verify-otp", async (req, res) => {
     }
 
     if (pending.context === "google") {
-      const user = db.prepare("SELECT * FROM users WHERE id=?").get(data.userId);
+      const { rows: userRows } = await pool.query("SELECT * FROM users WHERE id=$1", [data.userId]);
+      const user = userRows[0];
       if (!user) return res.status(404).json({ error: "Account not found." });
 
-      db.prepare("UPDATE users SET phone=?, phone_verified=1 WHERE id=?").run(
-        pending.phone,
-        user.id
+      await pool.query(
+        "UPDATE users SET phone=$1, phone_verified=1 WHERE id=$2",
+        [pending.phone, user.id]
       );
 
       return res.json({
@@ -321,16 +340,18 @@ router.post("/patient/verify-otp", async (req, res) => {
 router.post("/patient/resend-otp", async (req, res) => {
   try {
     const { otpId } = req.body;
-    const pending = db.prepare("SELECT * FROM otp_pending WHERE id=?").get(otpId);
+    const { rows: pendingRows } = await pool.query("SELECT * FROM otp_pending WHERE id=$1", [otpId]);
+    const pending = pendingRows[0];
     if (!pending) {
       return res.status(400).json({ error: "OTP session not found. Please start over." });
     }
 
     const otp = generateOTP();
     const expiresAt = Date.now() + 10 * 60 * 1000;
-    db.prepare(
-      "UPDATE otp_pending SET otp=?, expires_at=?, attempts=0 WHERE id=?"
-    ).run(otp, expiresAt, otpId);
+    await pool.query(
+      "UPDATE otp_pending SET otp=$1, expires_at=$2, attempts=0 WHERE id=$3",
+      [otp, expiresAt, otpId]
+    );
 
     await sendOTP(pending.phone, otp);
 
@@ -369,19 +390,23 @@ router.post("/patient/google", async (req, res) => {
     const name = payload.name || email.split("@")[0];
     const googleId = String(payload.sub || "");
 
-    let user = db
-      .prepare("SELECT * FROM users WHERE email=? AND role='patient'")
-      .get(email);
+    let { rows: userRows } = await pool.query(
+      "SELECT * FROM users WHERE email=$1 AND role='patient'",
+      [email]
+    );
+    let user = userRows[0];
 
     if (!user) {
       const id = `p_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
       const hash = await bcrypt.hash(`google_${googleId}_${Date.now()}`, 10);
-      db.prepare(
+      await pool.query(
         `INSERT INTO users (id, email, name, password, role, phone_verified)
-         VALUES (?, ?, ?, ?, 'patient', 0)`
-      ).run(id, email, name, hash);
+         VALUES ($1, $2, $3, $4, 'patient', 0)`,
+        [id, email, name, hash]
+      );
 
-      user = db.prepare("SELECT * FROM users WHERE id=?").get(id);
+      const { rows: newUserRows } = await pool.query("SELECT * FROM users WHERE id=$1", [id]);
+      user = newUserRows[0];
     }
 
     return res.json({
@@ -409,11 +434,12 @@ router.post("/patient/google-phone-otp", async (req, res) => {
     }
 
     const normPhone = normalisePhone(phone);
-    const taken = db
-      .prepare("SELECT id FROM users WHERE phone=? AND id!=?")
-      .get(normPhone, userId);
+    const { rows: takenRows } = await pool.query(
+      "SELECT id FROM users WHERE phone=$1 AND id!=$2",
+      [normPhone, userId]
+    );
 
-    if (taken) {
+    if (takenRows[0]) {
       return res
         .status(409)
         .json({ error: "This phone is already registered to another account." });
@@ -423,11 +449,12 @@ router.post("/patient/google-phone-otp", async (req, res) => {
     const otpId = `otp_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
     const expiresAt = Date.now() + 10 * 60 * 1000;
 
-    db.prepare("DELETE FROM otp_pending WHERE phone=? AND context='google'").run(normPhone);
-    db.prepare(
+    await pool.query("DELETE FROM otp_pending WHERE phone=$1 AND context='google'", [normPhone]);
+    await pool.query(
       `INSERT INTO otp_pending (id, phone, otp, context, data, expires_at)
-       VALUES (?,?,?,'google',?,?)`
-    ).run(otpId, normPhone, otp, JSON.stringify({ userId }), expiresAt);
+       VALUES ($1,$2,$3,'google',$4,$5)`,
+      [otpId, normPhone, otp, JSON.stringify({ userId }), expiresAt]
+    );
 
     await sendOTP(normPhone, otp);
 
@@ -449,13 +476,15 @@ router.post("/patient/google-phone-otp", async (req, res) => {
 router.post(
   "/doctor/login",
   [body("code").trim().notEmpty(), body("phone").trim().notEmpty()],
-  (req, res) => {
+  async (req, res) => {
     if (!validate(req, res)) return;
     try {
       const { code, phone } = req.body;
-      const doctor = db
-        .prepare("SELECT * FROM doctors WHERE UPPER(code)=UPPER(?)")
-        .get(String(code || "").trim());
+      const { rows: doctorRows } = await pool.query(
+        "SELECT * FROM doctors WHERE UPPER(code)=UPPER($1)",
+        [String(code || "").trim()]
+      );
+      const doctor = doctorRows[0];
 
       if (!doctor) {
         return res.status(401).json({ error: "Invalid access code. Please check with your admin." });
@@ -504,7 +533,8 @@ router.post(
         return res.json({ token: sign(payload), user: payload });
       }
 
-      const admin = db.prepare("SELECT * FROM users WHERE role='admin' LIMIT 1").get();
+      const { rows: adminRows } = await pool.query("SELECT * FROM users WHERE role='admin' LIMIT 1");
+      const admin = adminRows[0];
       if (!admin || !(await bcrypt.compare(password, admin.password))) {
         return res.status(401).json({ error: "Invalid admin password" });
       }
@@ -542,9 +572,11 @@ router.post(
 
     try {
       const email = String(req.body.email || "").trim().toLowerCase();
-      const user = db
-        .prepare("SELECT * FROM users WHERE email=? AND role='patient'")
-        .get(email);
+      const { rows: userRows } = await pool.query(
+        "SELECT * FROM users WHERE email=$1 AND role='patient'",
+        [email]
+      );
+      const user = userRows[0];
 
       // Always return success to avoid account enumeration.
       if (!user) {
@@ -604,7 +636,7 @@ router.post("/patient/reset-password-by-token", async (req, res) => {
     }
 
     const hash = await bcrypt.hash(newPassword, 10);
-    db.prepare("UPDATE users SET password=? WHERE id=?").run(hash, decoded.id);
+    await pool.query("UPDATE users SET password=$1 WHERE id=$2", [hash, decoded.id]);
 
     return res.json({
       success: true,
@@ -631,27 +663,29 @@ router.post("/patient/reset-password", async (req, res) => {
       return res.status(400).json({ error: "Password must be at least 6 characters." });
     }
 
-    const pending = db
-      .prepare("SELECT * FROM otp_pending WHERE id=? AND context='reset'")
-      .get(otpId);
+    const { rows: pendingRows } = await pool.query(
+      "SELECT * FROM otp_pending WHERE id=$1 AND context='reset'",
+      [otpId]
+    );
+    const pending = pendingRows[0];
     if (!pending) {
       return res.status(400).json({ error: "OTP session not found or expired." });
     }
 
-    if (Date.now() > pending.expires_at) {
-      db.prepare("DELETE FROM otp_pending WHERE id=?").run(otpId);
+    if (Date.now() > Number(pending.expires_at)) {
+      await pool.query("DELETE FROM otp_pending WHERE id=$1", [otpId]);
       return res.status(400).json({ error: "OTP has expired. Please request a new one." });
     }
 
     if (pending.attempts >= 5) {
-      db.prepare("DELETE FROM otp_pending WHERE id=?").run(otpId);
+      await pool.query("DELETE FROM otp_pending WHERE id=$1", [otpId]);
       return res
         .status(429)
         .json({ error: "Too many wrong attempts. Please request a new OTP." });
     }
 
     if (pending.otp !== String(otp).trim()) {
-      db.prepare("UPDATE otp_pending SET attempts=attempts+1 WHERE id=?").run(otpId);
+      await pool.query("UPDATE otp_pending SET attempts=attempts+1 WHERE id=$1", [otpId]);
       const left = 5 - (pending.attempts + 1);
       return res
         .status(400)
@@ -659,10 +693,10 @@ router.post("/patient/reset-password", async (req, res) => {
     }
 
     const data = JSON.parse(pending.data || "{}");
-    db.prepare("DELETE FROM otp_pending WHERE id=?").run(otpId);
+    await pool.query("DELETE FROM otp_pending WHERE id=$1", [otpId]);
 
     const hash = await bcrypt.hash(String(newPassword), 10);
-    db.prepare("UPDATE users SET password=? WHERE id=?").run(hash, data.userId);
+    await pool.query("UPDATE users SET password=$1 WHERE id=$2", [hash, data.userId]);
 
     return res.json({
       success: true,

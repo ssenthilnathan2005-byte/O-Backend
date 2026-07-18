@@ -1,34 +1,36 @@
 "use strict";
 const cron = require("node-cron");
-const db = require("../db/init");
+const { pool } = require("../db/init");
 const { refundBooking } = require("../routes/payments");
 
-// ── Fast, synchronous, no network calls. Finds all confirmed bookings whose
-// date has passed and flips them to 'unvisited' (so they move from "To Visit"
-// to "Visited" with an unvisited marker in the doctor's Live Tokens panel).
+// ── Fast, no network calls. Finds all confirmed bookings whose date has
+// passed and flips them to 'unvisited' (so they move from "To Visit" to
+// "Visited" with an unvisited marker in the doctor's Live Tokens panel).
 // Returns the rows that were just expired, for refund processing by the
 // caller. Safe to call on every request — only touches rows still in
 // 'confirmed' status, so already-processed bookings are a cheap no-op.
-function markStaleConfirmedAsUnvisited() {
+async function markStaleConfirmedAsUnvisited() {
   const today = new Date().toISOString().split("T")[0]; // YYYY-MM-DD
 
-  const expiredBookings = db.prepare(`
-    SELECT id, session_id, date, patient_name, token_number
-    FROM bookings
-    WHERE status = 'confirmed'
-      AND payment_done = 1
-      AND date < ?
-  `).all(today);
+  const { rows: expiredBookings } = await pool.query(
+    `SELECT id, session_id, date, patient_name, token_number
+     FROM bookings
+     WHERE status = 'confirmed'
+       AND payment_done = 1
+       AND date < $1`,
+    [today]
+  );
 
   if (expiredBookings.length === 0) return [];
 
-  db.prepare(`
-    UPDATE bookings
-    SET status = 'unvisited'
-    WHERE status = 'confirmed'
-      AND payment_done = 1
-      AND date < ?
-  `).run(today);
+  await pool.query(
+    `UPDATE bookings
+     SET status = 'unvisited'
+     WHERE status = 'confirmed'
+       AND payment_done = 1
+       AND date < $1`,
+    [today]
+  );
 
   console.log(`[Scheduler] Marked ${expiredBookings.length} stale booking(s) as unvisited.`);
   return expiredBookings;
@@ -49,7 +51,7 @@ async function refundExpiredBookings(expiredBookings) {
 // ── Combined helper used by the midnight cron and on server startup ──────────
 async function expireStaleBookings() {
   try {
-    const expired = markStaleConfirmedAsUnvisited();
+    const expired = await markStaleConfirmedAsUnvisited();
     if (expired.length === 0) return;
     console.log(`[Scheduler] Found ${expired.length} expired booking(s) — processing refunds...`);
     await refundExpiredBookings(expired);

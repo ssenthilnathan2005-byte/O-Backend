@@ -1,5 +1,5 @@
 "use strict";
-const db = require("../db/init");
+const { pool } = require("../db/init");
 let messaging = null;
 const IS_DEV = !process.env.FIREBASE_SERVICE_ACCOUNT;
 if (!IS_DEV) {
@@ -22,16 +22,16 @@ if (!IS_DEV) {
 } else {
   console.warn("[push] FIREBASE_SERVICE_ACCOUNT not set - DEV mode");
 }
-function removeDeadToken(token) {
+async function removeDeadToken(token) {
   try {
-    db.prepare("DELETE FROM fcm_tokens WHERE token=?").run(token);
+    await pool.query("DELETE FROM fcm_tokens WHERE token=$1", [token]);
   } catch (_) {}
 }
 async function sendPushToPatient(patientId, { title, body, data = {} }) {
   if (!patientId) return;
   let rows;
   try {
-    rows = db.prepare("SELECT token FROM fcm_tokens WHERE patient_id=?").all(patientId);
+    ({ rows } = await pool.query("SELECT token FROM fcm_tokens WHERE patient_id=$1", [patientId]));
   } catch (err) {
     console.error("[push] DB read error:", err.message);
     return;

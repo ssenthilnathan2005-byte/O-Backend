@@ -1,6 +1,6 @@
 "use strict";
 const express = require("express");
-const db      = require("../db/init");
+const { pool } = require("../db/init");
 const { requireAdmin, requireDoctorOrAdmin } = require("../middleware/auth");
 
 const router = express.Router();
@@ -38,15 +38,19 @@ function hospitalCodeParts(hospital) {
   return { hospitalShort, cityShort };
 }
 
-function nextDoctorCode({ name, hospitalId }) {
-  const hospital = db.prepare("SELECT name, area FROM hospitals WHERE id=?").get(hospitalId);
+async function nextDoctorCode({ name, hospitalId }) {
+  const { rows: hospitalRows } = await pool.query(
+    "SELECT name, area FROM hospitals WHERE id=$1",
+    [hospitalId]
+  );
+  const hospital = hospitalRows[0];
   if (!hospital) throw new Error("Hospital not found");
 
   const { hospitalShort, cityShort } = hospitalCodeParts(hospital);
   const initials = doctorInitials(name);
   const prefix = `${initials}.${hospitalShort}.${cityShort}`;
 
-  const rows = db.prepare("SELECT code FROM doctors WHERE hospital_id=?").all(hospitalId);
+  const { rows } = await pool.query("SELECT code FROM doctors WHERE hospital_id=$1", [hospitalId]);
   let maxSerial = 0;
 
   for (const row of rows) {
@@ -58,8 +62,11 @@ function nextDoctorCode({ name, hospitalId }) {
   let serial = maxSerial + 1;
   while (true) {
     const candidate = `${prefix}.${String(serial).padStart(2, "0")}`;
-    const existing = db.prepare("SELECT 1 FROM doctors WHERE UPPER(code)=UPPER(?) LIMIT 1").get(candidate);
-    if (!existing) return candidate;
+    const { rows: existingRows } = await pool.query(
+      "SELECT 1 FROM doctors WHERE UPPER(code)=UPPER($1) LIMIT 1",
+      [candidate]
+    );
+    if (!existingRows[0]) return candidate;
     serial += 1;
   }
 }
@@ -85,11 +92,11 @@ function row2doctor(r) {
 }
 
 // ── GET all doctors ───────────────────────────────────────────────────────────
-router.get("/", (req, res) => {
+router.get("/", async (req, res) => {
   try {
-    const rows = req.query.hospitalId
-      ? db.prepare("SELECT * FROM doctors WHERE hospital_id=? ORDER BY name ASC").all(req.query.hospitalId)
-      : db.prepare("SELECT * FROM doctors ORDER BY name ASC").all();
+    const { rows } = req.query.hospitalId
+      ? await pool.query("SELECT * FROM doctors WHERE hospital_id=$1 ORDER BY name ASC", [req.query.hospitalId])
+      : await pool.query("SELECT * FROM doctors ORDER BY name ASC");
     res.json(rows.map(row2doctor));
   } catch (err) {
     console.error("[doctors GET /]", err.message);
@@ -98,18 +105,18 @@ router.get("/", (req, res) => {
 });
 
 // ── GET single doctor ─────────────────────────────────────────────────────────
-router.get("/:id", (req, res) => {
+router.get("/:id", async (req, res) => {
   try {
-    const row = db.prepare("SELECT * FROM doctors WHERE id=?").get(req.params.id);
-    if (!row) return res.status(404).json({ error: "Doctor not found" });
-    res.json(row2doctor(row));
+    const { rows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: "Doctor not found" });
+    res.json(row2doctor(rows[0]));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });
 
 // ── POST create doctor ────────────────────────────────────────────────────────
-router.post("/", requireAdmin, (req, res) => {
+router.post("/", requireAdmin, async (req, res) => {
   try {
     const { name, specialty, hospitalId, phone = "", bio = "",
             price = 10, tokensPerSession = 20,
@@ -120,28 +127,30 @@ router.post("/", requireAdmin, (req, res) => {
     if (!name || !specialty || !hospitalId)
       return res.status(400).json({ error: "name, specialty, and hospitalId are required" });
 
-    const hospital = db.prepare("SELECT id FROM hospitals WHERE id=?").get(hospitalId);
-    if (!hospital) return res.status(404).json({ error: "Hospital not found" });
+    const { rows: hospitalRows } = await pool.query("SELECT id FROM hospitals WHERE id=$1", [hospitalId]);
+    if (!hospitalRows[0]) return res.status(404).json({ error: "Hospital not found" });
 
-    const code = nextDoctorCode({ name, hospitalId });
+    const code = await nextDoctorCode({ name, hospitalId });
     const id   = `d_${Date.now()}`;
 
-    db.prepare(`
-      INSERT INTO doctors
+    await pool.query(
+      `INSERT INTO doctors
         (id, hospital_id, code, name, specialty, phone, bio, price, consultation_fee,
          tokens_per_session, sessions, session_timings, is_available,
          years_of_experience, education, languages)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?,?,1,?,?,?)
-    `).run(
-      id, hospitalId, code, name, specialty, phone, bio, price, price,
-      tokensPerSession,
-      Array.isArray(sessions) ? sessions.join(",") : sessions,
-      sessionTimings ? JSON.stringify(sessionTimings) : null,
-      yearsOfExperience, education,
-      languages.length ? JSON.stringify(languages) : null
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,1,$13,$14,$15)`,
+      [
+        id, hospitalId, code, name, specialty, phone, bio, price, price,
+        tokensPerSession,
+        Array.isArray(sessions) ? sessions.join(",") : sessions,
+        sessionTimings ? JSON.stringify(sessionTimings) : null,
+        yearsOfExperience, education,
+        languages.length ? JSON.stringify(languages) : null,
+      ]
     );
 
-    res.status(201).json(row2doctor(db.prepare("SELECT * FROM doctors WHERE id=?").get(id)));
+    const { rows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [id]);
+    res.status(201).json(row2doctor(rows[0]));
   } catch (err) {
     console.error("[doctors POST]", err.message);
     res.status(500).json({ error: err.message });
@@ -149,9 +158,10 @@ router.post("/", requireAdmin, (req, res) => {
 });
 
 // ── PATCH update doctor ───────────────────────────────────────────────────────
-router.patch("/:id", requireDoctorOrAdmin, (req, res) => {
+router.patch("/:id", requireDoctorOrAdmin, async (req, res) => {
   try {
-    const row = db.prepare("SELECT * FROM doctors WHERE id=?").get(req.params.id);
+    const { rows: existingRows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [req.params.id]);
+    const row = existingRows[0];
     if (!row) return res.status(404).json({ error: "Doctor not found" });
 
     if (req.user.role === "doctor" && req.user.doctorId !== req.params.id)
@@ -177,54 +187,59 @@ router.patch("/:id", requireDoctorOrAdmin, (req, res) => {
     }
 
     if (finalCode) {
-      const existing = db.prepare("SELECT id FROM doctors WHERE UPPER(code)=UPPER(?) AND id<>?").get(finalCode, req.params.id);
-      if (existing) return res.status(409).json({ error: "Doctor code already exists" });
+      const { rows: dupRows } = await pool.query(
+        "SELECT id FROM doctors WHERE UPPER(code)=UPPER($1) AND id<>$2",
+        [finalCode, req.params.id]
+      );
+      if (dupRows[0]) return res.status(409).json({ error: "Doctor code already exists" });
     }
 
-    db.prepare(`
-      UPDATE doctors SET
-        name                = COALESCE(?, name),
-        specialty           = COALESCE(?, specialty),
-        hospital_id         = COALESCE(?, hospital_id),
-        is_available        = COALESCE(?, is_available),
-        bio                 = COALESCE(?, bio),
-        photo               = COALESCE(?, photo),
-        session_timings     = COALESCE(?, session_timings),
-        sessions            = COALESCE(?, sessions),
-        years_of_experience = COALESCE(?, years_of_experience),
-        education           = COALESCE(?, education),
-        languages           = COALESCE(?, languages),
-        tokens_per_session  = COALESCE(?, tokens_per_session),
-        walk_in_interval    = COALESCE(?, walk_in_interval),
-        price               = COALESCE(?, price),
-        consultation_fee    = COALESCE(?, consultation_fee),
-        phone               = COALESCE(?, phone),
-        code                = COALESCE(?, code),
-        status_override     = COALESCE(?, status_override)
-      WHERE id=?
-    `).run(
-      name         || null,
-      specialty    || null,
-      hospitalId   || null,
-      isAvailable !== undefined ? (isAvailable ? 1 : 0) : null,
-      bio          ?? null,
-      photo        ?? null,
-      sessionTimings ? JSON.stringify(sessionTimings) : null,
-      sessions ? (Array.isArray(sessions) ? sessions.join(",") : sessions) : null,
-      yearsOfExperience ?? null,
-      education    ?? null,
-      languages    ? JSON.stringify(languages) : null,
-      tokensPerSession ?? null,
-      walkInInterval ?? null,
-      price        ?? null,
-      consultationFee ?? price ?? null,
-      finalPhone,
-      finalCode,
-      statusOverride ?? null,
-      req.params.id
+    await pool.query(
+      `UPDATE doctors SET
+        name                = COALESCE($1, name),
+        specialty           = COALESCE($2, specialty),
+        hospital_id         = COALESCE($3, hospital_id),
+        is_available        = COALESCE($4, is_available),
+        bio                 = COALESCE($5, bio),
+        photo               = COALESCE($6, photo),
+        session_timings     = COALESCE($7, session_timings),
+        sessions            = COALESCE($8, sessions),
+        years_of_experience = COALESCE($9, years_of_experience),
+        education           = COALESCE($10, education),
+        languages           = COALESCE($11, languages),
+        tokens_per_session  = COALESCE($12, tokens_per_session),
+        walk_in_interval    = COALESCE($13, walk_in_interval),
+        price               = COALESCE($14, price),
+        consultation_fee    = COALESCE($15, consultation_fee),
+        phone               = COALESCE($16, phone),
+        code                = COALESCE($17, code),
+        status_override     = COALESCE($18, status_override)
+       WHERE id=$19`,
+      [
+        name         || null,
+        specialty    || null,
+        hospitalId   || null,
+        isAvailable !== undefined ? (isAvailable ? 1 : 0) : null,
+        bio          ?? null,
+        photo        ?? null,
+        sessionTimings ? JSON.stringify(sessionTimings) : null,
+        sessions ? (Array.isArray(sessions) ? sessions.join(",") : sessions) : null,
+        yearsOfExperience ?? null,
+        education    ?? null,
+        languages    ? JSON.stringify(languages) : null,
+        tokensPerSession ?? null,
+        walkInInterval ?? null,
+        price        ?? null,
+        consultationFee ?? price ?? null,
+        finalPhone,
+        finalCode,
+        statusOverride ?? null,
+        req.params.id,
+      ]
     );
 
-    res.json(row2doctor(db.prepare("SELECT * FROM doctors WHERE id=?").get(req.params.id)));
+    const { rows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [req.params.id]);
+    res.json(row2doctor(rows[0]));
   } catch (err) {
     console.error("[doctors PATCH]", err.message);
     res.status(500).json({ error: err.message });
@@ -232,22 +247,33 @@ router.patch("/:id", requireDoctorOrAdmin, (req, res) => {
 });
 
 // ── DELETE doctor ─────────────────────────────────────────────────────────────
-router.delete("/:id", requireAdmin, (req, res) => {
+router.delete("/:id", requireAdmin, async (req, res) => {
+  const client = await pool.connect();
   try {
-    const row = db.prepare("SELECT * FROM doctors WHERE id=?").get(req.params.id);
-    if (!row) return res.status(404).json({ error: "Doctor not found" });
+    const { rows } = await client.query("SELECT * FROM doctors WHERE id=$1", [req.params.id]);
+    if (!rows[0]) { client.release(); return res.status(404).json({ error: "Doctor not found" }); }
 
-    db.transaction(() => {
-      db.prepare("UPDATE bookings SET status='cancelled' WHERE doctor_id=? AND status='confirmed'").run(req.params.id);
-      db.prepare("DELETE FROM token_states WHERE doctor_id=?").run(req.params.id);
-      db.prepare("DELETE FROM doctors WHERE id=?").run(req.params.id);
-    })();
+    try {
+      await client.query("BEGIN");
+      await client.query(
+        "UPDATE bookings SET status='cancelled' WHERE doctor_id=$1 AND status='confirmed'",
+        [req.params.id]
+      );
+      await client.query("DELETE FROM token_states WHERE doctor_id=$1", [req.params.id]);
+      await client.query("DELETE FROM doctors WHERE id=$1", [req.params.id]);
+      await client.query("COMMIT");
+    } catch (txErr) {
+      await client.query("ROLLBACK");
+      throw txErr;
+    }
 
     console.log(`[doctors DELETE] id=${req.params.id}`);
     res.json({ success: true });
   } catch (err) {
     console.error("[doctors DELETE]", err.message);
     res.status(500).json({ error: err.message });
+  } finally {
+    client.release();
   }
 });
 
