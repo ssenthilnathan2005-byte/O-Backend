@@ -31,6 +31,8 @@ const tokenRoutes    = require("./routes/tokens");
 const patientRoutes  = require("./routes/patients");
 const paymentRoutes  = require("./routes/payments");
 const pushRoutes = require("./routes/push");
+const chatRoutes = require("./routes/chat");
+const adminCleanupRoutes = require("./routes/admin");
 
 const app  = express();
 const PORT = process.env.PORT || 4000;
@@ -137,6 +139,10 @@ app.use("/api/tokens",    tokenRoutes);
 app.use("/api/patients",  patientRoutes);
 app.use("/api/payments",  paymentRoutes);
 app.use("/api/push", pushRoutes);
+app.use("/api/chat", chatRoutes);
+app.use("/api/admin/cleanup", adminCleanupRoutes);
+const doctorExportRoutes = require("./routes/doctor_exports");
+app.use("/api/doctor", doctorExportRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {

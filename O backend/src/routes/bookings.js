@@ -39,15 +39,15 @@ router.get("/", requireAuth, async (req, res) => {
 
     let rows;
     if (req.user.role === "admin") {
-      ({ rows } = await pool.query("SELECT * FROM bookings ORDER BY created_at DESC LIMIT 500"));
+      ({ rows } = await pool.query("SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings ORDER BY created_at DESC LIMIT 500"));
     } else if (req.user.role === "doctor") {
       ({ rows } = await pool.query(
-        "SELECT * FROM bookings WHERE doctor_id=$1 ORDER BY date DESC, session ASC, token_number ASC LIMIT 300",
+        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings WHERE doctor_id=$1 ORDER BY date DESC, session ASC, token_number ASC LIMIT 300",
         [req.user.doctorId]
       ));
     } else {
       ({ rows } = await pool.query(
-        "SELECT * FROM bookings WHERE patient_id=$1 ORDER BY created_at DESC",
+        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings WHERE patient_id=$1 ORDER BY created_at DESC",
         [req.user.id]
       ));
     }
@@ -62,7 +62,7 @@ router.get("/", requireAuth, async (req, res) => {
 router.get("/session/:sessionId", requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      "SELECT * FROM bookings WHERE session_id=$1 AND status!='cancelled' ORDER BY token_number ASC",
+      "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings WHERE session_id=$1 AND status!='cancelled' ORDER BY token_number ASC",
       [req.params.sessionId]
     );
     res.json(rows.map(row2booking));

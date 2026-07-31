@@ -2,6 +2,7 @@
 const cron = require("node-cron");
 const { pool } = require("../db/init");
 const { refundBooking } = require("../routes/payments");
+const { runCleanup, ensureCleanupTables } = require("./cleanup");
 
 // ── Fast, no network calls. Finds all confirmed bookings whose date has
 // passed and flips them to 'unvisited' (so they move from "To Visit" to
@@ -78,6 +79,12 @@ function startScheduler() {
   });
 
   console.log("[Scheduler] Midnight cleanup job scheduled (IST).");
+
+  cron.schedule("0 1 * * *", () => {
+    console.log("[Scheduler] Running booking cleanup check...");
+    void runCleanup({ triggeredBy: "cron" });
+  }, { timezone: "Asia/Kolkata" });
+  console.log("[Scheduler] Cleanup job scheduled (1 AM IST).");
 }
 
 module.exports = { startScheduler, expireStaleBookings, markStaleConfirmedAsUnvisited, refundExpiredBookings };

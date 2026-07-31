@@ -349,10 +349,17 @@ router.post("/cancel-session", requireDoctorOrAdmin, async (req, res) => {
 });
 
 // ── GET cancelled list ────────────────────────────────────────────────────────
+const cancelledCache = { data: null, ts: 0, TTL: 5 * 60 * 1000 };
 router.get("/cancelled/list", async (req, res) => {
   try {
+    if (cancelledCache.data && (Date.now() - cancelledCache.ts) < cancelledCache.TTL) {
+      return res.json(cancelledCache.data);
+    }
     const row = await getState(SENTINEL);
-    res.json(row ? JSON.parse(row.cancelled_keys || "[]") : []);
+    const result = row ? JSON.parse(row.cancelled_keys || "[]") : [];
+    cancelledCache.data = result;
+    cancelledCache.ts = Date.now();
+    res.json(result);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

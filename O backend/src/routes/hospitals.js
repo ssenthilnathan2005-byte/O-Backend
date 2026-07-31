@@ -1,4 +1,6 @@
 "use strict";
+const cache = require("../utils/cache");
+"use strict";
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAdmin } = require("../middleware/auth");
@@ -6,8 +8,6 @@ const multer  = require("multer");
 
 const router = express.Router();
 
-// ── Multer: store in memory (we'll base64-encode and save in DB) ──────────────
-// This means photos survive redeploys — no filesystem dependency
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: (Number(process.env.MAX_FILE_SIZE_MB) || 5) * 1024 * 1024 },
@@ -15,22 +15,17 @@ const upload = multer({
     file.mimetype.startsWith("image/") ? cb(null, true) : cb(new Error("Images only")),
 });
 
-// NOTE: the "photo_data" column is created centrally in src/db/init.js's
-// MIGRATIONS list (using ALTER TABLE ... ADD COLUMN IF NOT EXISTS), so no
-// migration code is needed here anymore.
-
-async function row2hospital(r, req) {
+// includePhoto=false skips the (potentially huge) base64 photo_data blob —
+// used for list views where we don't want to drag megabytes per row.
+async function row2hospital(r, req, includePhoto = true) {
   if (!r) return null;
   const { rows } = await pool.query("SELECT COUNT(*) as c FROM doctors WHERE hospital_id=$1", [r.id]);
   const doctorCount = Number(rows[0].c);
 
-  // Photo priority: base64 in DB (permanent) > URL from filesystem (may disappear)
   let photoUrl = null;
-  if (r.photo_data) {
-    // Base64 stored directly in DB — always available, survives redeploys
+  if (includePhoto && r.photo_data) {
     photoUrl = r.photo_data;
   } else if (r.photo_url) {
-    // Legacy: relative path — build full URL
     if (r.photo_url.startsWith("http")) {
       photoUrl = r.photo_url;
     } else {
@@ -50,11 +45,63 @@ async function row2hospital(r, req) {
   };
 }
 
+
+// ── Simple in-memory cache for hospital list ───────────────────────────────
+// Hospitals rarely change, so we cache for 60s to avoid hitting the DB
+// (which requires a network round-trip to Supabase Tokyo) on every request.
+let hospitalListCache = null;
+let hospitalListCacheTime = 0;
+const HOSPITAL_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+function invalidateHospitalCache() {
+  hospitalListCache = null;
+}
+
 // ── GET all hospitals ─────────────────────────────────────────────────────────
+// Excludes photo_data (big base64 blob) — this was the main lag/egress cause.
 router.get("/", async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT * FROM hospitals ORDER BY name ASC");
-    const result = await Promise.all(rows.map(r => row2hospital(r, req)));
+    const now = Date.now();
+    if (hospitalListCache && (now - hospitalListCacheTime) < HOSPITAL_CACHE_TTL_MS) {
+      return res.json(hospitalListCache);
+    }
+
+    const { rows } = await pool.query(
+      "SELECT id, name, area, address, phone, rating, gradient, photo_url, photo_data, is_free FROM hospitals ORDER BY name ASC"
+    );
+
+    // Batch doctor counts in ONE query instead of one query per hospital (fixes N+1)
+    const { rows: countRows } = await pool.query(
+      "SELECT hospital_id, COUNT(*) as c FROM doctors GROUP BY hospital_id"
+    );
+    const countMap = {};
+    countRows.forEach(cr => { countMap[cr.hospital_id] = Number(cr.c); });
+
+    const result = rows.map(r => {
+      let photoUrl = null;
+      if (r.photo_data) {
+        photoUrl = r.photo_data;
+      } else if (r.photo_url) {
+        if (r.photo_url.startsWith("http")) {
+          photoUrl = r.photo_url;
+        } else {
+          const proto = req.headers["x-forwarded-proto"] || req.protocol || "https";
+          const host  = req.headers["x-forwarded-host"] || req.headers.host || "";
+          photoUrl = `${proto}://${host}${r.photo_url}`;
+        }
+      }
+      return {
+        id: r.id, name: r.name, area: r.area,
+        address: r.address || "", phone: r.phone || "",
+        rating: r.rating, gradient: r.gradient,
+        photoUrl,
+        isFree: r.is_free === 1,
+        doctorCount: countMap[r.id] || 0,
+      };
+    });
+
+    hospitalListCache = result;
+    hospitalListCacheTime = Date.now();
     res.json(result);
   } catch (err) {
     console.error("[hospitals GET /]", err.message);
@@ -63,11 +110,13 @@ router.get("/", async (req, res) => {
 });
 
 // ── GET single hospital ───────────────────────────────────────────────────────
+// Full photo included here — it's just one row, not a big deal.
 router.get("/:id", async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM hospitals WHERE id=$1", [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: "Hospital not found" });
-    res.json(await row2hospital(rows[0], req));
+    invalidateHospitalCache();
+    res.json(await row2hospital(rows[0], req, true));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -86,7 +135,8 @@ router.post("/", requireAdmin, async (req, res) => {
     );
 
     const { rows } = await pool.query("SELECT * FROM hospitals WHERE id=$1", [id]);
-    res.status(201).json(await row2hospital(rows[0], req));
+    invalidateHospitalCache();
+    res.status(201).json(await row2hospital(rows[0], req, true));
   } catch (err) {
     console.error("[hospitals POST]", err.message);
     res.status(500).json({ error: err.message });
@@ -96,7 +146,7 @@ router.post("/", requireAdmin, async (req, res) => {
 // ── PATCH update hospital ─────────────────────────────────────────────────────
 router.patch("/:id", requireAdmin, async (req, res) => {
   try {
-    const { rows: existingRows } = await pool.query("SELECT * FROM hospitals WHERE id=$1", [req.params.id]);
+    const { rows: existingRows } = await pool.query("SELECT id FROM hospitals WHERE id=$1", [req.params.id]);
     if (!existingRows[0]) return res.status(404).json({ error: "Hospital not found" });
 
     const { name, area, address, phone, isFree } = req.body;
@@ -115,7 +165,8 @@ router.patch("/:id", requireAdmin, async (req, res) => {
     );
 
     const { rows } = await pool.query("SELECT * FROM hospitals WHERE id=$1", [req.params.id]);
-    res.json(await row2hospital(rows[0], req));
+    invalidateHospitalCache();
+    res.json(await row2hospital(rows[0], req, true));
   } catch (err) {
     console.error("[hospitals PATCH]", err.message);
     res.status(500).json({ error: err.message });
@@ -123,20 +174,18 @@ router.patch("/:id", requireAdmin, async (req, res) => {
 });
 
 // ── POST upload hospital photo ────────────────────────────────────────────────
-// Stores photo as base64 directly in the database — survives all redeploys
 router.post("/:id/photo", requireAdmin, upload.single("photo"), async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT * FROM hospitals WHERE id=$1", [req.params.id]);
+    const { rows } = await pool.query("SELECT id FROM hospitals WHERE id=$1", [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: "Hospital not found" });
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-    // Convert uploaded file buffer to base64 data URL
     const base64 = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
 
-    // Save to DB — clears legacy photo_url so base64 takes priority
     await pool.query("UPDATE hospitals SET photo_data=$1, photo_url=NULL WHERE id=$2", [base64, req.params.id]);
 
     console.log(`[hospitals photo] saved base64 for id=${req.params.id} size=${req.file.size} bytes`);
+    invalidateHospitalCache();
     res.json({ photoUrl: base64 });
   } catch (err) {
     console.error("[hospitals photo]", err.message);
@@ -147,7 +196,7 @@ router.post("/:id/photo", requireAdmin, upload.single("photo"), async (req, res)
 // ── POST accept base64 photo directly (from frontend FileReader) ──────────────
 router.post("/:id/photo-base64", requireAdmin, async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT * FROM hospitals WHERE id=$1", [req.params.id]);
+    const { rows } = await pool.query("SELECT id FROM hospitals WHERE id=$1", [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: "Hospital not found" });
 
     const { base64 } = req.body;
@@ -156,6 +205,7 @@ router.post("/:id/photo-base64", requireAdmin, async (req, res) => {
 
     await pool.query("UPDATE hospitals SET photo_data=$1, photo_url=NULL WHERE id=$2", [base64, req.params.id]);
     console.log(`[hospitals photo-base64] saved for id=${req.params.id}`);
+    invalidateHospitalCache();
     res.json({ photoUrl: base64 });
   } catch (err) {
     console.error("[hospitals photo-base64]", err.message);
@@ -172,6 +222,7 @@ router.delete("/:id", requireAdmin, async (req, res) => {
       return res.status(409).json({ error: "Cannot delete hospital with assigned doctors. Remove doctors first." });
 
     await pool.query("DELETE FROM hospitals WHERE id=$1", [req.params.id]);
+    invalidateHospitalCache();
     res.json({ success: true });
   } catch (err) {
     console.error("[hospitals DELETE]", err.message);

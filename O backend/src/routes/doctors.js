@@ -88,16 +88,39 @@ function row2doctor(r) {
     education: r.education || "",
     languages: r.languages ? JSON.parse(r.languages) : [],
     statusOverride: r.status_override || "not_yet_arrived",
+    avgMinutesPerPatient: r.avg_minutes_per_patient ?? 5,
   };
+}
+
+
+// ── Simple in-memory cache for doctor list ─────────────────────────────────
+// Short TTL since availability/status can change during the day.
+// Cached per query-key (e.g. by hospitalId) so filtered and unfiltered
+// requests don't collide.
+const doctorListCache = new Map();
+const DOCTOR_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+
+function invalidateDoctorCache() {
+  doctorListCache.clear();
 }
 
 // ── GET all doctors ───────────────────────────────────────────────────────────
 router.get("/", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   try {
+    const cacheKey = req.query.hospitalId || "__all__";
+    const cached = doctorListCache.get(cacheKey);
+    if (cached && (Date.now() - cached.time) < DOCTOR_CACHE_TTL_MS) {
+      return res.json(cached.data);
+    }
+
     const { rows } = req.query.hospitalId
       ? await pool.query("SELECT * FROM doctors WHERE hospital_id=$1 ORDER BY name ASC", [req.query.hospitalId])
       : await pool.query("SELECT * FROM doctors ORDER BY name ASC");
-    res.json(rows.map(row2doctor));
+
+    const result = rows.map(row2doctor);
+    doctorListCache.set(cacheKey, { data: result, time: Date.now() });
+    res.json(result);
   } catch (err) {
     console.error("[doctors GET /]", err.message);
     res.status(500).json({ error: err.message });
@@ -150,6 +173,7 @@ router.post("/", requireAdmin, async (req, res) => {
     );
 
     const { rows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [id]);
+    invalidateDoctorCache();
     res.status(201).json(row2doctor(rows[0]));
   } catch (err) {
     console.error("[doctors POST]", err.message);
@@ -171,7 +195,7 @@ router.patch("/:id", requireDoctorOrAdmin, async (req, res) => {
       specialty, hospitalId, isAvailable, bio, sessionTimings,
       yearsOfExperience, education, languages, tokensPerSession,
       phone, contactPhone, photo, name, sessions, price, consultationFee, code,
-      statusOverride, walkInInterval,
+      statusOverride, walkInInterval, avgMinutesPerPatient,
     } = req.body;
 
     if (code !== undefined && req.user.role !== "admin") {
@@ -213,8 +237,9 @@ router.patch("/:id", requireDoctorOrAdmin, async (req, res) => {
         consultation_fee    = COALESCE($15, consultation_fee),
         phone               = COALESCE($16, phone),
         code                = COALESCE($17, code),
-        status_override     = COALESCE($18, status_override)
-       WHERE id=$19`,
+        status_override     = COALESCE($18, status_override),
+        avg_minutes_per_patient = COALESCE($19, avg_minutes_per_patient)
+       WHERE id=$20`,
       [
         name         || null,
         specialty    || null,
@@ -234,11 +259,13 @@ router.patch("/:id", requireDoctorOrAdmin, async (req, res) => {
         finalPhone,
         finalCode,
         statusOverride ?? null,
+        avgMinutesPerPatient ?? null,
         req.params.id,
       ]
     );
 
     const { rows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [req.params.id]);
+    invalidateDoctorCache();
     res.json(row2doctor(rows[0]));
   } catch (err) {
     console.error("[doctors PATCH]", err.message);
@@ -268,6 +295,7 @@ router.delete("/:id", requireAdmin, async (req, res) => {
     }
 
     console.log(`[doctors DELETE] id=${req.params.id}`);
+    invalidateDoctorCache();
     res.json({ success: true });
   } catch (err) {
     console.error("[doctors DELETE]", err.message);
