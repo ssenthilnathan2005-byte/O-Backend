@@ -45,6 +45,18 @@ router.get("/", requireAuth, async (req, res) => {
         "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings WHERE doctor_id=$1 ORDER BY date DESC, session ASC, token_number ASC LIMIT 300",
         [req.user.doctorId]
       ));
+    } else if (req.user.role === "hospital_admin") {
+      ({ rows } = await pool.query(
+        `SELECT b.id, b.patient_id, b.patient_name, b.doctor_id, b.doctor_name, b.hospital_name,
+                b.date, b.session, b.token_number, b.session_id, b.payment_done, b.status,
+                b.phone, b.complaint, b.patient_age, b.close_reason, b.created_at
+           FROM bookings b
+           JOIN doctors d ON d.id = b.doctor_id
+          WHERE d.hospital_id = $1
+          ORDER BY b.date DESC, b.session ASC, b.token_number ASC
+          LIMIT 1000`,
+        [req.user.hospitalId]
+      ));
     } else {
       ({ rows } = await pool.query(
         "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings WHERE patient_id=$1 ORDER BY created_at DESC",
@@ -92,8 +104,8 @@ router.post("/", requireAuth, async (req, res) => {
   try {
     const { rows: doctorRows } = await client.query("SELECT * FROM doctors WHERE id=$1", [doctorId]);
     const doctor = doctorRows[0];
-    if (!doctor) { client.release(); return res.status(404).json({ error: "Doctor not found" }); }
-    if (!doctor.is_available) { client.release(); return res.status(409).json({ error: "Doctor is not available" }); }
+    if (!doctor) { return res.status(404).json({ error: "Doctor not found" }); }
+    if (!doctor.is_available) { return res.status(409).json({ error: "Doctor is not available" }); }
 
     const { rows: hospitalRows } = await client.query(
       "SELECT name, is_free FROM hospitals WHERE id=$1",
@@ -101,7 +113,6 @@ router.post("/", requireAuth, async (req, res) => {
     );
     const hospital = hospitalRows[0];
     if (!hospital || hospital.is_free !== 1) {
-      client.release();
       return res.status(403).json({
         error: "This hospital requires payment for bookings. Use the payment flow instead.",
       });
