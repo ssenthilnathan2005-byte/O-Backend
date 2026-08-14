@@ -14,7 +14,7 @@ function requirePharmacyOrAdmin(req, res, next) {
 
 
 // ── POST create prescription (doctor) ────────────────────────────────────────
-router.post("/prescriptions", requireAuth, async (req, res) => {
+router.post("/", requireAuth, async (req, res) => {
   try {
     const { bookingId, doctorId, doctorName, patientId, patientName,
             hospitalId, hospitalName, items = [], notes = "" } = req.body;
