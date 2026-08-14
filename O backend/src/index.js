@@ -143,6 +143,10 @@ app.use("/api/chat", chatRoutes);
 app.use("/api/admin/cleanup", adminCleanupRoutes);
 const doctorExportRoutes = require("./routes/doctor_exports");
 app.use("/api/doctor", doctorExportRoutes);
+const hospitalExportRoutes = require("./routes/hospital_exports");
+const pharmacyRoutes = require("./routes/pharmacy");
+app.use("/api/hospital", hospitalExportRoutes);
+app.use("/api/pharmacy", pharmacyRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
