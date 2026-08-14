@@ -36,6 +36,23 @@ router.post("/", requireAuth, async (req, res) => {
   }
 });
 
+
+// ── GET my prescriptions (patient) ───────────────────────────────────────────
+router.get("/my", requireAuth, async (req, res) => {
+  try {
+    const patientId = req.user.id;
+    const { rows } = await pool.query(
+      `SELECT * FROM prescriptions WHERE patient_id=$1 
+       AND created_at > NOW() - INTERVAL '6 days'
+       ORDER BY created_at DESC`,
+      [patientId]
+    );
+    res.json(rows.map(r => ({ ...r, items: JSON.parse(r.items || "[]") })));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET prescriptions for this hospital ──────────────────────────────────────
 router.get("/prescriptions", requirePharmacyOrAdmin, async (req, res) => {
   try {
