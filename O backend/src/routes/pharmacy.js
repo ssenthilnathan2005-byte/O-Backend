@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { v4: uuidv4 } = require("uuid");
 const { pool } = require("../db/init");
+const { broadcast } = require("../services/ws");
 const { requireAuth, requireAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
 
 function requirePharmacyOrAdmin(req, res, next) {
@@ -94,7 +95,17 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
         : [status, now, req.params.id]
     );
     if (!rows.length) return res.status(404).json({ error: "Prescription not found" });
-    res.json({ ...rows[0], items: JSON.parse(rows[0].items || "[]") });
+    const updated = { ...rows[0], items: JSON.parse(rows[0].items || "[]") };
+    // Notify patient via WebSocket
+    try {
+      broadcast(`patient_${rows[0].patient_id}`, {
+        type: "prescription_update",
+        prescriptionId: rows[0].id,
+        status: rows[0].status,
+        patientId: rows[0].patient_id,
+      });
+    } catch (_) {}
+    res.json(updated);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
