@@ -41,6 +41,7 @@ async function row2hospital(r, req, includePhoto = true) {
     rating: r.rating, gradient: r.gradient,
     photoUrl,
     isFree: r.is_free === 1,
+    hasPharmacy: r.has_pharmacy === 1,
     doctorCount,
   };
 }
