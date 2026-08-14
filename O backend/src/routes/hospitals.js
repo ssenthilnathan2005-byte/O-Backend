@@ -104,6 +104,7 @@ router.get("/", async (req, res) => {
 
     hospitalListCache = result;
     hospitalListCacheTime = Date.now();
+    res.set("Cache-Control", "no-store");
     res.json(result);
   } catch (err) {
     console.error("[hospitals GET /]", err.message);
