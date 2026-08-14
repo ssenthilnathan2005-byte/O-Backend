@@ -51,4 +51,29 @@ function requireDoctorOrAdmin(req, res, next) {
   });
 }
 
-module.exports = { requireAuth, requireAdmin, requireDoctor, requireDoctorOrAdmin };
+function requirePharmacy(req, res, next) {
+  requireAuth(req, res, () => {
+    if (req.user.role !== "pharmacy")
+      return res.status(403).json({ error: "Pharmacy staff access required" });
+    next();
+  });
+}
+
+function requirePharmacyOrAdmin(req, res, next) {
+  requireAuth(req, res, () => {
+    if (req.user.role !== "pharmacy" && req.user.role !== "admin")
+      return res.status(403).json({ error: "Pharmacy or admin access required" });
+    next();
+  });
+}
+
+
+function requireAdminOrHospitalAdmin(req, res, next) {
+  if (!req.user) return res.status(401).json({ error: "Unauthorized" });
+  if (req.user.role === "admin" || req.user.role === "hospital_admin") return next();
+  return res.status(403).json({ error: "Admin or Hospital Admin access required" });
+}
+module.exports = {
+  requireAuth, requireAdmin, requireDoctor, requireDoctorOrAdmin, requireAdminOrHospitalAdmin,
+  requirePharmacy, requirePharmacyOrAdmin,
+};
