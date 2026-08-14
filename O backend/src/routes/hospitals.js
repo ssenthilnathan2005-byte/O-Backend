@@ -3,7 +3,7 @@ const cache = require("../utils/cache");
 "use strict";
 const express = require("express");
 const { pool } = require("../db/init");
-const { requireAdmin } = require("../middleware/auth");
+const { requireAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
 const multer  = require("multer");
 
 const router = express.Router();
@@ -125,7 +125,7 @@ router.get("/:id", async (req, res) => {
 // ── POST create hospital ──────────────────────────────────────────────────────
 router.post("/", requireAdmin, async (req, res) => {
   try {
-    const { name, area, address = "", phone = "", gradient = "from-slate-400 to-slate-600" } = req.body;
+    const { name, area, address = "", phone = "", gradient = "from-slate-400 to-slate-600", loginId } = req.body;
     if (!name || !area) return res.status(400).json({ error: "name and area are required" });
 
     const id = `h_${Date.now()}`;
@@ -134,11 +134,85 @@ router.post("/", requireAdmin, async (req, res) => {
       [id, name, area, address, phone, gradient]
     );
 
+    // Optional: create a hospital_admin login for this hospital right away.
+    // The account starts with no password (first_login=1) — the hospital
+    // staff sets their own password the first time they log in with loginId.
+    if (loginId) {
+      const trimmedLoginId = String(loginId).trim();
+      const { rows: existing } = await pool.query("SELECT id FROM hospitals WHERE login_id=$1", [trimmedLoginId]);
+      if (existing[0]) return res.status(409).json({ error: "Login ID already taken" });
+
+      const adminUserId = `ha_${Date.now()}`;
+      await pool.query(
+        "INSERT INTO users (id, name, password, role, first_login) VALUES ($1,$2,$3,'hospital_admin',1)",
+        [adminUserId, `${name} Admin`, ""]
+      );
+      await pool.query("UPDATE hospitals SET login_id=$1, admin_user_id=$2 WHERE id=$3", [trimmedLoginId, adminUserId, id]);
+    }
+
     const { rows } = await pool.query("SELECT * FROM hospitals WHERE id=$1", [id]);
     invalidateHospitalCache();
-    res.status(201).json(await row2hospital(rows[0], req, true));
+    res.status(201).json({ ...(await row2hospital(rows[0], req, true)), loginId: rows[0].login_id || null });
   } catch (err) {
     console.error("[hospitals POST]", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── GET hospital admin login info (super admin only) ──────────────────────────
+router.get("/:id/admin-info", requireAdmin, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT h.login_id, h.admin_user_id, u.first_login
+       FROM hospitals h LEFT JOIN users u ON u.id = h.admin_user_id
+       WHERE h.id=$1`,
+      [req.params.id]
+    );
+    if (!rows[0]) return res.status(404).json({ error: "Hospital not found" });
+    const r = rows[0];
+    res.json({
+      loginId: r.login_id || null,
+      hasAdminAccount: !!r.admin_user_id,
+      firstLogin: r.first_login === 1,
+    });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── POST reset hospital admin credentials (super admin only) ──────────────────
+// Forces the hospital admin back into "set a new password" mode — useful if
+// they're locked out or the login was compromised. Optionally rotates loginId.
+router.post("/:id/reset-login", requireAdmin, async (req, res) => {
+  try {
+    const { rows: hospRows } = await pool.query("SELECT * FROM hospitals WHERE id=$1", [req.params.id]);
+    const hospital = hospRows[0];
+    if (!hospital) return res.status(404).json({ error: "Hospital not found" });
+
+    const { newLoginId } = req.body;
+    if (newLoginId) {
+      const trimmed = String(newLoginId).trim();
+      const { rows: dup } = await pool.query("SELECT id FROM hospitals WHERE login_id=$1 AND id<>$2", [trimmed, hospital.id]);
+      if (dup[0]) return res.status(409).json({ error: "Login ID already taken" });
+      await pool.query("UPDATE hospitals SET login_id=$1 WHERE id=$2", [trimmed, hospital.id]);
+    }
+
+    if (!hospital.admin_user_id) {
+      const adminUserId = `ha_${Date.now()}`;
+      await pool.query(
+        "INSERT INTO users (id, name, password, role, first_login) VALUES ($1,$2,$3,'hospital_admin',1)",
+        [adminUserId, `${hospital.name} Admin`, ""]
+      );
+      await pool.query("UPDATE hospitals SET admin_user_id=$1 WHERE id=$2", [adminUserId, hospital.id]);
+    } else {
+      await pool.query("UPDATE users SET password='', first_login=1 WHERE id=$1", [hospital.admin_user_id]);
+    }
+
+    const { rows } = await pool.query("SELECT login_id, admin_user_id FROM hospitals WHERE id=$1", [hospital.id]);
+    invalidateHospitalCache();
+    res.json({ loginId: rows[0].login_id, hasAdminAccount: !!rows[0].admin_user_id });
+  } catch (err) {
+    console.error("[hospitals reset-login]", err.message);
     res.status(500).json({ error: err.message });
   }
 });
@@ -149,17 +223,19 @@ router.patch("/:id", requireAdmin, async (req, res) => {
     const { rows: existingRows } = await pool.query("SELECT id FROM hospitals WHERE id=$1", [req.params.id]);
     if (!existingRows[0]) return res.status(404).json({ error: "Hospital not found" });
 
-    const { name, area, address, phone, isFree } = req.body;
+    const { name, area, address, phone, isFree, hasPharmacy } = req.body;
     await pool.query(
       `UPDATE hospitals SET name=COALESCE($1,name), area=COALESCE($2,area),
-       address=COALESCE($3,address), phone=COALESCE($4,phone), is_free=COALESCE($5,is_free)
-       WHERE id=$6`,
+       address=COALESCE($3,address), phone=COALESCE($4,phone), is_free=COALESCE($5,is_free),
+       has_pharmacy=COALESCE($6,has_pharmacy)
+       WHERE id=$7`,
       [
         name || null,
         area || null,
         address ?? null,
         phone ?? null,
         isFree !== undefined ? (isFree ? 1 : 0) : null,
+        hasPharmacy !== undefined ? (hasPharmacy ? 1 : 0) : null,
         req.params.id,
       ]
     );
@@ -169,6 +245,24 @@ router.patch("/:id", requireAdmin, async (req, res) => {
     res.json(await row2hospital(rows[0], req, true));
   } catch (err) {
     console.error("[hospitals PATCH]", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ── PATCH toggle pharmacy (hospital-admin) ────────────────────────────────────
+router.patch("/:id/pharmacy-toggle", requireAdminOrHospitalAdmin, async (req, res) => {
+  try {
+    const { hasPharmacy } = req.body;
+    if (req.user.role === "hospital_admin" && req.user.hospitalId !== req.params.id)
+      return res.status(403).json({ error: "You can only update your own hospital" });
+    await pool.query(
+      "UPDATE hospitals SET has_pharmacy=$1 WHERE id=$2",
+      [hasPharmacy ? 1 : 0, req.params.id]
+    );
+    invalidateHospitalCache();
+    res.json({ success: true, hasPharmacy: !!hasPharmacy });
+  } catch (err) {
     res.status(500).json({ error: err.message });
   }
 });

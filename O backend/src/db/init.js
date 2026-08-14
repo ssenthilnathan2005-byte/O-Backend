@@ -2,12 +2,6 @@
 const { Pool } = require("pg");
 require("dotenv").config();
 
-// ── Supabase connection ───────────────────────────────────────────────────────
-// Use the "Connection string" from Supabase → Project Settings → Database.
-// Prefer the pooled "Transaction" connection string (port 6543) for a normal
-// backend server, e.g.:
-//   postgres://postgres.xxxx:PASSWORD@aws-0-ap-south-1.pooler.supabase.com:6543/postgres
-// Put that full string in your .env as DATABASE_URL.
 const DATABASE_URL = process.env.DATABASE_URL;
 if (!DATABASE_URL) {
   console.error("[FATAL] DATABASE_URL is not set! Add your Supabase connection string to .env");
@@ -16,7 +10,7 @@ if (!DATABASE_URL) {
 
 const pool = new Pool({
   connectionString: DATABASE_URL,
-  ssl: { rejectUnauthorized: false }, // Supabase requires SSL
+  ssl: { rejectUnauthorized: false },
   max: Number(process.env.PG_POOL_MAX) || 10,
   idleTimeoutMillis: 30000,
   connectionTimeoutMillis: 10000,
@@ -26,8 +20,6 @@ pool.on("error", (err) => {
   console.error("[DB] Unexpected error on idle client:", err.message);
 });
 
-// ── Schema ────────────────────────────────────────────────────────────────────
-// Runs once at startup. CREATE TABLE IF NOT EXISTS is idempotent, same as before.
 const SCHEMA_SQL = `
   CREATE TABLE IF NOT EXISTS users (
     id            TEXT PRIMARY KEY,
@@ -132,7 +124,44 @@ const SCHEMA_SQL = `
     updated_at  TIMESTAMPTZ NOT NULL DEFAULT now()
   );
 
-  -- ── Indexes ───────────────────────────────────────────────────────────────
+  CREATE TABLE IF NOT EXISTS pharmacy_staff (
+    id            TEXT PRIMARY KEY,
+    hospital_id   TEXT NOT NULL REFERENCES hospitals(id) ON DELETE CASCADE,
+    code          TEXT UNIQUE NOT NULL,
+    name          TEXT NOT NULL,
+    phone         TEXT NOT NULL,
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE IF NOT EXISTS medicines (
+    id             TEXT PRIMARY KEY,
+    name           TEXT UNIQUE NOT NULL,
+    category       TEXT,
+    common_dosage  TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+
+  CREATE TABLE IF NOT EXISTS prescriptions (
+    id               TEXT PRIMARY KEY,
+    booking_id       TEXT NOT NULL REFERENCES bookings(id) ON DELETE CASCADE,
+    doctor_id        TEXT NOT NULL REFERENCES doctors(id) ON DELETE CASCADE,
+    doctor_name      TEXT NOT NULL,
+    patient_id       TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    patient_name     TEXT NOT NULL,
+    hospital_id      TEXT NOT NULL REFERENCES hospitals(id) ON DELETE CASCADE,
+    hospital_name    TEXT NOT NULL,
+    items            TEXT NOT NULL DEFAULT '[]',
+    notes            TEXT,
+    status           TEXT NOT NULL DEFAULT 'pending'
+                     CHECK(status IN ('pending','packed','ready','handed_over')),
+    packed_by        TEXT REFERENCES pharmacy_staff(id) ON DELETE SET NULL,
+    created_at       TIMESTAMPTZ NOT NULL DEFAULT now(),
+    packed_at        TIMESTAMPTZ,
+    ready_at         TIMESTAMPTZ,
+    handed_over_at   TIMESTAMPTZ
+  );
+
   CREATE INDEX IF NOT EXISTS idx_bookings_patient     ON bookings(patient_id);
   CREATE INDEX IF NOT EXISTS idx_bookings_session     ON bookings(session_id);
   CREATE INDEX IF NOT EXISTS idx_bookings_doctor      ON bookings(doctor_id);
@@ -146,10 +175,57 @@ const SCHEMA_SQL = `
   CREATE INDEX IF NOT EXISTS idx_users_phone          ON users(phone);
   CREATE INDEX IF NOT EXISTS idx_otp_phone            ON otp_pending(phone);
   CREATE INDEX IF NOT EXISTS idx_otp_expires          ON otp_pending(expires_at);
+  CREATE INDEX IF NOT EXISTS idx_pharmacy_hospital    ON pharmacy_staff(hospital_id);
+  CREATE INDEX IF NOT EXISTS idx_prescriptions_hospital ON prescriptions(hospital_id);
+  CREATE INDEX IF NOT EXISTS idx_prescriptions_booking  ON prescriptions(booking_id);
+  CREATE INDEX IF NOT EXISTS idx_prescriptions_patient  ON prescriptions(patient_id);
+  CREATE INDEX IF NOT EXISTS idx_prescriptions_status   ON prescriptions(status);
 `;
 
-// Safe "add column if missing" migrations (Postgres supports IF NOT EXISTS
-// directly, unlike SQLite, so this is actually simpler than the old version).
+const MEDICINE_SEED = [
+  ["Paracetamol 500mg", "Analgesic/Antipyretic", "1 tablet, 3x/day"],
+  ["Paracetamol 650mg", "Analgesic/Antipyretic", "1 tablet, 3x/day"],
+  ["Ibuprofen 400mg", "NSAID", "1 tablet, 2-3x/day after food"],
+  ["Aspirin 75mg", "Antiplatelet", "1 tablet, once daily"],
+  ["Amoxicillin 500mg", "Antibiotic", "1 capsule, 3x/day for 5-7 days"],
+  ["Azithromycin 500mg", "Antibiotic", "1 tablet, once daily for 3 days"],
+  ["Ciprofloxacin 500mg", "Antibiotic", "1 tablet, 2x/day for 5 days"],
+  ["Doxycycline 100mg", "Antibiotic", "1 capsule, 2x/day"],
+  ["Metronidazole 400mg", "Antibiotic/Antiprotozoal", "1 tablet, 3x/day"],
+  ["Cetirizine 10mg", "Antihistamine", "1 tablet, once daily at night"],
+  ["Levocetirizine 5mg", "Antihistamine", "1 tablet, once daily at night"],
+  ["Chlorpheniramine 4mg", "Antihistamine", "1 tablet, 3x/day"],
+  ["Montelukast 10mg", "Antihistamine/Anti-asthmatic", "1 tablet, once daily at night"],
+  ["Omeprazole 20mg", "Proton Pump Inhibitor", "1 capsule, once daily before food"],
+  ["Pantoprazole 40mg", "Proton Pump Inhibitor", "1 tablet, once daily before food"],
+  ["Ranitidine 150mg", "H2 Blocker", "1 tablet, 2x/day"],
+  ["Domperidone 10mg", "Antiemetic", "1 tablet, 3x/day before food"],
+  ["Ondansetron 4mg", "Antiemetic", "1 tablet, 2x/day"],
+  ["ORS Sachet", "Rehydration", "1 sachet in 1L water, as needed"],
+  ["Loperamide 2mg", "Antidiarrheal", "1 tablet after each loose stool, max 4/day"],
+  ["Metformin 500mg", "Antidiabetic", "1 tablet, 2x/day with food"],
+  ["Glimepiride 1mg", "Antidiabetic", "1 tablet, once daily before breakfast"],
+  ["Amlodipine 5mg", "Antihypertensive", "1 tablet, once daily"],
+  ["Losartan 50mg", "Antihypertensive", "1 tablet, once daily"],
+  ["Atenolol 50mg", "Beta Blocker", "1 tablet, once daily"],
+  ["Atorvastatin 10mg", "Statin", "1 tablet, once daily at night"],
+  ["Salbutamol Inhaler", "Bronchodilator", "2 puffs as needed"],
+  ["Cough Syrup (Dextromethorphan)", "Antitussive", "10ml, 3x/day"],
+  ["Vitamin D3 60000 IU", "Supplement", "1 sachet, once weekly"],
+  ["Vitamin B-Complex", "Supplement", "1 tablet, once daily"],
+  ["Iron + Folic Acid", "Supplement", "1 tablet, once daily after food"],
+  ["Calcium + Vitamin D3", "Supplement", "1 tablet, once daily"],
+  ["Multivitamin Tablet", "Supplement", "1 tablet, once daily"],
+  ["Diclofenac Gel", "Topical NSAID", "Apply 2-3x/day on affected area"],
+  ["Povidone Iodine Ointment", "Antiseptic", "Apply on wound, 2x/day"],
+  ["Hydrocortisone Cream 1%", "Topical Steroid", "Apply thin layer, 2x/day"],
+  ["Amoxicillin-Clavulanate 625mg", "Antibiotic", "1 tablet, 2x/day for 5-7 days"],
+  ["Diazepam 5mg", "Anxiolytic", "1 tablet at night, as directed"],
+  ["Prednisolone 5mg", "Corticosteroid", "As directed by physician"],
+  ["Insulin (as prescribed)", "Antidiabetic — Injectable", "As directed by physician"],
+  ["Thyroxine 50mcg", "Thyroid hormone", "1 tablet, once daily on empty stomach"],
+];
+
 const MIGRATIONS = [
   "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone TEXT",
   "ALTER TABLE users ADD COLUMN IF NOT EXISTS phone_verified INTEGER NOT NULL DEFAULT 0",
@@ -162,6 +238,8 @@ const MIGRATIONS = [
   "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS patient_age INTEGER",
   "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS close_reason TEXT",
   "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS photo_data TEXT",
+  "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS has_pharmacy INTEGER NOT NULL DEFAULT 0",
+  "ALTER TABLE pharmacy_staff ADD COLUMN IF NOT EXISTS is_active INTEGER NOT NULL DEFAULT 1",
 ];
 
 let ready = false;
@@ -177,6 +255,17 @@ async function init() {
         console.warn("[DB] migration skipped:", err.message);
       }
     }
+
+    for (const [name, category, commonDosage] of MEDICINE_SEED) {
+      const id = `med_${name.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`;
+      await client.query(
+        `INSERT INTO medicines (id, name, category, common_dosage)
+         VALUES ($1,$2,$3,$4)
+         ON CONFLICT (name) DO NOTHING`,
+        [id, name, category, commonDosage]
+      );
+    }
+
     ready = true;
     console.log("✅  Database ready (Supabase Postgres)");
   } finally {
@@ -184,7 +273,6 @@ async function init() {
   }
 }
 
-// ── Auto-clean expired OTPs every 10 minutes ─────────────────────────────────
 const otpCleanupInterval = setInterval(async () => {
   try {
     const result = await pool.query("DELETE FROM otp_pending WHERE expires_at < $1", [Date.now()]);
