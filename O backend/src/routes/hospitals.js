@@ -68,7 +68,7 @@ router.get("/", async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      "SELECT id, name, area, address, phone, rating, gradient, photo_url, photo_data, is_free FROM hospitals ORDER BY name ASC"
+      "SELECT id, name, area, address, phone, rating, gradient, photo_url, photo_data, is_free, has_pharmacy FROM hospitals ORDER BY name ASC"
     );
 
     // Batch doctor counts in ONE query instead of one query per hospital (fixes N+1)
@@ -97,6 +97,7 @@ router.get("/", async (req, res) => {
         rating: r.rating, gradient: r.gradient,
         photoUrl,
         isFree: r.is_free === 1,
+        hasPharmacy: r.has_pharmacy === 1,
         doctorCount: countMap[r.id] || 0,
       };
     });
