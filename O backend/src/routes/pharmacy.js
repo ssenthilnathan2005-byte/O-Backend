@@ -12,6 +12,30 @@ function requirePharmacyOrAdmin(req, res, next) {
   });
 }
 
+
+// ── POST create prescription (doctor) ────────────────────────────────────────
+router.post("/prescriptions", requireAuth, async (req, res) => {
+  try {
+    const { bookingId, doctorId, doctorName, patientId, patientName,
+            hospitalId, hospitalName, items = [], notes = "" } = req.body;
+    if (!bookingId || !doctorId || !hospitalId)
+      return res.status(400).json({ error: "bookingId, doctorId, hospitalId required" });
+    const id = "rx_" + Date.now() + "_" + Math.random().toString(36).substring(2, 8);
+    const { rows } = await pool.query(
+      `INSERT INTO prescriptions
+        (id, booking_id, doctor_id, doctor_name, patient_id, patient_name,
+         hospital_id, hospital_name, items, notes, status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
+       RETURNING *`,
+      [id, bookingId, doctorId, doctorName || "", patientId || "", patientName || "",
+       hospitalId, hospitalName || "", JSON.stringify(items), notes]
+    );
+    res.status(201).json({ ...rows[0], items: JSON.parse(rows[0].items || "[]") });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 // ── GET prescriptions for this hospital ──────────────────────────────────────
 router.get("/prescriptions", requirePharmacyOrAdmin, async (req, res) => {
   try {

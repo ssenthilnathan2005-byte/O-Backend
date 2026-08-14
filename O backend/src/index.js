@@ -147,6 +147,7 @@ const hospitalExportRoutes = require("./routes/hospital_exports");
 const pharmacyRoutes = require("./routes/pharmacy");
 app.use("/api/hospital", hospitalExportRoutes);
 app.use("/api/pharmacy", pharmacyRoutes);
+app.use("/api/prescriptions", pharmacyRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
