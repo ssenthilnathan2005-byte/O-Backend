@@ -39,13 +39,21 @@ router.get("/", requireAuth, async (req, res) => {
 
     let rows;
     if (req.user.role === "admin") {
-      ({ rows } = await pool.query("SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings ORDER BY created_at DESC LIMIT 500"));
+      ({ rows } = await pool.query("SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings ORDER BY created_at DESC LIMIT 200"));
     } else if (req.user.role === "doctor") {
       ({ rows } = await pool.query(
-        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings WHERE doctor_id=$1 ORDER BY date DESC, session ASC, token_number ASC LIMIT 300",
+        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings WHERE doctor_id=$1 AND date >= TO_CHAR(CURRENT_DATE - INTERVAL '7 days', 'YYYY-MM-DD') ORDER BY date DESC, session ASC, token_number ASC LIMIT 150",
         [req.user.doctorId]
       ));
     } else if (req.user.role === "hospital_admin") {
+      const { rows: haRows } = await pool.query(
+        "SELECT id FROM hospitals WHERE admin_user_id=$1",
+        [req.user.id]
+      );
+      const hospitalId = haRows[0]?.id ?? null;
+      if (!hospitalId) {
+        return res.status(403).json({ error: "Hospital not found for this account" });
+      }
       ({ rows } = await pool.query(
         `SELECT b.id, b.patient_id, b.patient_name, b.doctor_id, b.doctor_name, b.hospital_name,
                 b.date, b.session, b.token_number, b.session_id, b.payment_done, b.status,
@@ -53,9 +61,10 @@ router.get("/", requireAuth, async (req, res) => {
            FROM bookings b
            JOIN doctors d ON d.id = b.doctor_id
           WHERE d.hospital_id = $1
+            AND b.date >= TO_CHAR(CURRENT_DATE - INTERVAL '7 days', 'YYYY-MM-DD')
           ORDER BY b.date DESC, b.session ASC, b.token_number ASC
-          LIMIT 1000`,
-        [req.user.hospitalId]
+          LIMIT 200`,
+        [hospitalId]
       ));
     } else {
       ({ rows } = await pool.query(

@@ -62,7 +62,7 @@ async function withTx(sessionId, res, fn) {
   const client = await pool.connect();
   try {
     const row = await getState(sessionId, client);
-    if (!row) { client.release(); return res.status(404).json({ error: "Session not found" }); }
+    if (!row) { return res.status(404).json({ error: "Session not found" }); }
 
     try {
       await client.query("BEGIN");

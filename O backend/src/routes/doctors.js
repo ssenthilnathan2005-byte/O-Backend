@@ -1,7 +1,7 @@
 "use strict";
 const express = require("express");
 const { pool } = require("../db/init");
-const { requireAdmin, requireDoctorOrAdmin } = require("../middleware/auth");
+const { requireAdmin, requireDoctorOrAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
 
 const router = express.Router();
 
@@ -115,8 +115,8 @@ router.get("/", async (req, res) => {
     }
 
     const { rows } = req.query.hospitalId
-      ? await pool.query("SELECT * FROM doctors WHERE hospital_id=$1 ORDER BY name ASC", [req.query.hospitalId])
-      : await pool.query("SELECT * FROM doctors ORDER BY name ASC");
+      ? await pool.query("SELECT id, hospital_id, code, name, specialty, phone, bio, photo, price, consultation_fee, tokens_per_session, walk_in_interval, sessions, session_timings, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient FROM doctors WHERE hospital_id=$1 ORDER BY name ASC", [req.query.hospitalId])
+      : await pool.query("SELECT id, hospital_id, code, name, specialty, phone, bio, photo, price, consultation_fee, tokens_per_session, walk_in_interval, sessions, session_timings, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient FROM doctors ORDER BY name ASC");
 
     const result = rows.map(row2doctor);
     doctorListCache.set(cacheKey, { data: result, time: Date.now() });
@@ -139,7 +139,7 @@ router.get("/:id", async (req, res) => {
 });
 
 // ── POST create doctor ────────────────────────────────────────────────────────
-router.post("/", requireAdmin, async (req, res) => {
+router.post("/", requireAdminOrHospitalAdmin, async (req, res) => {
   try {
     const { name, specialty, hospitalId, phone = "", bio = "",
             price = 10, tokensPerSession = 20,
@@ -149,6 +149,9 @@ router.post("/", requireAdmin, async (req, res) => {
 
     if (!name || !specialty || !hospitalId)
       return res.status(400).json({ error: "name, specialty, and hospitalId are required" });
+
+    if (req.user.role === "hospital_admin" && req.user.hospitalId !== hospitalId)
+      return res.status(403).json({ error: "You can only add doctors to your own hospital" });
 
     const { rows: hospitalRows } = await pool.query("SELECT id FROM hospitals WHERE id=$1", [hospitalId]);
     if (!hospitalRows[0]) return res.status(404).json({ error: "Hospital not found" });
@@ -182,7 +185,16 @@ router.post("/", requireAdmin, async (req, res) => {
 });
 
 // ── PATCH update doctor ───────────────────────────────────────────────────────
-router.patch("/:id", requireDoctorOrAdmin, async (req, res) => {
+router.patch("/:id", async (req, res, next) => {
+  // Doctor, admin, and hospital_admin can all reach this route — ownership
+  // and field-level checks happen below once we know the role.
+  const { requireAuth } = require("../middleware/auth");
+  requireAuth(req, res, () => {
+    if (!["doctor", "admin", "hospital_admin"].includes(req.user.role))
+      return res.status(403).json({ error: "Doctor or admin access required" });
+    next();
+  });
+}, async (req, res) => {
   try {
     const { rows: existingRows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [req.params.id]);
     const row = existingRows[0];
@@ -191,12 +203,20 @@ router.patch("/:id", requireDoctorOrAdmin, async (req, res) => {
     if (req.user.role === "doctor" && req.user.doctorId !== req.params.id)
       return res.status(403).json({ error: "Cannot edit another doctor's profile" });
 
+    if (req.user.role === "hospital_admin" && req.user.hospitalId !== row.hospital_id)
+      return res.status(403).json({ error: "You can only edit doctors in your own hospital" });
+
     const {
       specialty, hospitalId, isAvailable, bio, sessionTimings,
       yearsOfExperience, education, languages, tokensPerSession,
       phone, contactPhone, photo, name, sessions, price, consultationFee, code,
       statusOverride, walkInInterval, avgMinutesPerPatient,
     } = req.body;
+
+    // hospital_admin can't move a doctor out of their own hospital
+    if (req.user.role === "hospital_admin" && hospitalId !== undefined && hospitalId !== req.user.hospitalId) {
+      return res.status(403).json({ error: "You can only assign doctors within your own hospital" });
+    }
 
     if (code !== undefined && req.user.role !== "admin") {
       return res.status(403).json({ error: "Only admins can change doctor codes" });
@@ -274,11 +294,16 @@ router.patch("/:id", requireDoctorOrAdmin, async (req, res) => {
 });
 
 // ── DELETE doctor ─────────────────────────────────────────────────────────────
-router.delete("/:id", requireAdmin, async (req, res) => {
+router.delete("/:id", requireAdminOrHospitalAdmin, async (req, res) => {
   const client = await pool.connect();
   try {
     const { rows } = await client.query("SELECT * FROM doctors WHERE id=$1", [req.params.id]);
     if (!rows[0]) { client.release(); return res.status(404).json({ error: "Doctor not found" }); }
+
+    if (req.user.role === "hospital_admin" && req.user.hospitalId !== rows[0].hospital_id) {
+      client.release();
+      return res.status(403).json({ error: "You can only delete doctors in your own hospital" });
+    }
 
     try {
       await client.query("BEGIN");

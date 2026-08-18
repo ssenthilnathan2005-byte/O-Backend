@@ -17,6 +17,8 @@ function requirePharmacyOrAdmin(req, res, next) {
 // ── POST create prescription (doctor) ────────────────────────────────────────
 router.post("/", requireAuth, async (req, res) => {
   try {
+    if (req.user.role !== "doctor" && req.user.role !== "admin")
+      return res.status(403).json({ error: "Only doctors can create prescriptions" });
     const { bookingId, doctorId, doctorName, patientId, patientName,
             hospitalId, hospitalName, items = [], notes = "" } = req.body;
     if (!bookingId || !doctorId || !hospitalId)
@@ -85,14 +87,16 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
     const timestampCol = status === "packed" ? "packed_at" : status === "ready" ? "ready_at" : "handed_over_at";
     const packedBy = status === "packed" ? req.user.pharmacyStaffId || null : null;
 
+    const params = [status, now];
+    let setClause = `status=$1, ${timestampCol}=$2`;
+    if (status === "packed") { params.push(packedBy); setClause += `, packed_by=$${params.length}`; }
+    params.push(req.params.id);
+    let whereClause = `id=$${params.length}`;
+    if (req.user.role !== "admin") { params.push(req.user.hospitalId); whereClause += ` AND hospital_id=$${params.length}`; }
+
     const { rows } = await pool.query(
-      `UPDATE prescriptions SET status=$1, ${timestampCol}=$2 ${status === "packed" ? ", packed_by=$3" : ""}
-       WHERE id=${status === "packed" ? "$4" : "$3"}
-       ${req.user.role !== "admin" ? `AND hospital_id='${req.user.hospitalId}'` : ""}
-       RETURNING *`,
-      status === "packed"
-        ? [status, now, packedBy, req.params.id]
-        : [status, now, req.params.id]
+      `UPDATE prescriptions SET ${setClause} WHERE ${whereClause} RETURNING *`,
+      params
     );
     if (!rows.length) return res.status(404).json({ error: "Prescription not found" });
     const updated = { ...rows[0], items: JSON.parse(rows[0].items || "[]") };
@@ -169,7 +173,14 @@ router.post("/staff", requireAdminOrHospitalAdmin, async (req, res) => {
 // ── DELETE pharmacy staff ─────────────────────────────────────────────────────
 router.delete("/staff/:id", requireAdminOrHospitalAdmin, async (req, res) => {
   try {
-    
+    if (req.user.role === "hospital_admin") {
+      const { rows } = await pool.query(
+        "UPDATE pharmacy_staff SET is_active=0 WHERE id=$1 AND hospital_id=$2 RETURNING id",
+        [req.params.id, req.user.hospitalId]
+      );
+      if (!rows.length) return res.status(404).json({ error: "Staff not found" });
+      return res.json({ success: true });
+    }
     await pool.query("UPDATE pharmacy_staff SET is_active=0 WHERE id=$1", [req.params.id]);
     res.json({ success: true });
   } catch (err) {

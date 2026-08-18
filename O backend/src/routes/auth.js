@@ -513,6 +513,46 @@ router.post(
   }
 );
 
+// ── Pharmacy staff login ───────────────────────────────────────────────────────
+router.post(
+  "/pharmacy/login",
+  [body("code").trim().notEmpty(), body("phone").trim().notEmpty()],
+  async (req, res) => {
+    if (!validate(req, res)) return;
+    try {
+      const { code, phone } = req.body;
+      const { rows: staffRows } = await pool.query(
+        "SELECT ps.*, h.name AS hospital_name FROM pharmacy_staff ps JOIN hospitals h ON h.id = ps.hospital_id WHERE UPPER(ps.code)=UPPER($1)",
+        [String(code || "").trim()]
+      );
+      const staff = staffRows[0];
+
+      if (!staff || staff.is_active === 0) {
+        return res.status(401).json({ error: "Invalid access code. Please check with your admin." });
+      }
+      if (String(phone || "").trim() !== String(staff.phone || "").trim()) {
+        return res
+          .status(401)
+          .json({ error: "Incorrect password. Use your registered phone number." });
+      }
+
+      const payload = {
+        id: `ph_${staff.code}`,
+        code: staff.code,
+        pharmacyStaffId: staff.id,
+        hospitalId: staff.hospital_id,
+        hospitalName: staff.hospital_name,
+        role: "pharmacy",
+      };
+
+      return res.json({ token: sign(payload), user: payload });
+    } catch (err) {
+      console.error("[auth pharmacy/login]", err.message);
+      return res.status(500).json({ error: err.message });
+    }
+  }
+);
+
 // ── Admin login ──────────────────────────────────────────────────────────────
 router.post(
   "/admin/login",
@@ -707,6 +747,61 @@ router.post("/patient/reset-password", async (req, res) => {
     return res
       .status(500)
       .json({ error: "Failed to reset password. Please try again." });
+  }
+});
+
+// ── Hospital Admin Login ────────────────────────────────────────────────────
+// Step 1: POST loginId only (no password) is NOT supported — front end always
+// sends both; if the account has never set a password (first_login=1) we
+// tell the client to show the "set password" screen instead of comparing.
+router.post("/hospital/login", async (req, res) => {
+  try {
+    const { loginId, password } = req.body;
+    if (!loginId || !password) return res.status(400).json({ error: "loginId and password are required" });
+
+    const { rows: hospRows } = await pool.query("SELECT * FROM hospitals WHERE login_id=$1", [String(loginId).trim()]);
+    const hospital = hospRows[0];
+    if (!hospital) return res.status(401).json({ error: "Invalid login ID" });
+    if (!hospital.admin_user_id) return res.status(401).json({ error: "No admin account set up for this hospital" });
+
+    const { rows: userRows } = await pool.query("SELECT * FROM users WHERE id=$1", [hospital.admin_user_id]);
+    const user = userRows[0];
+    if (!user) return res.status(401).json({ error: "Admin account not found" });
+
+    if (user.first_login === 1) {
+      return res.json({ firstLogin: true, loginId, hospitalId: hospital.id, hospitalName: hospital.name });
+    }
+
+    const ok = await bcrypt.compare(password, user.password || "");
+    if (!ok) return res.status(401).json({ error: "Incorrect password" });
+
+    const payload = { id: user.id, role: "hospital_admin", hospitalId: hospital.id, hospitalName: hospital.name };
+    return res.json({ token: sign(payload), user: payload });
+  } catch (err) {
+    console.error("[auth hospital/login]", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Hospital Admin — set password on first login ────────────────────────────
+router.post("/hospital/set-password", async (req, res) => {
+  try {
+    const { loginId, newPassword } = req.body;
+    if (!loginId || !newPassword) return res.status(400).json({ error: "loginId and newPassword are required" });
+    if (String(newPassword).length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+
+    const { rows: hospRows } = await pool.query("SELECT * FROM hospitals WHERE login_id=$1", [String(loginId).trim()]);
+    const hospital = hospRows[0];
+    if (!hospital || !hospital.admin_user_id) return res.status(404).json({ error: "Hospital not found" });
+
+    const hash = await bcrypt.hash(newPassword, 10);
+    await pool.query("UPDATE users SET password=$1, first_login=0 WHERE id=$2", [hash, hospital.admin_user_id]);
+
+    const payload = { id: hospital.admin_user_id, role: "hospital_admin", hospitalId: hospital.id, hospitalName: hospital.name };
+    return res.json({ token: sign(payload), user: payload });
+  } catch (err) {
+    console.error("[auth hospital/set-password]", err.message);
+    return res.status(500).json({ error: err.message });
   }
 });
 

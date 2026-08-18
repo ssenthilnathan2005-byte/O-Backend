@@ -39,6 +39,7 @@ async function sendWhatsApp(phone, templateName, components) {
 }
 
 async function sendBookingConfirmation({ phone, patientName, doctorName, hospitalName, date, session, tokenNumber }) {
+  return; // disabled
   if (!phone) return;
   const p = String(phone).replace(/\D/g, "");
   const fullPhone = p.startsWith("91") ? p : `91${p}`;
@@ -53,6 +54,7 @@ async function sendBookingConfirmation({ phone, patientName, doctorName, hospita
 }
 
 async function sendTokenCalled({ phone, patientName, tokenNumber, doctorName, hospitalName }) {
+  return; // disabled
   if (!phone) return;
   const p = String(phone).replace(/\D/g, "");
   const fullPhone = p.startsWith("91") ? p : `91${p}`;

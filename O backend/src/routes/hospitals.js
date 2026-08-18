@@ -68,7 +68,7 @@ router.get("/", async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      "SELECT id, name, area, address, phone, rating, gradient, photo_url, photo_data, is_free, has_pharmacy FROM hospitals ORDER BY name ASC"
+      "SELECT id, name, area, address, phone, rating, gradient, photo_url, is_free, has_pharmacy FROM hospitals ORDER BY name ASC"
     );
 
     // Batch doctor counts in ONE query instead of one query per hospital (fixes N+1)
