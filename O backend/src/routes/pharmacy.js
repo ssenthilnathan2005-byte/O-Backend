@@ -33,7 +33,27 @@ router.post("/", requireAuth, async (req, res) => {
       [id, bookingId, doctorId, doctorName || "", patientId || "", patientName || "",
        hospitalId, hospitalName || "", JSON.stringify(items), notes]
     );
-    res.status(201).json({ ...rows[0], items: JSON.parse(rows[0].items || "[]") });
+    // Notify patient via WebSocket — same room used for status updates,
+    // so the app can toast + redirect the moment a new prescription lands.
+    try {
+      broadcast(`patient_${rows[0].patient_id}`, {
+        type: "prescription_created",
+        prescriptionId: rows[0].id,
+        status: rows[0].status,
+        patientId: rows[0].patient_id,
+        doctorName: rows[0].doctor_name,
+      });
+    } catch (_) {}
+    const created = { ...rows[0], items: JSON.parse(rows[0].items || "[]") };
+    try {
+      broadcast(`patient_${created.patient_id}`, {
+        type: "prescription_created",
+        prescriptionId: created.id,
+        doctorName: created.doctor_name,
+        patientId: created.patient_id,
+      });
+    } catch (_) {}
+    res.status(201).json(created);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -51,6 +71,34 @@ router.get("/my", requireAuth, async (req, res) => {
       [patientId]
     );
     res.json(rows.map(r => ({ ...r, items: JSON.parse(r.items || "[]") })));
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// ── PATCH patient confirms receipt (must already be handed_over) ───────────────────
+router.patch("/my/:id/confirm", requireAuth, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `UPDATE prescriptions
+          SET patient_confirmed = 1, confirmed_at = NOW()
+        WHERE id = $1 AND patient_id = $2 AND status = 'handed_over' AND patient_confirmed = 0
+        RETURNING *`,
+      [req.params.id, req.user.id]
+    );
+    if (!rows.length) {
+      return res.status(409).json({ error: "Prescription not ready to confirm yet" });
+    }
+    const updated = { ...rows[0], items: JSON.parse(rows[0].items || "[]") };
+    try {
+      broadcast(`patient_${rows[0].patient_id}`, {
+        type: "prescription_update",
+        prescriptionId: rows[0].id,
+        status: rows[0].status,
+        patientId: rows[0].patient_id,
+      });
+    } catch (_) {}
+    res.json(updated);
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
