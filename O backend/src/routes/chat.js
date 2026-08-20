@@ -35,7 +35,7 @@ router.post("/", async (req, res) => {
         "Authorization": `Bearer ${GROQ_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
+        model: "groq/compound",
         messages: [
           { role: "system", content: SYSTEM_PROMPT + "\n\n" + langInstruction },
           { role: "user", content: message },
