@@ -245,7 +245,11 @@ const MIGRATIONS = [
   "ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ",
   "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS admin_user_id TEXT REFERENCES users(id) ON DELETE SET NULL",
   "ALTER TABLE users ADD COLUMN IF NOT EXISTS first_login INTEGER NOT NULL DEFAULT 0",
+  "CREATE TABLE IF NOT EXISTS inward_patients (id TEXT PRIMARY KEY, hospital_id TEXT NOT NULL REFERENCES hospitals(id) ON DELETE CASCADE, patient_name TEXT NOT NULL, phone TEXT, age INTEGER, gender TEXT, ward TEXT, bed_number TEXT, admitting_doctor_id TEXT REFERENCES doctors(id) ON DELETE SET NULL, admitting_doctor_name TEXT, diagnosis TEXT, notes TEXT, status TEXT NOT NULL DEFAULT 'admitted' CHECK(status IN ('admitted','discharged')), admitted_at TIMESTAMPTZ NOT NULL DEFAULT now(), discharged_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now())",
+  "CREATE INDEX IF NOT EXISTS idx_inward_hospital ON inward_patients(hospital_id)",
+  "CREATE INDEX IF NOT EXISTS idx_inward_status ON inward_patients(status)",
 ];
+
 
 let ready = false;
 async function init() {

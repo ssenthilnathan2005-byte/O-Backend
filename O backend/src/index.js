@@ -145,8 +145,10 @@ const doctorExportRoutes = require("./routes/doctor_exports");
 app.use("/api/doctor", doctorExportRoutes);
 const hospitalExportRoutes = require("./routes/hospital_exports");
 const pharmacyRoutes = require("./routes/pharmacy");
+const inwardRoutes   = require("./routes/inward");
 app.use("/api/hospital", hospitalExportRoutes);
 app.use("/api/pharmacy", pharmacyRoutes);
+app.use("/api/inward",   inwardRoutes);
 app.use("/api/prescriptions", pharmacyRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
