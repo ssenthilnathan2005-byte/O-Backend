@@ -33,6 +33,8 @@ const paymentRoutes  = require("./routes/payments");
 const pushRoutes = require("./routes/push");
 const chatRoutes = require("./routes/chat");
 const adminCleanupRoutes = require("./routes/admin");
+const pharmacyOwnerRoutes = require("./routes/pharmacy_owner");
+const pharmaciesPublicRoutes = require("./routes/pharmacies_public");
 
 const app  = express();
 const PORT = process.env.PORT || 4000;
@@ -148,6 +150,8 @@ const pharmacyRoutes = require("./routes/pharmacy");
 const inwardRoutes   = require("./routes/inward");
 app.use("/api/hospital", hospitalExportRoutes);
 app.use("/api/pharmacy", pharmacyRoutes);
+app.use("/api/pharmacy-owner", pharmacyOwnerRoutes);
+app.use("/api/pharmacies", pharmaciesPublicRoutes);
 app.use("/api/inward",   inwardRoutes);
 app.use("/api/prescriptions", pharmacyRoutes);
 

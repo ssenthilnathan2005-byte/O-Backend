@@ -224,6 +224,46 @@ const MEDICINE_SEED = [
   ["Prednisolone 5mg", "Corticosteroid", "As directed by physician"],
   ["Insulin (as prescribed)", "Antidiabetic — Injectable", "As directed by physician"],
   ["Thyroxine 50mcg", "Thyroid hormone", "1 tablet, once daily on empty stomach"],
+
+  // ── Pharmacy Owner feature ──────────────────────────────────────────────
+  `CREATE TABLE IF NOT EXISTS pharmacies (
+    id            TEXT PRIMARY KEY,
+    owner_id      TEXT,
+    hospital_id   TEXT REFERENCES hospitals(id) ON DELETE SET NULL,
+    name          TEXT NOT NULL,
+    description   TEXT,
+    address       TEXT,
+    area          TEXT,
+    phone         TEXT,
+    email         TEXT,
+    latitude      TEXT,
+    longitude     TEXT,
+    opening_hours TEXT,
+    logo_url      TEXT,
+    is_active     INTEGER NOT NULL DEFAULT 1,
+    created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS pharmacy_owners (
+    id          TEXT PRIMARY KEY,
+    pharmacy_id TEXT REFERENCES pharmacies(id) ON DELETE CASCADE,
+    name        TEXT NOT NULL,
+    email       TEXT UNIQUE NOT NULL,
+    password    TEXT NOT NULL,
+    phone       TEXT,
+    is_active   INTEGER NOT NULL DEFAULT 1,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`,
+  `CREATE TABLE IF NOT EXISTS pharmacy_enquiries (
+    id          TEXT PRIMARY KEY,
+    pharmacy_id TEXT NOT NULL REFERENCES pharmacies(id) ON DELETE CASCADE,
+    patient_id  TEXT REFERENCES users(id) ON DELETE SET NULL,
+    name        TEXT NOT NULL,
+    phone       TEXT NOT NULL,
+    message     TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_pharmacies_area ON pharmacies(area)",
+  "CREATE INDEX IF NOT EXISTS idx_pharmacy_enquiries_pharmacy ON pharmacy_enquiries(pharmacy_id)",
 ];
 
 const MIGRATIONS = [

@@ -2,7 +2,8 @@
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
-const { nanoid } = require("nanoid");
+const { randomBytes } = require("crypto");
+function nanoid(n=10) { return randomBytes(n).toString("hex").slice(0,n); }
 const router = express.Router();
 
 function adminOnly(req, res, next) {
