@@ -38,7 +38,7 @@ router.post("/", async (req, res) => {
         "Authorization": `Bearer ${GROQ_API_KEY}`,
       },
       body: JSON.stringify({
-        model: "groq/compound",
+        model: "llama-3.3-70b-versatile",
         messages: [
           { role: "system", content: SYSTEM_PROMPT + "\n\n" + langInstruction },
           { role: "user", content: message },
@@ -167,7 +167,7 @@ async function toolFindHospitals(args) {
   );
   if (rows.length === 0) return { hospitals: [], message: "No hospitals found matching that name or area." };
   return {
-    hospitals: rows.map(r => ({ id: r.id, name: r.name, area: r.area, isFree: r.is_free === 1 })),
+    hospitals: rows.map(r => ({ id: r.id, name: r.name, area: r.area, isFree: Number(r.is_free) === 1 })),
   };
 }
 
@@ -196,7 +196,7 @@ async function toolCheckSession(args) {
   if (!doctor) return { error: "Doctor not found" };
   const sessionId = `${args.doctorId}_${args.date}_${args.session}`;
   const { rows: countRows } = await pool.query(
-    "SELECT COUNT(*) as c FROM bookings WHERE session_id=$1 AND payment_done=1 AND status!='cancelled'",
+    "SELECT COUNT(*) as c FROM bookings WHERE session_id=$1 AND payment_done=TRUE AND status!='cancelled'",
     [sessionId]
   );
   const booked = Number(countRows[0].c);
@@ -218,11 +218,11 @@ async function toolBookToken(args, user) {
     const { rows: doctorRows } = await client.query("SELECT * FROM doctors WHERE id=$1", [args.doctorId]);
     const doctor = doctorRows[0];
     if (!doctor) return { error: "Doctor not found" };
-    if (!doctor.is_available) return { error: "This doctor is not available right now" };
+    if (!doctor.is_available || doctor.is_available === 0) return { error: "This doctor is not available right now" };
 
     const { rows: hospitalRows } = await client.query("SELECT name, is_free FROM hospitals WHERE id=$1", [doctor.hospital_id]);
     const hospital = hospitalRows[0];
-    if (!hospital || hospital.is_free !== 1) {
+    if (!hospital || Number(hospital.is_free) !== 1) {
       return { error: "This hospital requires payment and cannot be booked by voice. Please use the app to complete payment." };
     }
 
@@ -240,7 +240,7 @@ async function toolBookToken(args, user) {
       await client.query("BEGIN");
 
       const { rows: countRows } = await client.query(
-        "SELECT COUNT(*) as c FROM bookings WHERE session_id=$1 AND payment_done=1 AND status!='cancelled'",
+        "SELECT COUNT(*) as c FROM bookings WHERE session_id=$1 AND payment_done=TRUE AND status!='cancelled'",
         [sessionId]
       );
       const count = Number(countRows[0].c);
