@@ -6,7 +6,7 @@ const { requireAuth } = require("../middleware/auth");
 const { broadcast } = require("../services/ws");
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
-const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent";
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent";
 
 const SYSTEM_PROMPT = `You are DB Guide, a patient assistant for DoctorBooked — an OPD token booking platform for private hospitals in India.
 Help with: booking tokens (hospital→doctor→date/session→pay→get token), live queue tracking (My Tokens→tap booking), sessions (Morning/Afternoon/Evening, limited slots), payments (Razorpay, UPI/cards, auto-refund), doctor specialty suggestions based on symptoms.
@@ -40,7 +40,7 @@ router.post("/", async (req, res) => {
       body: JSON.stringify({
         system_instruction: { parts: [{ text: SYSTEM_PROMPT + "\n\n" + langInstruction }] },
         contents: [{ role: "user", parts: [{ text: message }] }],
-        generationConfig: { temperature: 0.4, maxOutputTokens: 300 },
+        generationConfig: { temperature: 0.4, maxOutputTokens: 500 },
       }),
     });
 
@@ -371,7 +371,7 @@ router.post("/voice-booking", requireAuth, async (req, res) => {
             parts: [{ text: m.content || "" }],
           })),
           tools: [{ functionDeclarations: VOICE_TOOLS.map(t => ({ name: t.function.name, description: t.function.description, parameters: t.function.parameters })) }],
-          generationConfig: { temperature: 0.3, maxOutputTokens: 300 },
+          generationConfig: { temperature: 0.3, maxOutputTokens: 500 },
         }),
       });
 
