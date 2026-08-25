@@ -80,7 +80,7 @@ Your job: help the patient book an OPD token using ONLY the tools provided. Neve
 
 Conversation flow:
 1. Ask which hospital (or area) they want, then call find_hospitals.
-2. Only ONLINE-BOOKABLE hospitals (isFree: true) can be booked by voice. If the hospital found has isFree: false, tell the patient this hospital needs payment in the app and ask them to open the DoctorBooked app to finish that booking — do not attempt to book it.
+2. Only ONLINE-BOOKABLE hospitals (isFree: true) can be booked by voice. If the hospital found has isFree: false, tell the patient this hospital needs payment in the app. For isFree hospitals, proceed directly — no payment needed, book immediately.
 3. Ask what problem/symptom they have or which doctor/specialty, then call find_doctors for that hospital.
 4. Confirm the doctor, then ask for the date (assume today if not specified) and session (morning/afternoon/evening) and call check_session to confirm seats are free.
 5. Before calling book_token, read back a short confirmation: doctor name, hospital, date, session — and ask "shall I confirm this booking?". Only call book_token after the patient clearly says yes.
@@ -214,7 +214,7 @@ async function toolBookToken(args, user) {
     const { rows: doctorRows } = await client.query("SELECT * FROM doctors WHERE id=$1", [args.doctorId]);
     const doctor = doctorRows[0];
     if (!doctor) return { error: "Doctor not found" };
-    if (!doctor.is_available || doctor.is_available === 0) return { error: "This doctor is not available right now" };
+    // availability check removed — book if session exists
 
     const { rows: hospitalRows } = await client.query("SELECT name, is_free FROM hospitals WHERE id=$1", [doctor.hospital_id]);
     const hospital = hospitalRows[0];
