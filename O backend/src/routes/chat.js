@@ -5,8 +5,8 @@ const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
 const { broadcast } = require("../services/ws");
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
+const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.6-flash:generateContent";
 
 const SYSTEM_PROMPT = `You are DB Guide, a patient assistant for DoctorBooked — an OPD token booking platform for private hospitals in India.
 Help with: booking tokens (hospital→doctor→date/session→pay→get token), live queue tracking (My Tokens→tap booking), sessions (Morning/Afternoon/Evening, limited slots), payments (Razorpay, UPI/cards, auto-refund), doctor specialty suggestions based on symptoms.
@@ -23,7 +23,7 @@ router.post("/", async (req, res) => {
   const { message, lang } = req.body;
   if (!message || typeof message !== "string")
     return res.status(400).json({ error: "message is required" });
-  if (!GROQ_API_KEY)
+  if (!GEMINI_API_KEY)
     return res.status(500).json({ error: "Chat service not configured" });
 
   try {
@@ -31,31 +31,27 @@ router.post("/", async (req, res) => {
       ? "The user is communicating in Tamil. Respond entirely in Tamil."
       : "Respond in English.";
 
-    const response = await fetch(GROQ_URL, {
+    const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${GROQ_API_KEY}`,
+        
       },
       body: JSON.stringify({
-        model: "llama-3.3-70b-versatile",
-        messages: [
-          { role: "system", content: SYSTEM_PROMPT + "\n\n" + langInstruction },
-          { role: "user", content: message },
-        ],
-        temperature: 0.4,
-        max_tokens: 300,
+        system_instruction: { parts: [{ text: SYSTEM_PROMPT + "\n\n" + langInstruction }] },
+        contents: [{ role: "user", parts: [{ text: message }] }],
+        generationConfig: { temperature: 0.4, maxOutputTokens: 300 },
       }),
     });
 
     const data = await response.json();
     if (!response.ok) {
-      console.error("[CHAT] Groq error:", data);
+      console.error("[CHAT] Gemini error:", data);
       return res.status(502).json({ error: "AI service error" });
     }
 
     const reply =
-      data?.choices?.[0]?.message?.content?.trim() ||
+      data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() ||
       (lang === "ta"
         ? "மன்னிக்கவும், மீண்டும் முயற்சிக்கவும்."
         : "Sorry, please try again.");
@@ -76,7 +72,7 @@ router.post("/", async (req, res) => {
 // to the model, and loop until it produces a final spoken reply.
 // ══════════════════════════════════════════════════════════════════════════
 
-const VOICE_MODEL = "llama-3.3-70b-versatile"; // tool-calling capable Groq model
+// Gemini used for both chat and voice
 
 const VOICE_SYSTEM_PROMPT = `You are the DoctorBooked Voice Booking Assistant. The patient is speaking to you hands-free — your replies are read aloud by text-to-speech, so keep every reply SHORT (1-2 short sentences), natural to say out loud, and never use lists, markdown, or symbols.
 
@@ -345,7 +341,7 @@ router.post("/voice-booking", requireAuth, async (req, res) => {
   const { messages, lang } = req.body;
   if (!Array.isArray(messages) || messages.length === 0)
     return res.status(400).json({ error: "messages array is required" });
-  if (!GROQ_API_KEY)
+  if (!GEMINI_API_KEY)
     return res.status(500).json({ error: "Chat service not configured" });
 
   const langInstruction = lang === "ta"
@@ -362,51 +358,50 @@ router.post("/voice-booking", requireAuth, async (req, res) => {
     let booking = null;
 
     for (let iteration = 0; iteration < 5; iteration++) {
-      const response = await fetch(GROQ_URL, {
+      const response = await fetch(`${GEMINI_URL}?key=${GEMINI_API_KEY}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${GROQ_API_KEY}`,
+          
         },
         body: JSON.stringify({
-          model: VOICE_MODEL,
-          messages: convo,
-          tools: VOICE_TOOLS,
-          tool_choice: "auto",
-          temperature: 0.3,
-          max_tokens: 300,
+          system_instruction: convo[0]?.role === "system" ? { parts: [{ text: convo[0].content }] } : undefined,
+          contents: convo.filter(m => m.role !== "system").map(m => ({
+            role: m.role === "assistant" ? "model" : "user",
+            parts: [{ text: m.content || "" }],
+          })),
+          tools: [{ functionDeclarations: VOICE_TOOLS.map(t => ({ name: t.function.name, description: t.function.description, parameters: t.function.parameters })) }],
+          generationConfig: { temperature: 0.3, maxOutputTokens: 300 },
         }),
       });
 
       const data = await response.json();
       if (!response.ok) {
-        console.error("[voice-booking] Groq error:", data);
+        console.error("[voice-booking] Gemini error:", data);
         return res.status(502).json({ error: "AI service error" });
       }
 
-      const choice = data?.choices?.[0]?.message;
-      if (!choice) return res.status(502).json({ error: "AI service returned no response" });
+      const candidate = data?.candidates?.[0]?.content;
+      if (!candidate) return res.status(502).json({ error: "AI service returned no response" });
 
-      const toolCalls = choice.tool_calls || [];
-      if (toolCalls.length === 0) {
+      const fnCalls = candidate.parts?.filter(p => p.functionCall) || [];
+      const textPart = candidate.parts?.find(p => p.text)?.text?.trim();
+
+      if (fnCalls.length === 0) {
         return res.json({
-          reply: choice.content?.trim() || (lang === "ta" ? "மன்னிக்கவும், மீண்டும் முயற்சிக்கவும்." : "Sorry, please try again."),
+          reply: textPart || (lang === "ta" ? "மன்னிக்கவும், மீண்டும் முயற்சிக்கவும்." : "Sorry, please try again."),
           booking,
         });
       }
 
-      convo.push({ role: "assistant", content: choice.content || null, tool_calls: toolCalls });
+      convo.push({ role: "assistant", content: textPart || null });
 
-      for (const call of toolCalls) {
-        let args = {};
-        try { args = JSON.parse(call.function.arguments || "{}"); } catch { /* keep empty */ }
-        const result = await runTool(call.function.name, args, req.user);
-        if (call.function.name === "book_token" && result?.success) booking = result;
-        convo.push({
-          role: "tool",
-          tool_call_id: call.id,
-          content: JSON.stringify(result),
-        });
+      for (const part of fnCalls) {
+        const name = part.functionCall.name;
+        const args = part.functionCall.args || {};
+        const result = await runTool(name, args, req.user);
+        if (name === "book_token" && result?.success) booking = result;
+        convo.push({ role: "user", content: JSON.stringify({ tool: name, result }) });
       }
     }
 
