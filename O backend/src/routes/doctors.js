@@ -83,6 +83,7 @@ function row2doctor(r) {
     walkInInterval: r.walk_in_interval ?? 5,
     sessions: r.sessions ? r.sessions.split(",") : ["morning","afternoon"],
     sessionTimings: r.session_timings ? JSON.parse(r.session_timings) : null,
+    scheduleConfig: r.schedule_config ? JSON.parse(r.schedule_config) : null,
     isAvailable: r.is_available === 1,
     yearsOfExperience: r.years_of_experience || "",
     education: r.education || "",
@@ -207,7 +208,7 @@ router.patch("/:id", async (req, res, next) => {
       return res.status(403).json({ error: "You can only edit doctors in your own hospital" });
 
     const {
-      specialty, hospitalId, isAvailable, bio, sessionTimings,
+      specialty, hospitalId, isAvailable, bio, sessionTimings, scheduleConfig,
       yearsOfExperience, education, languages, tokensPerSession,
       phone, contactPhone, photo, name, sessions, price, consultationFee, code,
       statusOverride, walkInInterval, avgMinutesPerPatient,
@@ -258,8 +259,9 @@ router.patch("/:id", async (req, res, next) => {
         phone               = COALESCE($16, phone),
         code                = COALESCE($17, code),
         status_override     = COALESCE($18, status_override),
-        avg_minutes_per_patient = COALESCE($19, avg_minutes_per_patient)
-       WHERE id=$20`,
+        avg_minutes_per_patient = COALESCE($19, avg_minutes_per_patient),
+        schedule_config     = COALESCE($20, schedule_config)
+       WHERE id=$21`,
       [
         name         || null,
         specialty    || null,
@@ -280,6 +282,7 @@ router.patch("/:id", async (req, res, next) => {
         finalCode,
         statusOverride ?? null,
         avgMinutesPerPatient ?? null,
+        scheduleConfig ? JSON.stringify(scheduleConfig) : null,
         req.params.id,
       ]
     );
