@@ -192,7 +192,7 @@ async function toolCheckSession(args) {
   if (!doctor) return { error: "Doctor not found" };
   const sessionId = `${args.doctorId}_${args.date}_${args.session}`;
   const { rows: countRows } = await pool.query(
-    "SELECT COUNT(*) as c FROM bookings WHERE session_id=$1 AND payment_done=TRUE AND status!='cancelled'",
+    "SELECT COUNT(*) as c FROM bookings WHERE session_id=$1 AND payment_done=1 AND status!='cancelled'",
     [sessionId]
   );
   const booked = Number(countRows[0].c);
@@ -236,7 +236,7 @@ async function toolBookToken(args, user) {
       await client.query("BEGIN");
 
       const { rows: countRows } = await client.query(
-        "SELECT COUNT(*) as c FROM bookings WHERE session_id=$1 AND payment_done=TRUE AND status!='cancelled'",
+        "SELECT COUNT(*) as c FROM bookings WHERE session_id=$1 AND payment_done=1 AND status!='cancelled'",
         [sessionId]
       );
       const count = Number(countRows[0].c);
