@@ -5,6 +5,7 @@ const { requireAuth, requireAdmin, requireDoctorOrAdmin } = require("../middlewa
 const { broadcast } = require("../services/ws");
 const { markStaleConfirmedAsUnvisited, refundExpiredBookings } = require("../services/scheduler");
 const { validateRequiredIndianPhone } = require("../utils/phone");
+const { getSessionCapacity } = require("../utils/scheduleCapacity");
 
 const router = express.Router();
 
@@ -142,7 +143,8 @@ router.post("/", requireAuth, async (req, res) => {
         [sessionId]
       );
       const count = Number(countRows[0].c);
-      if (count >= doctor.tokens_per_session)
+      const capacity = getSessionCapacity(doctor, date, session);
+      if (count >= capacity)
         throw Object.assign(new Error("This session is fully booked"), { status: 409 });
 
       const { rows: dupRows } = await client.query(

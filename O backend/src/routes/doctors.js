@@ -80,6 +80,7 @@ function row2doctor(r) {
     bio: r.bio || "", photo: r.photo || null,
     price: r.price, consultationFee: r.consultation_fee,
     tokensPerSession: r.tokens_per_session,
+    scheduleConfig: r.schedule_config ? (typeof r.schedule_config === 'string' ? JSON.parse(r.schedule_config) : r.schedule_config) : null,
     walkInInterval: r.walk_in_interval ?? 5,
     sessions: r.sessions ? r.sessions.split(",") : ["morning","afternoon"],
     sessionTimings: r.session_timings ? JSON.parse(r.session_timings) : null,
@@ -116,8 +117,8 @@ router.get("/", async (req, res) => {
     }
 
     const { rows } = req.query.hospitalId
-      ? await pool.query("SELECT id, hospital_id, code, name, specialty, phone, bio, photo, price, consultation_fee, tokens_per_session, walk_in_interval, sessions, session_timings, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient FROM doctors WHERE hospital_id=$1 ORDER BY name ASC", [req.query.hospitalId])
-      : await pool.query("SELECT id, hospital_id, code, name, specialty, phone, bio, photo, price, consultation_fee, tokens_per_session, walk_in_interval, sessions, session_timings, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient FROM doctors ORDER BY name ASC");
+      ? await pool.query("SELECT id, hospital_id, code, name, specialty, phone, bio, photo, price, consultation_fee, tokens_per_session, walk_in_interval, sessions, session_timings, schedule_config, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient FROM doctors WHERE hospital_id=$1 ORDER BY name ASC", [req.query.hospitalId])
+      : await pool.query("SELECT id, hospital_id, code, name, specialty, phone, bio, photo, price, consultation_fee, tokens_per_session, walk_in_interval, sessions, session_timings, schedule_config, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient FROM doctors ORDER BY name ASC");
 
     const result = rows.map(row2doctor);
     doctorListCache.set(cacheKey, { data: result, time: Date.now() });
@@ -145,7 +146,7 @@ router.post("/", requireAdminOrHospitalAdmin, async (req, res) => {
     const { name, specialty, hospitalId, phone = "", bio = "",
             price = 10, tokensPerSession = 20,
             sessions = ["morning","afternoon"],
-            sessionTimings = null, yearsOfExperience = "",
+            sessionTimings = null, scheduleConfig = null, yearsOfExperience = "",
             education = "", languages = [] } = req.body;
 
     if (!name || !specialty || !hospitalId)
@@ -163,14 +164,15 @@ router.post("/", requireAdminOrHospitalAdmin, async (req, res) => {
     await pool.query(
       `INSERT INTO doctors
         (id, hospital_id, code, name, specialty, phone, bio, price, consultation_fee,
-         tokens_per_session, sessions, session_timings, is_available,
+         tokens_per_session, sessions, session_timings, schedule_config, is_available,
          years_of_experience, education, languages)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,1,$13,$14,$15)`,
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,$14,$15,$16)`,
       [
         id, hospitalId, code, name, specialty, phone, bio, price, price,
         tokensPerSession,
         Array.isArray(sessions) ? sessions.join(",") : sessions,
         sessionTimings ? JSON.stringify(sessionTimings) : null,
+        scheduleConfig ? JSON.stringify(scheduleConfig) : null,
         yearsOfExperience, education,
         languages.length ? JSON.stringify(languages) : null,
       ]

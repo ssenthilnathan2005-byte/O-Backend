@@ -7,6 +7,7 @@ const { requireAuth } = require("../middleware/auth");
 const { broadcast }   = require("../services/ws");
 const { sendBookingConfirmation } = require("../services/whatsapp");
 const { validateRequiredIndianPhone } = require("../utils/phone");
+const { getSessionCapacity } = require("../utils/scheduleCapacity");
 
 const router = express.Router();
 
@@ -79,7 +80,8 @@ router.post("/create-order", requireAuth, async (req, res) => {
       [sessionId]
     );
     const count = Number(countRows[0].c);
-    if (count >= doctor.tokens_per_session)
+    const capacity = getSessionCapacity(doctor, date, session);
+    if (count >= capacity)
       return res.status(409).json({ error: "This session is fully booked." });
 
     // Check duplicate booking
@@ -213,7 +215,8 @@ router.post("/verify", requireAuth, async (req, res) => {
         [sessionId]
       );
       const freshCount = Number(freshCountRows[0].c);
-      if (freshCount >= doctor.tokens_per_session)
+      const freshCapacity = getSessionCapacity(doctor, date, session);
+      if (freshCount >= freshCapacity)
         throw Object.assign(
           new Error("Session became fully booked during payment. You will be refunded within 5-7 business days."),
           { status: 409 }

@@ -4,6 +4,7 @@ const router = express.Router();
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
 const { broadcast } = require("../services/ws");
+const { getSessionCapacity } = require("../utils/scheduleCapacity");
 
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 const GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.5-flash-lite:generateContent";
@@ -196,7 +197,8 @@ async function toolCheckSession(args) {
     [sessionId]
   );
   const booked = Number(countRows[0].c);
-  const spotsLeft = doctor.tokens_per_session - booked;
+  const capacity = getSessionCapacity(doctor, args.date, args.session);
+  const spotsLeft = capacity - booked;
   return {
     doctorName: doctor.name,
     spotsLeft: Math.max(spotsLeft, 0),
@@ -240,7 +242,8 @@ async function toolBookToken(args, user) {
         [sessionId]
       );
       const count = Number(countRows[0].c);
-      if (count >= doctor.tokens_per_session) {
+      const capacity = getSessionCapacity(doctor, args.date, args.session);
+      if (count >= capacity) {
         await client.query("ROLLBACK");
         return { error: "This session is fully booked. Try another session or date." };
       }
