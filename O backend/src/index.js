@@ -35,6 +35,7 @@ const chatRoutes = require("./routes/chat");
 const adminCleanupRoutes = require("./routes/admin");
 const pharmacyOwnerRoutes = require("./routes/pharmacy_owner");
 const pharmaciesPublicRoutes = require("./routes/pharmacies_public");
+const ambulanceRoutes = require("./routes/ambulance");
 
 const app  = express();
 const PORT = process.env.PORT || 4000;
@@ -154,6 +155,7 @@ app.use("/api/pharmacy-owner", pharmacyOwnerRoutes);
 app.use("/api/pharmacies", pharmaciesPublicRoutes);
 app.use("/api/inward",   inwardRoutes);
 app.use("/api/prescriptions", pharmacyRoutes);
+app.use("/api/ambulance", ambulanceRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {

@@ -289,6 +289,25 @@ const MIGRATIONS = [
   "CREATE TABLE IF NOT EXISTS inward_patients (id TEXT PRIMARY KEY, hospital_id TEXT NOT NULL REFERENCES hospitals(id) ON DELETE CASCADE, patient_name TEXT NOT NULL, phone TEXT, age INTEGER, gender TEXT, ward TEXT, bed_number TEXT, admitting_doctor_id TEXT REFERENCES doctors(id) ON DELETE SET NULL, admitting_doctor_name TEXT, diagnosis TEXT, notes TEXT, status TEXT NOT NULL DEFAULT 'admitted' CHECK(status IN ('admitted','discharged')), admitted_at TIMESTAMPTZ NOT NULL DEFAULT now(), discharged_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now())",
   "CREATE INDEX IF NOT EXISTS idx_inward_hospital ON inward_patients(hospital_id)",
   "CREATE INDEX IF NOT EXISTS idx_inward_status ON inward_patients(status)",
+  `CREATE TABLE IF NOT EXISTS ambulance_bookings (
+    id             TEXT PRIMARY KEY,
+    patient_id     TEXT REFERENCES users(id) ON DELETE SET NULL,
+    patient_name   TEXT NOT NULL,
+    phone          TEXT NOT NULL,
+    pickup_address TEXT NOT NULL,
+    landmark       TEXT,
+    latitude       REAL,
+    longitude      REAL,
+    emergency_type TEXT NOT NULL DEFAULT 'general',
+    status         TEXT NOT NULL DEFAULT 'requested' CHECK(status IN ('requested','dispatched','en_route','arrived','completed','cancelled')),
+    hospital_id    TEXT REFERENCES hospitals(id) ON DELETE SET NULL,
+    notes          TEXT,
+    created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at     TIMESTAMPTZ NOT NULL DEFAULT now()
+  )`,
+  "CREATE INDEX IF NOT EXISTS idx_ambulance_status ON ambulance_bookings(status)",
+  "CREATE INDEX IF NOT EXISTS idx_ambulance_patient ON ambulance_bookings(patient_id)",
+  "CREATE INDEX IF NOT EXISTS idx_ambulance_hospital ON ambulance_bookings(hospital_id)",
 ];
 
 
