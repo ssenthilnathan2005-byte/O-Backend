@@ -133,15 +133,6 @@ app.use("/uploads", express.static(UPLOAD_DIR, {
   lastModified: true,
 }));
 
-// ── Static downloads (APK, etc.) ────────────────────────────────────────────
-const DOWNLOAD_DIR = path.resolve(process.env.DOWNLOAD_DIR || "./downloads");
-if (!fs.existsSync(DOWNLOAD_DIR)) fs.mkdirSync(DOWNLOAD_DIR, { recursive: true });
-app.use("/downloads", express.static(DOWNLOAD_DIR, {
-  maxAge: "1h",
-  etag: true,
-  lastModified: true,
-}));
-
 // ── API routes ────────────────────────────────────────────────────────────────
 app.use("/api/auth",      authRoutes);
 app.use("/api/hospitals", hospitalRoutes);
