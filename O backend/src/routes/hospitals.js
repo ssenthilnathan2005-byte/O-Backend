@@ -52,7 +52,7 @@ async function row2hospital(r, req, includePhoto = true) {
 // (which requires a network round-trip to Supabase Tokyo) on every request.
 let hospitalListCache = null;
 let hospitalListCacheTime = 0;
-const HOSPITAL_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const HOSPITAL_CACHE_TTL_MS = 0; // always fresh
 
 function invalidateHospitalCache() {
   hospitalListCache = null;
