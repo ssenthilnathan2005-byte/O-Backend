@@ -52,7 +52,8 @@ async function row2hospital(r, req, includePhoto = true) {
 // (which requires a network round-trip to Supabase Tokyo) on every request.
 let hospitalListCache = null;
 let hospitalListCacheTime = 0;
-const HOSPITAL_CACHE_TTL_MS = 0; // always fresh
+const HOSPITAL_CACHE_TTL_MS = 300000; // 5 min cache
+
 
 function invalidateHospitalCache() {
   hospitalListCache = null;
@@ -68,7 +69,7 @@ router.get("/", async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      "SELECT id, name, area, address, phone, rating, gradient, photo_url, is_free, has_pharmacy FROM hospitals ORDER BY name ASC"
+      "SELECT id, name, area, address, phone, rating, gradient, photo_url, photo_data, is_free, has_pharmacy FROM hospitals ORDER BY name ASC"
     );
 
     // Batch doctor counts in ONE query instead of one query per hospital (fixes N+1)
