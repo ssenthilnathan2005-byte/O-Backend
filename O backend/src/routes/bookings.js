@@ -137,6 +137,14 @@ router.post("/", requireAuth, async (req, res) => {
     try {
       await client.query("BEGIN");
 
+      // Serialize all booking creation for this session. Postgres advisory
+      // locks are per-transaction here (xact) and auto-release on COMMIT/
+      // ROLLBACK. hashtext() turns the sessionId string into a stable bigint
+      // key. This forces concurrent requests for the SAME session to queue
+      // up one at a time, so two patients can never read the same count
+      // and get the same token number.
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [sessionId]);
+
       // Fresh capacity check inside transaction (prevents race conditions)
       const { rows: countRows } = await client.query(
         "SELECT COUNT(*) as c FROM bookings WHERE session_id=$1 AND payment_done=1 AND status!='cancelled'",
