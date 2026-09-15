@@ -51,7 +51,7 @@ router.post("/exports/download-and-delete", requireAuth, async (req, res) => {
 
     const { pool } = require("../db/init");
 
-    // Get all completed/unvisited bookings for this doctor (any date)
+    // Fetch all completed/unvisited for this doctor — no deletion
     const { rows: bookings } = await pool.query(
       `SELECT * FROM bookings 
        WHERE doctor_id = $1 
