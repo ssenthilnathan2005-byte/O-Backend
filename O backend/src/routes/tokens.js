@@ -105,8 +105,14 @@ router.post("/:sessionId/regulate", requireDoctorOrAdmin, async (req, res) => {
     const statuses = { ...state.tokenStatuses };
     let { currentToken, nextToken } = state;
 
-    if (currentToken !== null && currentToken !== clicked)
+    // If moving to a new token, auto-complete the previous one in DB too
+    if (currentToken !== null && currentToken !== clicked) {
       statuses[currentToken] = "green";
+      await client.query(
+        "UPDATE bookings SET status='completed' WHERE session_id=$1 AND token_number=$2 AND status='confirmed'",
+        [req.params.sessionId, currentToken]
+      );
+    }
 
     statuses[clicked] = "orange";
     currentToken = clicked;

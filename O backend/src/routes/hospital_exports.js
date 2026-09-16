@@ -86,6 +86,24 @@ router.post("/patients/export", requireAdminOrHospitalAdmin, async (req, res) =>
     if (bookings.length === 0)
       return res.status(404).json({ error: "No patient records found for this period." });
 
+    // Fetch prescriptions for all these bookings
+    const bookingIds = bookings.map(b => b.id);
+    let prescriptionMap = {};
+    if (bookingIds.length > 0) {
+      const placeholders = bookingIds.map((_, i) => `$${i + 1}`).join(",");
+      const { rows: rxRows } = await pool.query(
+        `SELECT booking_id, items, notes FROM prescriptions WHERE booking_id IN (${placeholders})`,
+        bookingIds
+      );
+      for (const rx of rxRows) {
+        const items = JSON.parse(rx.items || "[]");
+        prescriptionMap[rx.booking_id] = {
+          medicines: items.map(i => `${i.name}${i.dosage ? " - " + i.dosage : ""}${i.duration ? " for " + i.duration : ""}`).join("; "),
+          notes: rx.notes || "",
+        };
+      }
+    }
+
     const rows = bookings.map((b) => ({
       "Patient Name":       b.patient_name,
       "Phone":              b.phone || "",
@@ -96,6 +114,8 @@ router.post("/patients/export", requireAdminOrHospitalAdmin, async (req, res) =>
       "Token #":            b.token_number,
       "Status":             b.status,
       "Complaint / Reason": b.complaint || "",
+      "Medicines Prescribed": prescriptionMap[b.id]?.medicines || "",
+      "Prescription Notes": prescriptionMap[b.id]?.notes || "",
       "Booked At":          b.created_at,
     }));
 

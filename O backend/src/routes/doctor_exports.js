@@ -51,17 +51,40 @@ router.post("/exports/download-and-delete", requireAuth, async (req, res) => {
 
     const { pool } = require("../db/init");
 
-    // Fetch all completed/unvisited for this doctor including archived — full history for download
+    // Support range filter: today = only today, default = all records
+    const range = req.query.range ?? "all";
+    const todayStr = new Date().toISOString().split("T")[0];
+    const dateClause = range === "today" ? `AND date = '${todayStr}'` : "";
+
     const { rows: bookings } = await pool.query(
       `SELECT * FROM bookings 
        WHERE doctor_id = $1 
          AND status IN ('completed', 'unvisited')
+         ${dateClause}
        ORDER BY date DESC, token_number ASC`,
       [req.user.doctorId]
     );
 
     if (bookings.length === 0)
-      return res.status(404).json({ error: "No completed patient records found." });
+      return res.status(404).json({ error: range === "today" ? "No patient records for today." : "No completed patient records found." });
+
+    // Fetch prescriptions for all these bookings
+    const bookingIds = bookings.map(b => b.id);
+    let prescriptionMap = {};
+    if (bookingIds.length > 0) {
+      const placeholders = bookingIds.map((_, i) => `$${i + 1}`).join(",");
+      const { rows: rxRows } = await pool.query(
+        `SELECT booking_id, items, notes FROM prescriptions WHERE booking_id IN (${placeholders})`,
+        bookingIds
+      );
+      for (const rx of rxRows) {
+        const items = JSON.parse(rx.items || "[]");
+        prescriptionMap[rx.booking_id] = {
+          medicines: items.map(i => `${i.name}${i.dosage ? " - " + i.dosage : ""}${i.duration ? " for " + i.duration : ""}`).join("; "),
+          notes: rx.notes || "",
+        };
+      }
+    }
 
     const rows = bookings.map((b) => ({
       "Patient Name":       b.patient_name,
@@ -72,6 +95,8 @@ router.post("/exports/download-and-delete", requireAuth, async (req, res) => {
       "Token #":            b.token_number,
       "Status":             b.status,
       "Complaint / Reason": b.complaint || "",
+      "Medicines Prescribed": prescriptionMap[b.id]?.medicines || "",
+      "Prescription Notes": prescriptionMap[b.id]?.notes || "",
       "Hospital":           b.hospital_name,
       "Booked At":          b.created_at,
     }));

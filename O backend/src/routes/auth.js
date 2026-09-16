@@ -5,6 +5,7 @@ const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { body, validationResult } = require("express-validator");
 const { OAuth2Client } = require("google-auth-library");
+const { requireAuth } = require("../middleware/auth");
 const { pool } = require("../db/init");
 const { sendOTP, generateOTP, normalisePhone, IS_DEV } = require("../services/sms");
 const { Resend } = require("resend");
