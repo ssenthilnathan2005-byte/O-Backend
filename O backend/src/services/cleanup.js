@@ -60,20 +60,38 @@ async function generateDoctorExports(bookings, exportDir) {
 
 async function runCleanup({ triggeredBy = "cron", exportDir = null } = {}) {
   await ensureCleanupTables();
-  const { thresholdCount, olderThanDays } = await getCleanupConfig();
+  const ARCHIVE_AFTER_DAYS = 30;
   const cutoffDate = new Date();
-  cutoffDate.setDate(cutoffDate.getDate() - olderThanDays);
+  cutoffDate.setDate(cutoffDate.getDate() - ARCHIVE_AFTER_DAYS);
   const cutoff = cutoffDate.toISOString().split("T")[0];
-  console.log(`[Cleanup] threshold: ${thresholdCount} | older than: ${olderThanDays} days (before ${cutoff})`);
-  const { rows: countRows } = await pool.query(`SELECT COUNT(*) AS c FROM bookings WHERE status IN ('unvisited', 'completed') AND date < $1`, [cutoff]);
+  console.log(`[Cleanup] Archiving completed/unvisited bookings older than ${ARCHIVE_AFTER_DAYS} days (before ${cutoff})`);
+  const { rows: countRows } = await pool.query(
+    `SELECT COUNT(*) AS c FROM bookings WHERE status IN ('unvisited', 'completed') AND date < $1 AND archived = FALSE`,
+    [cutoff]
+  );
   const count = parseInt(countRows[0].c, 10);
-  console.log(`[Cleanup] Found ${count} eligible booking(s) (threshold: ${thresholdCount})`);
-  if (count < thresholdCount) {
-    const reason = `Only ${count} eligible bookings — threshold of ${thresholdCount} not reached yet`;
-    console.log(`[Cleanup] Skipped. ${reason}`);
+  console.log(`[Cleanup] Found ${count} eligible booking(s) to archive`);
+  if (count === 0) {
+    const reason = `No bookings older than ${ARCHIVE_AFTER_DAYS} days to archive`;
     await pool.query(`INSERT INTO cleanup_logs (triggered_by, bookings_found, bookings_deleted, skipped_reason) VALUES ($1, $2, 0, $3)`, [triggeredBy, count, reason]);
-    return { skipped: true, reason, count, threshold: thresholdCount };
+    return { skipped: true, reason, count };
   }
+  const { rows: bookings } = await pool.query(
+    `SELECT * FROM bookings WHERE status IN ('unvisited', 'completed') AND date < $1 AND archived = FALSE ORDER BY date ASC`,
+    [cutoff]
+  );
+  const resolvedExportDir = exportDir || path.join(__dirname, "..", "exports");
+  const { filename, filepath } = exportToExcel(bookings, resolvedExportDir);
+  console.log(`[Cleanup] Master export -> ${filepath}`);
+  await generateDoctorExports(bookings, resolvedExportDir);
+  await pool.query(
+    `UPDATE bookings SET archived = TRUE WHERE status IN ('unvisited', 'completed') AND date < $1 AND archived = FALSE`,
+    [cutoff]
+  );
+  console.log(`[Cleanup] Archived ${count} booking(s)`);
+  await pool.query(`INSERT INTO cleanup_logs (triggered_by, bookings_found, bookings_deleted, export_file) VALUES ($1, $2, $3, $4)`, [triggeredBy, count, count, filename]);
+  return { skipped: false, exported: bookings.length, archived: count, file: filename, filepath };
+}
   const { rows: bookings } = await pool.query(`SELECT * FROM bookings WHERE status IN ('unvisited', 'completed') AND date < $1 ORDER BY date ASC`, [cutoff]);
   const resolvedExportDir = exportDir || path.join(__dirname, "..", "exports");
   const { filename, filepath } = exportToExcel(bookings, resolvedExportDir);

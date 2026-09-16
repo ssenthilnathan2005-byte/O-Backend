@@ -308,6 +308,8 @@ const MIGRATIONS = [
   "CREATE INDEX IF NOT EXISTS idx_ambulance_status ON ambulance_bookings(status)",
   "CREATE INDEX IF NOT EXISTS idx_ambulance_patient ON ambulance_bookings(patient_id)",
   "CREATE INDEX IF NOT EXISTS idx_ambulance_hospital ON ambulance_bookings(hospital_id)",
+  "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS archived BOOLEAN NOT NULL DEFAULT FALSE",
+  "CREATE INDEX IF NOT EXISTS idx_bookings_archived ON bookings(archived)",
 ];
 
 

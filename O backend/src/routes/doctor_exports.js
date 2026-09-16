@@ -51,7 +51,7 @@ router.post("/exports/download-and-delete", requireAuth, async (req, res) => {
 
     const { pool } = require("../db/init");
 
-    // Fetch all completed/unvisited for this doctor — no deletion
+    // Fetch all completed/unvisited for this doctor including archived — full history for download
     const { rows: bookings } = await pool.query(
       `SELECT * FROM bookings 
        WHERE doctor_id = $1 
@@ -61,7 +61,7 @@ router.post("/exports/download-and-delete", requireAuth, async (req, res) => {
     );
 
     if (bookings.length === 0)
-      return res.status(404).json({ error: "No completed patient records found" });
+      return res.status(404).json({ error: "No completed patient records found." });
 
     const rows = bookings.map((b) => ({
       "Patient Name":       b.patient_name,
