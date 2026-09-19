@@ -97,10 +97,10 @@ app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev", {
 }));
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────
-// Global: 500 req / 15 min per IP
+// Global: 3000 req / 15 min per IP
 app.use("/api/", rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 500,
+  max: 3000, // raised from 500 — shared IPs (college/hospital WiFi) + 10s polling can legitimately exceed the old limit
   standardHeaders: true,
   legacyHeaders: false,
   message: { error: "Too many requests — please slow down." },
