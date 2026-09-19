@@ -105,7 +105,7 @@ app.use("/api/", rateLimit({
   legacyHeaders: false,
   message: { error: "Too many requests — please slow down." },
   skip: (req) => req.method === "OPTIONS",
-  keyGenerator: (req) => req.ip || "unknown",
+  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip || "unknown",
 }));
 
 // Auth: strict to prevent brute force
@@ -114,6 +114,7 @@ app.use("/api/auth/", rateLimit({
   max: 20,
   message: { error: "Too many login attempts — try again in 15 minutes." },
   skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip || "unknown",
 }));
 
 // Payments: strict to prevent abuse
@@ -122,6 +123,7 @@ app.use("/api/payments/", rateLimit({
   max: 30,
   message: { error: "Too many payment requests — please slow down." },
   skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip || "unknown",
 }));
 
 // ── Static uploads ────────────────────────────────────────────────────────────
