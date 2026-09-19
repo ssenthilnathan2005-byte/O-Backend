@@ -18,6 +18,8 @@ function row2booking(r) {
     sessionId: r.session_id, paymentDone: r.payment_done === 1, status: r.status,
     phone: r.phone || "", complaint: r.complaint || "", patientAge: r.patient_age ?? null,
     closeReason: r.close_reason || null,
+    lateFlag: r.late_flag === 1,
+    lateEtaMinutes: r.late_eta_minutes ?? null,
     createdAt: r.created_at,
   };
 }
@@ -40,10 +42,10 @@ router.get("/", requireAuth, async (req, res) => {
 
     let rows;
     if (req.user.role === "admin") {
-      ({ rows } = await pool.query("SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings WHERE archived = FALSE ORDER BY created_at DESC LIMIT 200"));
+      ({ rows } = await pool.query("SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE archived = FALSE ORDER BY created_at DESC LIMIT 200"));
     } else if (req.user.role === "doctor") {
       ({ rows } = await pool.query(
-        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings WHERE doctor_id=$1 AND archived = FALSE AND date >= TO_CHAR(CURRENT_DATE - INTERVAL '7 days', 'YYYY-MM-DD') ORDER BY date DESC, session ASC, token_number ASC LIMIT 150",
+        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE doctor_id=$1 AND archived = FALSE AND date >= TO_CHAR(CURRENT_DATE - INTERVAL '7 days', 'YYYY-MM-DD') ORDER BY date DESC, session ASC, token_number ASC LIMIT 150",
         [req.user.doctorId]
       ));
     } else if (req.user.role === "hospital_admin") {
@@ -58,7 +60,7 @@ router.get("/", requireAuth, async (req, res) => {
       ({ rows } = await pool.query(
         `SELECT b.id, b.patient_id, b.patient_name, b.doctor_id, b.doctor_name, b.hospital_name,
                 b.date, b.session, b.token_number, b.session_id, b.payment_done, b.status,
-                b.phone, b.complaint, b.patient_age, b.close_reason, b.created_at
+                b.phone, b.complaint, b.patient_age, b.close_reason, b.late_flag, b.late_eta_minutes, b.created_at
            FROM bookings b
            JOIN doctors d ON d.id = b.doctor_id
           WHERE d.hospital_id = $1
@@ -69,7 +71,7 @@ router.get("/", requireAuth, async (req, res) => {
       ));
     } else {
       ({ rows } = await pool.query(
-        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings WHERE patient_id=$1 AND archived = FALSE ORDER BY created_at DESC",
+        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE patient_id=$1 AND archived = FALSE ORDER BY created_at DESC",
         [req.user.id]
       ));
     }
@@ -84,7 +86,7 @@ router.get("/", requireAuth, async (req, res) => {
 router.get("/session/:sessionId", requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, created_at FROM bookings WHERE session_id=$1 AND status!='cancelled' AND archived = FALSE ORDER BY token_number ASC",
+      "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE session_id=$1 AND status!='cancelled' AND archived = FALSE ORDER BY token_number ASC",
       [req.params.sessionId]
     );
     res.json(rows.map(row2booking));
@@ -264,6 +266,46 @@ router.get("/stats/summary", requireAdmin, async (req, res) => {
     });
   } catch (err) {
     console.error("[bookings stats]", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
+
+// ── POST mark running late ────────────────────────────────────────────────────
+router.post("/:id/mark-late", requireAuth, async (req, res) => {
+  if (req.user.role !== "patient")
+    return res.status(403).json({ error: "Only patients can mark themselves as late" });
+
+  const etaMinutes = Number(req.body.etaMinutes);
+  if (!Number.isInteger(etaMinutes) || etaMinutes <= 0 || etaMinutes > 180)
+    return res.status(400).json({ error: "etaMinutes must be a positive integer (max 180 minutes)" });
+
+  try {
+    const { rows } = await pool.query(
+      "SELECT * FROM bookings WHERE id=$1 AND patient_id=$2",
+      [req.params.id, req.user.id]
+    );
+    const booking = rows[0];
+    if (!booking) return res.status(404).json({ error: "Booking not found" });
+    if (booking.status !== "confirmed")
+      return res.status(400).json({ error: "This booking is no longer active" });
+
+    await pool.query(
+      "UPDATE bookings SET late_flag=1, late_eta_minutes=$1, late_marked_at=now() WHERE id=$2",
+      [etaMinutes, req.params.id]
+    );
+
+    broadcast(booking.session_id, {
+      type: "patient_late",
+      sessionId: booking.session_id,
+      tokenNumber: booking.token_number,
+      patientName: booking.patient_name,
+      etaMinutes,
+    });
+
+    res.json({ success: true, etaMinutes });
+  } catch (err) {
+    console.error("[bookings mark-late]", err.message);
     res.status(500).json({ error: err.message });
   }
 });
