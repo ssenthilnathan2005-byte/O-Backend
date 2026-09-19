@@ -33,8 +33,8 @@ router.patch("/profile", requireAuth, async (req, res) => {
 
   try {
     await pool.query(
-      "UPDATE users SET name=$1, phone=$2 WHERE id=$3",
-      [name.trim(), normalised, req.user.id]
+      "UPDATE users SET name=$1, phone=$2, age=$3 WHERE id=$4",
+      [name.trim(), normalised, age ?? null, req.user.id]
     );
     // Also patch bookings so future queries pick up the right name
     await pool.query(
@@ -45,6 +45,30 @@ router.patch("/profile", requireAuth, async (req, res) => {
   } catch (err) {
     console.error("[profile] patch error:", err.message);
     return res.status(500).json({ error: "Failed to update profile" });
+  }
+});
+
+
+// ── GET /api/patients/profile — fetch saved profile for autofill ─────────────
+router.get("/profile", requireAuth, async (req, res) => {
+  if (req.user.role !== "patient")
+    return res.status(403).json({ error: "Patients only" });
+  try {
+    const { rows } = await pool.query(
+      "SELECT name, phone, age FROM users WHERE id=$1",
+      [req.user.id]
+    );
+    const u = rows[0] || {};
+    const isComplete = !!(u.name && u.phone && u.age);
+    return res.json({
+      name: u.name || "",
+      phone: u.phone || "",
+      age: u.age != null ? String(u.age) : "",
+      isComplete,
+    });
+  } catch (err) {
+    console.error("[profile] get error:", err.message);
+    return res.status(500).json({ error: "Failed to load profile" });
   }
 });
 
