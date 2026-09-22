@@ -6,6 +6,7 @@ const router  = express.Router();
 const { pool } = require("../db/init");
 const { requireAuth, requireAdminOrHospitalAdmin, requireAdmin } = require("../middleware/auth");
 const { broadcast } = require("../services/ws");
+const { sendPushToPatient } = require("../services/push");
 
 function requireLabOrAdmin(req, res, next) {
   requireAuth(req, res, () => {
@@ -396,6 +397,29 @@ router.patch("/bookings/:id/status", requireLabOrAdmin, async (req, res) => {
     if (status === "cancelled" && updated.token_number != null) {
       try { await releaseCancelledToken(updated); } catch (e) { console.error("[labs] cancel queue cleanup error:", e.message); }
     }
+
+    if (status === "report_ready" && updated.patient_id) {
+      try {
+        const { rows: info } = await pool.query(
+          `SELECT l.name AS lab_name, t.name AS test_name
+           FROM lab_bookings b
+           JOIN labs l ON l.id = b.lab_id
+           JOIN lab_tests t ON t.id = b.test_id
+           WHERE b.id = $1`,
+          [updated.id]
+        );
+        const labName = info[0]?.lab_name || "the lab";
+        const testName = info[0]?.test_name || "Your test";
+        await sendPushToPatient(updated.patient_id, {
+          title: "Report Ready",
+          body: `${testName} report from ${labName} is ready to view.`,
+          data: { link: `/labs/track?bookingId=${updated.id}` },
+        });
+      } catch (e) {
+        console.error("[labs] report_ready push notification error:", e.message);
+      }
+    }
+
     res.json(updated);
   } catch (err) {
     console.error("[labs] PATCH bookings/:id/status error:", err.message);
