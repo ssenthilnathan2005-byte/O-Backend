@@ -63,6 +63,7 @@ router.post("/", requireAuth, adminOnly, async (req, res) => {
     } = req.body;
     if (!name || !role) return res.status(400).json({ error: "name and role required" });
     const shiftsArr = Array.isArray(shifts) && shifts.length ? shifts : ["morning"];
+    const salaryVal = (salary === undefined || salary === null || salary === "") ? null : salary;
     const id = `staff_${nanoid(10)}`;
     const { rows } = await pool.query(
       `INSERT INTO hospital_staff
@@ -71,7 +72,7 @@ router.post("/", requireAuth, adminOnly, async (req, res) => {
           emergency_contact_name, emergency_contact_phone)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19) RETURNING *`,
       [id, hospitalId, name, role, department||null, phone||null, email||null,
-       shiftsArr[0], shiftsArr, joinDate||null, salary||null, notes||null,
+       shiftsArr[0], shiftsArr, joinDate||null, salaryVal, notes||null,
        employeeId||null, address||null, dateOfBirth||null, idProofNumber||null, bloodGroup||null,
        emergencyContactName||null, emergencyContactPhone||null]
     );
@@ -88,6 +89,7 @@ router.patch("/:id", requireAuth, adminOnly, async (req, res) => {
       emergencyContactName, emergencyContactPhone,
     } = req.body;
     const shiftsArr = Array.isArray(shifts) && shifts.length ? shifts : ["morning"];
+    const salaryVal = (salary === undefined || salary === null || salary === "") ? null : salary;
     const { rows } = await pool.query(
       `UPDATE hospital_staff SET
          name=$1, role=$2, department=$3, phone=$4, email=$5,
@@ -96,7 +98,7 @@ router.patch("/:id", requireAuth, adminOnly, async (req, res) => {
          emergency_contact_name=$17, emergency_contact_phone=$18
        WHERE id=$19 AND hospital_id=$20 RETURNING *`,
       [name, role, department||null, phone||null, email||null,
-       shiftsArr[0], shiftsArr, joinDate||null, salary||null, notes||null,
+       shiftsArr[0], shiftsArr, joinDate||null, salaryVal, notes||null,
        isActive===false ? 0 : 1,
        employeeId||null, address||null, dateOfBirth||null, idProofNumber||null, bloodGroup||null,
        emergencyContactName||null, emergencyContactPhone||null,
