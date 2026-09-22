@@ -114,9 +114,14 @@ router.patch("/orders/:id", requireAuth, adminOnly, async (req, res) => {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { status, resultValue, reportUrl, notes } = req.body;
     const { rows } = await pool.query(
-      `UPDATE hospital_lab_orders SET status=$1, result_value=$2, report_url=$3, notes=$4, updated_at=now()
+      `UPDATE hospital_lab_orders SET
+         status=COALESCE($1, status),
+         result_value=COALESCE($2, result_value),
+         report_url=COALESCE($3, report_url),
+         notes=COALESCE($4, notes),
+         updated_at=now()
        WHERE id=$5 AND hospital_id=$6 RETURNING *`,
-      [status, resultValue||null, reportUrl||null, notes||null, req.params.id, hospitalId]);
+      [status||null, resultValue||null, reportUrl||null, notes||null, req.params.id, hospitalId]);
     if (!rows.length) return res.status(404).json({ error: "Not found" });
     res.json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
