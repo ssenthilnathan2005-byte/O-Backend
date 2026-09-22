@@ -483,6 +483,9 @@ router.post("/sessions/:labId/:testId/:date/:session/:action", requireLabOrAdmin
     let current = s.currentToken, next = s.nextToken;
     const reqTok = req.body && req.body.token !== undefined && req.body.token !== null ? Number(req.body.token) : null;
 
+    let calledToken = null;
+    let readyNextToken = null;
+
     if (action === "call") {
       const clicked = reqTok ?? next ?? pickNext(statuses, null);
       if (!Number.isInteger(clicked) || statuses[clicked] === undefined) {
@@ -495,6 +498,8 @@ router.post("/sessions/:labId/:testId/:date/:session/:action", requireLabOrAdmin
       if (next !== null && statuses[next] === "yellow") statuses[next] = "red";
       next = pickNext(statuses, clicked);
       if (next !== null) statuses[next] = "yellow";
+      calledToken = clicked;
+      readyNextToken = next;
     } else if (action === "complete") {
       if (current !== null) statuses[current] = "green";
       current = null;
@@ -525,6 +530,55 @@ router.post("/sessions/:labId/:testId/:date/:session/:action", requireLabOrAdmin
     const state = parseLabSession(up[0]);
     broadcast(sid, { type: "state_update", state });
     res.json(state);
+
+    if (calledToken !== null || readyNextToken !== null) {
+      (async () => {
+        try {
+          const { rows: labRows } = await pool.query(
+            `SELECT l.name AS lab_name, t.name AS test_name FROM labs l, lab_tests t WHERE l.id=$1 AND t.id=$2`,
+            [labId, testId]
+          );
+          const labName = labRows[0]?.lab_name || "the lab";
+          const testName = labRows[0]?.test_name || "your test";
+
+          if (calledToken !== null) {
+            const { rows: br } = await pool.query(
+              `SELECT patient_id FROM lab_bookings
+               WHERE lab_id=$1 AND test_id=$2 AND slot_date=$3 AND slot_time=$4
+                 AND token_number=$5 AND status NOT IN ('cancelled') LIMIT 1`,
+              [labId, testId, date, session, calledToken]
+            );
+            const b = br[0];
+            if (b && b.patient_id) {
+              sendPushToPatient(b.patient_id, {
+                title: "Your turn has arrived!",
+                body: `Token #${calledToken} - ${labName} is ready for your ${testName} sample collection.`,
+                data: { tag: "lab-token-orange" },
+              }).catch(() => {});
+            }
+          }
+
+          if (readyNextToken !== null) {
+            const { rows: nr } = await pool.query(
+              `SELECT patient_id FROM lab_bookings
+               WHERE lab_id=$1 AND test_id=$2 AND slot_date=$3 AND slot_time=$4
+                 AND token_number=$5 AND status NOT IN ('cancelled') LIMIT 1`,
+              [labId, testId, date, session, readyNextToken]
+            );
+            const nb = nr[0];
+            if (nb && nb.patient_id) {
+              sendPushToPatient(nb.patient_id, {
+                title: "Get Ready!",
+                body: `Token #${readyNextToken} - You are next at ${labName}. Please be ready.`,
+                data: { tag: "lab-token-yellow" },
+              }).catch(() => {});
+            }
+          }
+        } catch (e) {
+          console.error("[labs] queue notification error:", e.message);
+        }
+      })();
+    }
   } catch (err) {
     try { await client.query("ROLLBACK"); } catch (_) {}
     console.error("[labs] session action error:", err.message);
