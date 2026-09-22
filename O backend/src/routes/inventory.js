@@ -117,6 +117,22 @@ router.post("/:id/transaction", requireAuth, adminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// GET /inventory/:id/transactions — stock history for one item
+router.get("/:id/transactions", requireAuth, adminOnly, async (req, res) => {
+  try {
+    const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
+    if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
+    const { rows } = await pool.query(
+      `SELECT id, type, quantity, reason, created_by, created_at
+       FROM inventory_transactions
+       WHERE item_id=$1 AND hospital_id=$2
+       ORDER BY created_at DESC`,
+      [req.params.id, hospitalId]
+    );
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // DELETE /inventory/:id
 router.delete("/:id", requireAuth, adminOnly, async (req, res) => {
   try {
