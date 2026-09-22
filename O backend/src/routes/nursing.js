@@ -51,11 +51,13 @@ pool.query(`
 router.get("/vitals", requireAuth, adminOnly, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
-    const { patientName } = req.query;
+    const { patientName, patientId } = req.query;
+    let clause = ""; const params = [hospitalId];
+    if (patientId) { clause = "AND patient_id=$2"; params.push(patientId); }
+    else if (patientName) { clause = "AND patient_name=$2"; params.push(patientName); }
     const { rows } = await pool.query(
-      `SELECT * FROM hospital_nursing_vitals WHERE hospital_id=$1 ${patientName ? "AND patient_name=$2" : ""}
-       ORDER BY recorded_at DESC`,
-      patientName ? [hospitalId, patientName] : [hospitalId]);
+      `SELECT * FROM hospital_nursing_vitals WHERE hospital_id=$1 ${clause}
+       ORDER BY recorded_at DESC`, params);
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -88,11 +90,13 @@ router.delete("/vitals/:id", requireAuth, adminOnly, async (req, res) => {
 router.get("/notes", requireAuth, adminOnly, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
-    const { patientName } = req.query;
+    const { patientName, patientId } = req.query;
+    let clause = ""; const params = [hospitalId];
+    if (patientId) { clause = "AND patient_id=$2"; params.push(patientId); }
+    else if (patientName) { clause = "AND patient_name=$2"; params.push(patientName); }
     const { rows } = await pool.query(
-      `SELECT * FROM hospital_nursing_notes WHERE hospital_id=$1 ${patientName ? "AND patient_name=$2" : ""}
-       ORDER BY recorded_at DESC`,
-      patientName ? [hospitalId, patientName] : [hospitalId]);
+      `SELECT * FROM hospital_nursing_notes WHERE hospital_id=$1 ${clause}
+       ORDER BY recorded_at DESC`, params);
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
