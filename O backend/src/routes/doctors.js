@@ -78,7 +78,7 @@ function row2doctor(r) {
     name: r.name, specialty: r.specialty,
     phone: r.phone || "", contactPhone: r.phone || "",
     bio: r.bio || "", photo: r.photo || null,
-    price: r.price, consultationFee: r.consultation_fee,
+    price: r.price, consultationFee: r.consultation_fee, doctorFee: r.doctor_fee ?? null,
     tokensPerSession: r.tokens_per_session,
     scheduleConfig: r.schedule_config ? (typeof r.schedule_config === 'string' ? JSON.parse(r.schedule_config) : r.schedule_config) : null,
     walkInInterval: r.walk_in_interval ?? 5,
@@ -117,8 +117,8 @@ router.get("/", async (req, res) => {
     }
 
     const { rows } = req.query.hospitalId
-      ? await pool.query("SELECT id, hospital_id, code, name, specialty, phone, bio, photo, price, consultation_fee, tokens_per_session, walk_in_interval, sessions, session_timings, schedule_config, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient FROM doctors WHERE hospital_id=$1 ORDER BY name ASC", [req.query.hospitalId])
-      : await pool.query("SELECT id, hospital_id, code, name, specialty, phone, bio, photo, price, consultation_fee, tokens_per_session, walk_in_interval, sessions, session_timings, schedule_config, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient FROM doctors ORDER BY name ASC");
+      ? await pool.query("SELECT id, hospital_id, code, name, specialty, phone, bio, photo, price, consultation_fee, doctor_fee, tokens_per_session, walk_in_interval, sessions, session_timings, schedule_config, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient FROM doctors WHERE hospital_id=$1 ORDER BY name ASC", [req.query.hospitalId])
+      : await pool.query("SELECT id, hospital_id, code, name, specialty, phone, bio, photo, price, consultation_fee, doctor_fee, tokens_per_session, walk_in_interval, sessions, session_timings, schedule_config, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient FROM doctors ORDER BY name ASC");
 
     const result = rows.map(row2doctor);
     doctorListCache.set(cacheKey, { data: result, time: Date.now() });
@@ -213,8 +213,17 @@ router.patch("/:id", async (req, res, next) => {
       specialty, hospitalId, isAvailable, bio, sessionTimings, scheduleConfig,
       yearsOfExperience, education, languages, tokensPerSession,
       phone, contactPhone, photo, name, sessions, price, consultationFee, code,
-      statusOverride, walkInInterval, avgMinutesPerPatient,
+      statusOverride, walkInInterval, avgMinutesPerPatient, doctorFee,
     } = req.body;
+
+    let feeVal = null;
+    if (doctorFee !== undefined && doctorFee !== null && doctorFee !== "") {
+      if (req.user.role === "hospital_admin")
+        return res.status(403).json({ error: "Only the doctor or an admin can set the consultation fee" });
+      feeVal = Number(doctorFee);
+      if (!Number.isFinite(feeVal) || feeVal < 0 || feeVal > 100000)
+        return res.status(400).json({ error: "Invalid consultation fee" });
+    }
 
     // hospital_admin can't move a doctor out of their own hospital
     if (req.user.role === "hospital_admin" && hospitalId !== undefined && hospitalId !== req.user.hospitalId) {
@@ -262,7 +271,8 @@ router.patch("/:id", async (req, res, next) => {
         code                = COALESCE($17, code),
         status_override     = COALESCE($18, status_override),
         avg_minutes_per_patient = COALESCE($19, avg_minutes_per_patient),
-        schedule_config     = COALESCE($20, schedule_config)
+        schedule_config     = COALESCE($20, schedule_config),
+        doctor_fee          = COALESCE($22, doctor_fee)
        WHERE id=$21`,
       [
         name         || null,
@@ -286,6 +296,7 @@ router.patch("/:id", async (req, res, next) => {
         avgMinutesPerPatient ?? null,
         scheduleConfig ? JSON.stringify(scheduleConfig) : null,
         req.params.id,
+        feeVal,
       ]
     );
 

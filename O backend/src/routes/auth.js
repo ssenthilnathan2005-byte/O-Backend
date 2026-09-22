@@ -806,4 +806,56 @@ router.post("/hospital/set-password", async (req, res) => {
   }
 });
 
+// ── Lab Admin — login ────────────────────────────────────────────────────────
+router.post("/lab/login", async (req, res) => {
+  try {
+    const { loginId, password } = req.body;
+    if (!loginId || !password) return res.status(400).json({ error: "loginId and password are required" });
+
+    const { rows: labRows } = await pool.query("SELECT * FROM labs WHERE login_id=$1", [String(loginId).trim()]);
+    const lab = labRows[0];
+    if (!lab) return res.status(401).json({ error: "Invalid login ID" });
+    if (!lab.admin_user_id) return res.status(401).json({ error: "No admin account set up for this lab" });
+
+    const { rows: userRows } = await pool.query("SELECT * FROM users WHERE id=$1", [lab.admin_user_id]);
+    const user = userRows[0];
+    if (!user) return res.status(401).json({ error: "Admin account not found" });
+
+    if (user.first_login === 1) {
+      return res.json({ firstLogin: true, loginId, labId: lab.id, labName: lab.name });
+    }
+
+    const ok = await bcrypt.compare(password, user.password || "");
+    if (!ok) return res.status(401).json({ error: "Incorrect password" });
+
+    const payload = { id: user.id, role: "lab_admin", labId: lab.id, labName: lab.name };
+    return res.json({ token: sign(payload), user: payload });
+  } catch (err) {
+    console.error("[auth lab/login]", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
+// ── Lab Admin — set password on first login ─────────────────────────────────
+router.post("/lab/set-password", async (req, res) => {
+  try {
+    const { loginId, newPassword } = req.body;
+    if (!loginId || !newPassword) return res.status(400).json({ error: "loginId and newPassword are required" });
+    if (String(newPassword).length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+
+    const { rows: labRows } = await pool.query("SELECT * FROM labs WHERE login_id=$1", [String(loginId).trim()]);
+    const lab = labRows[0];
+    if (!lab || !lab.admin_user_id) return res.status(404).json({ error: "Lab not found" });
+
+    const hash = await bcrypt.hash(newPassword, 10);
+    await pool.query("UPDATE users SET password=$1, first_login=0 WHERE id=$2", [hash, lab.admin_user_id]);
+
+    const payload = { id: lab.admin_user_id, role: "lab_admin", labId: lab.id, labName: lab.name };
+    return res.json({ token: sign(payload), user: payload });
+  } catch (err) {
+    console.error("[auth lab/set-password]", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;

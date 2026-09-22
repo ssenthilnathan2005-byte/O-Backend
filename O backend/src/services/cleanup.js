@@ -92,15 +92,6 @@ async function runCleanup({ triggeredBy = "cron", exportDir = null } = {}) {
   await pool.query(`INSERT INTO cleanup_logs (triggered_by, bookings_found, bookings_deleted, export_file) VALUES ($1, $2, $3, $4)`, [triggeredBy, count, count, filename]);
   return { skipped: false, exported: bookings.length, archived: count, file: filename, filepath };
 }
-  const { rows: bookings } = await pool.query(`SELECT * FROM bookings WHERE status IN ('unvisited', 'completed') AND date < $1 ORDER BY date ASC`, [cutoff]);
-  const resolvedExportDir = exportDir || path.join(__dirname, "..", "exports");
-  const { filename, filepath } = exportToExcel(bookings, resolvedExportDir);
-  console.log(`[Cleanup] Master export → ${filepath}`);
-  await generateDoctorExports(bookings, resolvedExportDir);
-  // Deletion removed — records are kept in DB; export is for doctor reference only
-  await pool.query(`INSERT INTO cleanup_logs (triggered_by, bookings_found, bookings_deleted, export_file) VALUES ($1, $2, $3, $4)`, [triggeredBy, count, 0, filename]);
-  return { skipped: false, exported: bookings.length, deleted: 0, file: filename, filepath };
-}
 
 async function updateCleanupConfig({ thresholdCount, olderThanDays }) {
   await ensureCleanupTables();
