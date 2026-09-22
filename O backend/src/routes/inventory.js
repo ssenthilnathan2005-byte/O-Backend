@@ -3,6 +3,7 @@ const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
 const { randomBytes } = require("crypto");
+const ExcelJS = require("exceljs");
 function nanoid(n=10) { return randomBytes(n).toString("hex").slice(0,n); }
 const router = express.Router();
 
@@ -114,6 +115,85 @@ router.post("/:id/transaction", requireAuth, adminOnly, async (req, res) => {
       [txId, hospitalId, req.params.id, type, quantity, reason||null]
     );
     res.json(rows[0]);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// GET /inventory/export — download inventory + stock movements as Excel
+router.get("/export", requireAuth, adminOnly, async (req, res) => {
+  try {
+    const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
+    if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
+    const { from, to } = req.query;
+    if (!from || !to) return res.status(400).json({ error: "from and to dates required (YYYY-MM-DD)" });
+
+    const { rows: items } = await pool.query(
+      `SELECT name, category, unit, quantity, min_quantity, purchase_price, supplier, location, notes
+       FROM inventory_items WHERE hospital_id=$1 ORDER BY category, name ASC`,
+      [hospitalId]
+    );
+
+    const { rows: txns } = await pool.query(
+      `SELECT it.name AS item_name, t.type, t.quantity, t.reason, t.created_at
+       FROM inventory_transactions t
+       JOIN inventory_items it ON it.id = t.item_id
+       WHERE t.hospital_id=$1 AND t.created_at >= $2::date AND t.created_at < ($3::date + interval '1 day')
+       ORDER BY t.created_at ASC`,
+      [hospitalId, from, to]
+    );
+
+    const workbook = new ExcelJS.Workbook();
+
+    const summarySheet = workbook.addWorksheet("Inventory Summary");
+    summarySheet.columns = [
+      { header: "Item", key: "name", width: 25 },
+      { header: "Category", key: "category", width: 15 },
+      { header: "Unit", key: "unit", width: 12 },
+      { header: "Current Stock", key: "quantity", width: 14 },
+      { header: "Min Quantity", key: "min_quantity", width: 14 },
+      { header: "Purchase Price (₹)", key: "purchase_price", width: 18 },
+      { header: "Supplier", key: "supplier", width: 18 },
+      { header: "Location", key: "location", width: 18 },
+      { header: "Notes", key: "notes", width: 25 },
+    ];
+    summarySheet.getRow(1).font = { bold: true };
+    items.forEach(i => summarySheet.addRow(i));
+
+    const movementsSheet = workbook.addWorksheet("Stock Movements");
+    movementsSheet.columns = [
+      { header: "Date", key: "date", width: 20 },
+      { header: "Item", key: "item_name", width: 25 },
+      { header: "Type", key: "type", width: 10 },
+      { header: "Quantity", key: "quantity", width: 12 },
+      { header: "Reason", key: "reason", width: 30 },
+    ];
+    movementsSheet.getRow(1).font = { bold: true };
+    txns.forEach(t => movementsSheet.addRow({
+      date: new Date(t.created_at).toLocaleString(),
+      item_name: t.item_name,
+      type: t.type === "in" ? "Stock In" : "Stock Out",
+      quantity: t.quantity,
+      reason: t.reason || "",
+    }));
+
+    const totalsSheet = workbook.addWorksheet("Period Totals");
+    totalsSheet.columns = [
+      { header: "Item", key: "item_name", width: 25 },
+      { header: "Total Added", key: "added", width: 14 },
+      { header: "Total Removed", key: "removed", width: 14 },
+    ];
+    totalsSheet.getRow(1).font = { bold: true };
+    const totalsMap = {};
+    txns.forEach(t => {
+      if (!totalsMap[t.item_name]) totalsMap[t.item_name] = { added: 0, removed: 0 };
+      if (t.type === "in") totalsMap[t.item_name].added += Number(t.quantity);
+      else totalsMap[t.item_name].removed += Number(t.quantity);
+    });
+    Object.entries(totalsMap).forEach(([item_name, v]) => totalsSheet.addRow({ item_name, ...v }));
+
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="inventory_${from}_to_${to}.xlsx"`);
+    await workbook.xlsx.write(res);
+    res.end();
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
