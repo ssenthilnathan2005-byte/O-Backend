@@ -89,24 +89,120 @@ router.get("/:wardId/beds", requireAuth, adminOnly, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     const { rows } = await pool.query(
-      `SELECT * FROM beds WHERE ward_id=$1 AND hospital_id=$2 ORDER BY bed_number ASC`,
+      `SELECT b.*,
+              ip.patient_name  AS occupant_name,
+              ip.phone         AS occupant_phone,
+              ip.age           AS occupant_age,
+              ip.gender        AS occupant_gender,
+              ip.admitting_doctor_name AS occupant_doctor,
+              ip.diagnosis     AS occupant_diagnosis,
+              ip.notes         AS occupant_notes,
+              ip.admitted_at   AS occupant_admitted_at
+       FROM beds b
+       LEFT JOIN inward_patients ip ON ip.id = b.inward_id
+       WHERE b.ward_id=$1 AND b.hospital_id=$2
+       ORDER BY b.bed_number ASC`,
       [req.params.wardId, hospitalId]
     );
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// PATCH /wards/:wardId/beds/:bedId — update bed status
-router.patch("/:wardId/beds/:bedId", requireAuth, adminOnly, async (req, res) => {
+// POST /wards/:wardId/beds/:bedId/occupy — admit a patient into this bed
+router.post("/:wardId/beds/:bedId/occupy", requireAuth, adminOnly, async (req, res) => {
+  const client = await pool.connect();
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
-    const { status, patientName, inwardId } = req.body;
-    const { rows } = await pool.query(
-      `UPDATE beds SET status=$1, patient_name=$2, inward_id=$3, updated_at=now()
-       WHERE id=$4 AND hospital_id=$5 RETURNING *`,
-      [status, patientName || null, inwardId || null, req.params.bedId, hospitalId]
+    const {
+      patientName, phone, age, gender,
+      admittingDoctorId, admittingDoctorName, diagnosis, notes,
+    } = req.body;
+    if (!patientName) return res.status(400).json({ error: "patientName required" });
+
+    await client.query("BEGIN");
+
+    const { rows: bedRows } = await client.query(
+      `SELECT b.*, w.name AS ward_name FROM beds b
+       JOIN wards w ON w.id = b.ward_id
+       WHERE b.id=$1 AND b.ward_id=$2 AND b.hospital_id=$3 FOR UPDATE`,
+      [req.params.bedId, req.params.wardId, hospitalId]
     );
-    if (!rows.length) return res.status(404).json({ error: "Not found" });
+    if (!bedRows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Bed not found" }); }
+    const bed = bedRows[0];
+    if (bed.status === "occupied") { await client.query("ROLLBACK"); return res.status(409).json({ error: "Bed already occupied" }); }
+
+    const { randomBytes } = require("crypto");
+    const inwardId = `inward_${randomBytes(10).toString("hex").slice(0,10)}`;
+    await client.query(
+      `INSERT INTO inward_patients
+         (id, hospital_id, patient_name, phone, age, gender, ward, bed_number,
+          admitting_doctor_id, admitting_doctor_name, diagnosis, notes)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+      [inwardId, hospitalId, patientName, phone || null, age || null, gender || null,
+       bed.ward_name, bed.bed_number, admittingDoctorId || null, admittingDoctorName || null,
+       diagnosis || null, notes || null]
+    );
+
+    const { rows: updated } = await client.query(
+      `UPDATE beds SET status='occupied', patient_name=$1, inward_id=$2, updated_at=now()
+       WHERE id=$3 RETURNING *`,
+      [patientName, inwardId, bed.id]
+    );
+
+    await client.query("COMMIT");
+    res.status(201).json(updated[0]);
+  } catch (err) {
+    await client.query("ROLLBACK");
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// PATCH /wards/:wardId/beds/:bedId/vacate — discharge patient, bed goes to maintenance
+router.patch("/:wardId/beds/:bedId/vacate", requireAuth, adminOnly, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
+    await client.query("BEGIN");
+
+    const { rows: bedRows } = await client.query(
+      `SELECT * FROM beds WHERE id=$1 AND ward_id=$2 AND hospital_id=$3 FOR UPDATE`,
+      [req.params.bedId, req.params.wardId, hospitalId]
+    );
+    if (!bedRows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Bed not found" }); }
+    const bed = bedRows[0];
+
+    if (bed.inward_id) {
+      await client.query(
+        `UPDATE inward_patients SET status='discharged', discharged_at=now()
+         WHERE id=$1 AND hospital_id=$2`,
+        [bed.inward_id, hospitalId]
+      );
+    }
+
+    const { rows: updated } = await client.query(
+      `UPDATE beds SET status='maintenance', patient_name=NULL, inward_id=NULL, updated_at=now()
+       WHERE id=$1 RETURNING *`,
+      [bed.id]
+    );
+
+    await client.query("COMMIT");
+    res.json(updated[0]);
+  } catch (err) {
+    await client.query("ROLLBACK");
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// PATCH /wards/:wardId/beds/:bedId/ready — mark a maintenance bed available again
+router.patch("/:wardId/beds/:bedId/ready", requireAuth, adminOnly, async (req, res) => {
+  try {
+    const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
+    const { rows } = await pool.query(
+      `UPDATE beds SET status='available', updated_at=now()
+       WHERE id=$1 AND ward_id=$2 AND hospital_id=$3 AND status='maintenance' RETURNING *`,
+      [req.params.bedId, req.params.wardId, hospitalId]
+    );
+    if (!rows.length) return res.status(404).json({ error: "Bed not found or not in maintenance" });
     res.json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
