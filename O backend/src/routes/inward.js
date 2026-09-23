@@ -29,18 +29,19 @@ router.post("/", requireAuth, adminOnly, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { patientName, phone, age, gender, ward, bedNumber,
-            admittingDoctorId, admittingDoctorName, diagnosis, notes } = req.body;
+            admittingDoctorId, admittingDoctorName, diagnosis, notes, admittedAt } = req.body;
     if (!patientName || !hospitalId)
       return res.status(400).json({ error: "patientName required" });
     const id = `inward_${nanoid(10)}`;
     const { rows } = await pool.query(
       `INSERT INTO inward_patients
          (id, hospital_id, patient_name, phone, age, gender, ward, bed_number,
-          admitting_doctor_id, admitting_doctor_name, diagnosis, notes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12) RETURNING *`,
+          admitting_doctor_id, admitting_doctor_name, diagnosis, notes, admitted_at)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13::timestamptz, now())) RETURNING *`,
       [id, hospitalId, patientName, phone || null, age || null, gender || null,
        ward || null, bedNumber || null, admittingDoctorId || null,
-       admittingDoctorName || null, diagnosis || null, notes || null]
+       admittingDoctorName || null, diagnosis || null, notes || null,
+       admittedAt || null]
     );
     res.status(201).json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -49,15 +50,16 @@ router.post("/", requireAuth, adminOnly, async (req, res) => {
 router.patch("/:id", requireAuth, adminOnly, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
-    const { ward, bedNumber, diagnosis, notes, admittingDoctorId, admittingDoctorName } = req.body;
+    const { ward, bedNumber, diagnosis, notes, admittingDoctorId, admittingDoctorName, admittedAt } = req.body;
     const { rows } = await pool.query(
       `UPDATE inward_patients SET
          ward=$1, bed_number=$2, diagnosis=$3, notes=$4,
-         admitting_doctor_id=$5, admitting_doctor_name=$6
+         admitting_doctor_id=$5, admitting_doctor_name=$6,
+         admitted_at=COALESCE($9::timestamptz, admitted_at)
        WHERE id=$7 AND hospital_id=$8 RETURNING *`,
       [ward || null, bedNumber || null, diagnosis || null, notes || null,
        admittingDoctorId || null, admittingDoctorName || null,
-       req.params.id, hospitalId]
+       req.params.id, hospitalId, admittedAt || null]
     );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
     res.json(rows[0]);
