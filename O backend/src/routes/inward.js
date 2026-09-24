@@ -107,6 +107,21 @@ router.get("/export", requireAuth, adminOnly, async (req, res) => {
     if (admitted.length === 0 && discharged.length === 0)
       return res.status(404).json({ error: "No inward patient records found for this period." });
 
+    // Latest vitals reading per patient (blank if none recorded)
+    const allIds = [...admitted, ...discharged].map((p) => p.id);
+    let latestVitalsMap = {};
+    if (allIds.length > 0) {
+      const placeholders = allIds.map((_, i) => `$${i + 1}`).join(",");
+      const { rows: vitalsRows } = await pool.query(
+        `SELECT DISTINCT ON (patient_id) patient_id, temperature, pulse, bp_systolic, bp_diastolic, spo2, recorded_at
+           FROM hospital_nursing_vitals
+          WHERE patient_id IN (${placeholders})
+          ORDER BY patient_id, recorded_at DESC`,
+        allIds
+      );
+      for (const v of vitalsRows) latestVitalsMap[v.patient_id] = v;
+    }
+
     const workbook = new ExcelJS.Workbook();
 
     const cols = [
@@ -122,6 +137,11 @@ router.get("/export", requireAuth, adminOnly, async (req, res) => {
       { header: "Admitted At", key: "admitted_at", width: 20 },
       { header: "Discharged At", key: "discharged_at", width: 20 },
       { header: "Days", key: "days", width: 8 },
+      { header: "Temp (°F)", key: "temperature", width: 10 },
+      { header: "Pulse (bpm)", key: "pulse", width: 12 },
+      { header: "BP", key: "bp", width: 10 },
+      { header: "SpO2 (%)", key: "spo2", width: 10 },
+      { header: "Vitals Recorded At", key: "vitals_recorded_at", width: 20 },
     ];
 
     function addSheet(name, rows) {
@@ -132,6 +152,7 @@ router.get("/export", requireAuth, adminOnly, async (req, res) => {
         const admittedAt = new Date(r.admitted_at);
         const endAt = r.discharged_at ? new Date(r.discharged_at) : new Date();
         const days = Math.floor((endAt.getTime() - admittedAt.getTime()) / 86400000);
+        const v = latestVitalsMap[r.id];
         sheet.addRow({
           patient_name: r.patient_name,
           phone: r.phone || "",
@@ -145,6 +166,11 @@ router.get("/export", requireAuth, adminOnly, async (req, res) => {
           admitted_at: r.admitted_at ? new Date(r.admitted_at).toLocaleString() : "",
           discharged_at: r.discharged_at ? new Date(r.discharged_at).toLocaleString() : "",
           days,
+          temperature: v?.temperature ?? "",
+          pulse: v?.pulse ?? "",
+          bp: (v?.bp_systolic != null && v?.bp_diastolic != null) ? `${v.bp_systolic}/${v.bp_diastolic}` : "",
+          spo2: v?.spo2 ?? "",
+          vitals_recorded_at: v?.recorded_at ? new Date(v.recorded_at).toLocaleString() : "",
         });
       });
     }
