@@ -537,10 +537,6 @@ router.post(
           .json({ error: "Incorrect password. Use your registered phone number." });
       }
 
-      if (staff.hospital_plan === "basic") {
-        return res.status(403).json({ error: "Your hospital is on the Basic plan, which includes doctor login only. Please upgrade to Premium to use this.", code: "PLAN_UPGRADE_REQUIRED" });
-      }
-
       const payload = {
         id: `ph_${staff.code}`,
         code: staff.code,
@@ -772,8 +768,6 @@ router.post("/hospital/login", async (req, res) => {
     const { rows: userRows } = await pool.query("SELECT * FROM users WHERE id=$1", [hospital.admin_user_id]);
     const user = userRows[0];
     if (!user) return res.status(401).json({ error: "Admin account not found" });
-
-    if (hospital.plan === "basic") return res.status(403).json({ error: "Your hospital is on the Basic plan, which includes doctor login only. Please upgrade to Premium to use this.", code: "PLAN_UPGRADE_REQUIRED" });
 
     if (user.first_login === 1) {
       return res.json({ firstLogin: true, loginId, hospitalId: hospital.id, hospitalName: hospital.name });
