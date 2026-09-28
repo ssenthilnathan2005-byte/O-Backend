@@ -218,7 +218,7 @@ async function toolBookToken(args, user) {
     if (!doctor) return { error: "Doctor not found" };
     // availability check removed — book if session exists
 
-    const { rows: hospitalRows } = await client.query("SELECT name, is_free FROM hospitals WHERE id=$1", [doctor.hospital_id]);
+    const { rows: hospitalRows } = await client.query("SELECT name, is_free, rate_per_token FROM hospitals WHERE id=$1", [doctor.hospital_id]);
     const hospital = hospitalRows[0];
     if (!hospital || Number(hospital.is_free) !== 1) {
       return { error: "This hospital requires payment and cannot be booked by voice. Please use the app to complete payment." };
@@ -262,13 +262,14 @@ async function toolBookToken(args, user) {
       await client.query(
         `INSERT INTO bookings
           (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name,
-           date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13)`,
+           date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, rate_per_token)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14)`,
         [
           id, user.id, patient.name || "Unknown",
           args.doctorId, doctor.name, hospital.name,
           args.date, args.session, finalTokenNumber, sessionId, patient.phone, args.complaint || "",
           null,
+          hospital.rate_per_token ?? 15,
         ]
       );
 

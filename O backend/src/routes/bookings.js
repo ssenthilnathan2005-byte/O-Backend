@@ -120,7 +120,7 @@ router.post("/", requireAuth, async (req, res) => {
     if (!doctor.is_available) { return res.status(409).json({ error: "Doctor is not available" }); }
 
     const { rows: hospitalRows } = await client.query(
-      "SELECT name, is_free FROM hospitals WHERE id=$1",
+      "SELECT name, is_free, rate_per_token FROM hospitals WHERE id=$1",
       [doctor.hospital_id]
     );
     const hospital = hospitalRows[0];
@@ -169,13 +169,14 @@ router.post("/", requireAuth, async (req, res) => {
       await client.query(
         `INSERT INTO bookings
           (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name,
-           date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13)`,
+           date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, rate_per_token)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14)`,
         [
           id, req.user.id, (submittedName || patient?.name || "Unknown"),
           doctorId, doctor.name, hospital?.name || "Unknown",
           date, session, finalTokenNumber, sessionId, phoneValidation.phone, complaint,
           patientAge != null && patientAge !== "" ? Number(patientAge) : null,
+          hospital.rate_per_token,
         ]
       );
 

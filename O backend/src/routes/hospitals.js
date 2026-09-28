@@ -42,6 +42,8 @@ async function row2hospital(r, req, includePhoto = true) {
     photoUrl,
     isFree: r.is_free === 1,
     hasPharmacy: r.has_pharmacy === 1,
+    plan: r.plan || "premium",
+    ratePerToken: r.rate_per_token != null ? Number(r.rate_per_token) : 15,
     doctorCount,
   };
 }
@@ -69,7 +71,7 @@ router.get("/", async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      "SELECT id, name, area, address, phone, rating, gradient, photo_url, photo_data, is_free, has_pharmacy FROM hospitals ORDER BY name ASC"
+      "SELECT id, name, area, address, phone, rating, gradient, photo_url, photo_data, is_free, has_pharmacy, plan, rate_per_token FROM hospitals ORDER BY name ASC"
     );
 
     // Batch doctor counts in ONE query instead of one query per hospital (fixes N+1)
@@ -99,6 +101,8 @@ router.get("/", async (req, res) => {
         photoUrl,
         isFree: r.is_free === 1,
         hasPharmacy: r.has_pharmacy === 1,
+        plan: r.plan || "premium",
+        ratePerToken: r.rate_per_token != null ? Number(r.rate_per_token) : 15,
         doctorCount: countMap[r.id] || 0,
       };
     });
@@ -129,13 +133,15 @@ router.get("/:id", async (req, res) => {
 // ── POST create hospital ──────────────────────────────────────────────────────
 router.post("/", requireAdmin, async (req, res) => {
   try {
-    const { name, area, address = "", phone = "", gradient = "from-slate-400 to-slate-600", loginId } = req.body;
+    const { name, area, address = "", phone = "", gradient = "from-slate-400 to-slate-600", loginId, plan } = req.body;
     if (!name || !area) return res.status(400).json({ error: "name and area are required" });
 
     const id = `h_${Date.now()}`;
+    const planVal = plan === "basic" ? "basic" : "premium";
+    const rateVal = planVal === "basic" ? 8 : 15;
     await pool.query(
-      "INSERT INTO hospitals (id, name, area, address, phone, gradient) VALUES ($1,$2,$3,$4,$5,$6)",
-      [id, name, area, address, phone, gradient]
+      "INSERT INTO hospitals (id, name, area, address, phone, gradient, plan, rate_per_token) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+      [id, name, area, address, phone, gradient, planVal, rateVal]
     );
 
     // Optional: create a hospital_admin login for this hospital right away.
@@ -227,11 +233,15 @@ router.patch("/:id", requireAdmin, async (req, res) => {
     const { rows: existingRows } = await pool.query("SELECT id FROM hospitals WHERE id=$1", [req.params.id]);
     if (!existingRows[0]) return res.status(404).json({ error: "Hospital not found" });
 
-    const { name, area, address, phone, isFree, hasPharmacy } = req.body;
+    const { name, area, address, phone, isFree, hasPharmacy, plan, ratePerToken } = req.body;
+    const newPlan = plan === "basic" || plan === "premium" ? plan : null;
+    const customRate = ratePerToken !== undefined && ratePerToken !== null && ratePerToken !== "" && !isNaN(Number(ratePerToken)) ? Number(ratePerToken) : null;
+    const newRate = customRate !== null ? customRate : (newPlan === "basic" ? 8 : newPlan === "premium" ? 15 : null);
     await pool.query(
       `UPDATE hospitals SET name=COALESCE($1,name), area=COALESCE($2,area),
        address=COALESCE($3,address), phone=COALESCE($4,phone), is_free=COALESCE($5,is_free),
-       has_pharmacy=COALESCE($6,has_pharmacy)
+       has_pharmacy=COALESCE($6,has_pharmacy),
+       plan=COALESCE($8,plan), rate_per_token=COALESCE($9,rate_per_token)
        WHERE id=$7`,
       [
         name || null,
@@ -241,10 +251,13 @@ router.patch("/:id", requireAdmin, async (req, res) => {
         isFree !== undefined ? (isFree ? 1 : 0) : null,
         hasPharmacy !== undefined ? (hasPharmacy ? 1 : 0) : null,
         req.params.id,
+        newPlan,
+        newRate,
       ]
     );
 
     const { rows } = await pool.query("SELECT * FROM hospitals WHERE id=$1", [req.params.id]);
+    cache.clear("plan:" + req.params.id);
     invalidateHospitalCache();
     res.json(await row2hospital(rows[0], req, true));
   } catch (err) {

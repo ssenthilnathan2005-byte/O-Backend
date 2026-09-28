@@ -231,14 +231,16 @@ router.post("/verify", requireAuth, async (req, res) => {
         throw Object.assign(new Error("You already have a booking in this session."), { status: 409 });
 
       const tokenNumber = freshCount + 1;
+      const { rows: rateRows } = await client.query("SELECT rate_per_token FROM hospitals WHERE id=$1", [doctor.hospital_id]);
+      const ratePerToken = rateRows[0]?.rate_per_token ?? 15;
       const bookingId   = `b_${Date.now()}_${Math.random().toString(36).slice(2,7)}`;
 
       await client.query(
         `INSERT INTO bookings
           (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name,
            date, session, token_number, session_id, payment_done, status,
-           phone, complaint, razorpay_order_id, razorpay_payment_id, patient_age)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,$15)`,
+           phone, complaint, razorpay_order_id, razorpay_payment_id, patient_age, rate_per_token)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,$15,$16)`,
         [
           bookingId, req.user.id, (submittedName || patient.name),
           doctorId, doctorName || doctor.name, hospitalName || "",
@@ -246,6 +248,7 @@ router.post("/verify", requireAuth, async (req, res) => {
           phoneValidation.phone, complaint,
           razorpay_order_id, razorpay_payment_id,
           patientAge !== "" && patientAge != null ? Number(patientAge) : null,
+          ratePerToken,
         ]
       );
 
