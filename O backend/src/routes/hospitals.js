@@ -65,6 +65,7 @@ function invalidateHospitalCache() {
 // Excludes photo_data (big base64 blob) — this was the main lag/egress cause.
 router.get("/", async (req, res) => {
   try {
+    res.set("Cache-Control", "no-store");
     const now = Date.now();
     if (hospitalListCache && (now - hospitalListCacheTime) < HOSPITAL_CACHE_TTL_MS) {
       return res.json(hospitalListCache);
