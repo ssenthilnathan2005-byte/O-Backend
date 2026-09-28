@@ -70,8 +70,10 @@ router.post("/create-order", requireAuth, async (req, res) => {
     if (!doctor.is_available)
       return res.status(409).json({ error: "Doctor is not available." });
 
-    const { rows: hospitalRows } = await pool.query("SELECT name FROM hospitals WHERE id=$1", [doctor.hospital_id]);
+    const { rows: hospitalRows } = await pool.query("SELECT name, is_free FROM hospitals WHERE id=$1", [doctor.hospital_id]);
     const hospital  = hospitalRows[0];
+    if (hospital && hospital.is_free === 1)
+      return res.status(409).json({ error: "This hospital now offers free booking. Please go back and book directly.", code: "HOSPITAL_FREE" });
     const sessionId = `${doctorId}_${date}_${session}`;
 
     // Check capacity
@@ -152,6 +154,7 @@ router.post("/verify", requireAuth, async (req, res) => {
     );
     const existingBooking = existingBookingRows[0];
     if (existingBooking) {
+      if (existingBooking.patient_id !== req.user.id) return res.status(403).json({ error: "Payment does not belong to this account." });
       console.log(`[Razorpay] Duplicate verify for order ${razorpay_order_id} — returning existing booking`);
       return res.json({
         success: true,
