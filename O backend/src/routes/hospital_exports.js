@@ -158,7 +158,7 @@ router.get("/exports/month/:month", requireAdminOrHospitalAdmin, async (req, res
     if (!hospitalId) return res.status(400).json({ error: "hospitalId is required" });
     const { month } = req.params;
     if (!monthly.validMonth(month)) return res.status(400).json({ error: "Only completed past months can be exported." });
-    const out = await monthly.buildMonthFile("hospital", hospitalId, month);
+    const out = await monthly.buildMonthFile("hospital", hospitalId, month, req.user.role === "hospital_admin");
     if (!out) return res.status(404).json({ error: "No records for this month." });
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
     res.setHeader("Content-Disposition", `attachment; filename="hospital_patients_${month}.xlsx"`);

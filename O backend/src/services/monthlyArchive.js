@@ -33,7 +33,7 @@ async function pendingMonths(scope, ownerId) {
   return rows;
 }
 
-async function buildMonthFile(scope, ownerId, month) {
+async function buildMonthFile(scope, ownerId, month, record = true) {
   const s = SCOPES[scope];
   const { rows: bookings } = await pool.query(
     `SELECT b.* FROM ${s.from}
@@ -75,7 +75,7 @@ async function buildMonthFile(scope, ownerId, month) {
   const buffer = XLSX.write(wb, { type: "buffer", bookType: "xlsx" });
 
   await ensureTable();
-  await pool.query(
+  if (record) await pool.query(
     `INSERT INTO monthly_archive_downloads (scope, owner_id, month) VALUES ($1,$2,$3)
      ON CONFLICT (scope, owner_id, month) DO UPDATE SET downloaded_at = NOW()`,
     [scope, String(ownerId), month]
