@@ -140,4 +140,45 @@ router.post("/patients/export", requireAdminOrHospitalAdmin, async (req, res) =>
   }
 });
 
+
+// ── Monthly download-then-clear ──────────────────────────────────────────────
+const monthly = require("../services/monthlyArchive");
+
+router.get("/exports/pending-months", requireAdminOrHospitalAdmin, async (req, res) => {
+  try {
+    const hospitalId = resolveHospitalId(req);
+    if (!hospitalId) return res.status(400).json({ error: "hospitalId is required" });
+    res.json(await monthly.pendingMonths("hospital", hospitalId));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get("/exports/month/:month", requireAdminOrHospitalAdmin, async (req, res) => {
+  try {
+    const hospitalId = resolveHospitalId(req);
+    if (!hospitalId) return res.status(400).json({ error: "hospitalId is required" });
+    const { month } = req.params;
+    if (!monthly.validMonth(month)) return res.status(400).json({ error: "Only completed past months can be exported." });
+    const out = await monthly.buildMonthFile("hospital", hospitalId, month);
+    if (!out) return res.status(404).json({ error: "No records for this month." });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="hospital_patients_${month}.xlsx"`);
+    res.send(out.buffer);
+  } catch (err) { console.error("[hospital/exports/month]", err.message); res.status(500).json({ error: err.message }); }
+});
+
+// Only the hospital admin can clear; the super admin can download but never hides anything.
+router.post("/exports/month/:month/confirm", requireAdminOrHospitalAdmin, async (req, res) => {
+  try {
+    if (req.user.role !== "hospital_admin") return res.status(403).json({ error: "Only the hospital admin can clear records." });
+    const hospitalId = resolveHospitalId(req);
+    if (!hospitalId) return res.status(400).json({ error: "hospitalId is required" });
+    const { month } = req.params;
+    if (!monthly.validMonth(month)) return res.status(400).json({ error: "Invalid month." });
+    const r = await monthly.confirmMonth("hospital", hospitalId, month);
+    if (!r.ok) return res.status(409).json({ error: r.error });
+    console.log(`[Monthly] Hospital ${hospitalId} cleared ${month}: ${r.cleared} records`);
+    res.json(r);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 module.exports = router;

@@ -53,7 +53,7 @@ router.post("/exports/download-and-delete", requireAuth, async (req, res) => {
 
     // Support range filter: today = only today, default = all records
     const range = req.query.range ?? "all";
-    const todayStr = new Date().toISOString().split("T")[0];
+    const todayStr = require("../services/monthlyArchive").istToday();
     const dateClause = range === "today" ? `AND date = '${todayStr}'` : "";
 
     const { rows: bookings } = await pool.query(
@@ -121,6 +121,42 @@ router.post("/exports/download-and-delete", requireAuth, async (req, res) => {
     console.error("[doctor/exports/download-and-delete]", err.message);
     res.status(500).json({ error: err.message });
   }
+});
+
+
+// ── Monthly download-then-clear ──────────────────────────────────────────────
+const monthly = require("../services/monthlyArchive");
+
+router.get("/exports/pending-months", requireAuth, async (req, res) => {
+  try {
+    if (req.user.role !== "doctor") return res.status(403).json({ error: "Only doctors can access this" });
+    res.json(await monthly.pendingMonths("doctor", req.user.doctorId));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get("/exports/month/:month", requireAuth, async (req, res) => {
+  try {
+    if (req.user.role !== "doctor") return res.status(403).json({ error: "Only doctors can access this" });
+    const { month } = req.params;
+    if (!monthly.validMonth(month)) return res.status(400).json({ error: "Only completed past months can be exported." });
+    const out = await monthly.buildMonthFile("doctor", req.user.doctorId, month);
+    if (!out) return res.status(404).json({ error: "No records for this month." });
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename="patients_${month}.xlsx"`);
+    res.send(out.buffer);
+  } catch (err) { console.error("[doctor/exports/month]", err.message); res.status(500).json({ error: err.message }); }
+});
+
+router.post("/exports/month/:month/confirm", requireAuth, async (req, res) => {
+  try {
+    if (req.user.role !== "doctor") return res.status(403).json({ error: "Only doctors can access this" });
+    const { month } = req.params;
+    if (!monthly.validMonth(month)) return res.status(400).json({ error: "Invalid month." });
+    const r = await monthly.confirmMonth("doctor", req.user.doctorId, month);
+    if (!r.ok) return res.status(409).json({ error: r.error });
+    console.log(`[Monthly] Dr ${req.user.doctorId} cleared ${month}: ${r.cleared} records`);
+    res.json(r);
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 module.exports = router;
