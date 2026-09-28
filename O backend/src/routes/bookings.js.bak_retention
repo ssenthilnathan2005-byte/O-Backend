@@ -45,7 +45,7 @@ router.get("/", requireAuth, async (req, res) => {
       ({ rows } = await pool.query("SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE archived = FALSE ORDER BY created_at DESC LIMIT 200"));
     } else if (req.user.role === "doctor") {
       ({ rows } = await pool.query(
-        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE doctor_id=$1 AND archived_doctor = FALSE ORDER BY date DESC, session ASC, token_number ASC LIMIT 5000",
+        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE doctor_id=$1 AND archived = FALSE AND date >= TO_CHAR(CURRENT_DATE - INTERVAL '7 days', 'YYYY-MM-DD') ORDER BY date DESC, session ASC, token_number ASC LIMIT 150",
         [req.user.doctorId]
       ));
     } else if (req.user.role === "hospital_admin") {
@@ -64,9 +64,9 @@ router.get("/", requireAuth, async (req, res) => {
            FROM bookings b
            JOIN doctors d ON d.id = b.doctor_id
           WHERE d.hospital_id = $1
-            AND b.archived_hospital = FALSE
+            AND b.date >= TO_CHAR(CURRENT_DATE - INTERVAL '7 days', 'YYYY-MM-DD')
           ORDER BY b.date DESC, b.session ASC, b.token_number ASC
-          LIMIT 5000`,
+          LIMIT 200`,
         [hospitalId]
       ));
     } else {

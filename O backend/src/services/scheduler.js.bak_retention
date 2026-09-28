@@ -82,7 +82,7 @@ function startScheduler() {
 
   cron.schedule("0 1 * * *", () => {
     console.log("[Scheduler] Running booking cleanup check...");
-    // DISABLED: 30-day auto-archive replaced by monthly download-then-archive flow
+    void runCleanup({ triggeredBy: "cron" });
   }, { timezone: "Asia/Kolkata" });
   console.log("[Scheduler] Cleanup job scheduled (1 AM IST).");
 }

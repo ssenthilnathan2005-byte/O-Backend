@@ -45,7 +45,7 @@ router.get("/", requireAuth, async (req, res) => {
       ({ rows } = await pool.query("SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE archived = FALSE ORDER BY created_at DESC LIMIT 200"));
     } else if (req.user.role === "doctor") {
       ({ rows } = await pool.query(
-        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE doctor_id=$1 AND archived_doctor = FALSE ORDER BY date DESC, session ASC, token_number ASC LIMIT 5000",
+        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE doctor_id=$1 AND archived = FALSE AND date >= TO_CHAR(CURRENT_DATE - INTERVAL '7 days', 'YYYY-MM-DD') ORDER BY date DESC, session ASC, token_number ASC LIMIT 150",
         [req.user.doctorId]
       ));
     } else if (req.user.role === "hospital_admin") {
@@ -64,9 +64,9 @@ router.get("/", requireAuth, async (req, res) => {
            FROM bookings b
            JOIN doctors d ON d.id = b.doctor_id
           WHERE d.hospital_id = $1
-            AND b.archived_hospital = FALSE
+            AND b.date >= TO_CHAR(CURRENT_DATE - INTERVAL '7 days', 'YYYY-MM-DD')
           ORDER BY b.date DESC, b.session ASC, b.token_number ASC
-          LIMIT 5000`,
+          LIMIT 200`,
         [hospitalId]
       ));
     } else {
@@ -120,7 +120,7 @@ router.post("/", requireAuth, async (req, res) => {
     if (!doctor.is_available) { return res.status(409).json({ error: "Doctor is not available" }); }
 
     const { rows: hospitalRows } = await client.query(
-      "SELECT name, is_free, rate_per_token FROM hospitals WHERE id=$1",
+      "SELECT name, is_free FROM hospitals WHERE id=$1",
       [doctor.hospital_id]
     );
     const hospital = hospitalRows[0];
@@ -169,14 +169,13 @@ router.post("/", requireAuth, async (req, res) => {
       await client.query(
         `INSERT INTO bookings
           (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name,
-           date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, rate_per_token)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14)`,
+           date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13)`,
         [
           id, req.user.id, (submittedName || patient?.name || "Unknown"),
           doctorId, doctor.name, hospital?.name || "Unknown",
           date, session, finalTokenNumber, sessionId, phoneValidation.phone, complaint,
           patientAge != null && patientAge !== "" ? Number(patientAge) : null,
-          hospital.rate_per_token,
         ]
       );
 
