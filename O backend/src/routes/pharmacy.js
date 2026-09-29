@@ -213,6 +213,51 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
       dispensedJson = JSON.stringify(lines);
     }
 
+    if (status === "handed_over") {
+      if (p.status !== "ready") {
+        await client.query("ROLLBACK");
+        return res.status(409).json({ error: "Prescription must be Ready for Pickup before hand over" });
+      }
+      let lines = [];
+      try { lines = p.dispensed_items ? JSON.parse(p.dispensed_items) : []; } catch (_) {}
+      const adj = Array.isArray(req.body.handover) ? req.body.handover : [];
+      let changed = false;
+      for (const d of adj) {
+        const line = lines[Number(d.line)];
+        if (!line) continue;
+        const given = Math.round(Number(d.quantity));
+        if (!(given >= 0) || given > line.tablets) {
+          await client.query("ROLLBACK");
+          return res.status(400).json({ error: `Invalid hand over quantity for ${line.inventoryName}` });
+        }
+        if (given === line.tablets) continue;
+        const inv = await client.query(
+          "SELECT * FROM inventory_items WHERE id=$1 AND hospital_id=$2 FOR UPDATE",
+          [line.inventoryItemId, p.hospital_id]
+        );
+        if (!inv.rows.length) continue;
+        const row = inv.rows[0];
+        const packSize = Number(row.pack_size) || 1;
+        const back = line.tablets - given;
+        const units = Math.round((back / packSize) * 1000) / 1000;
+        await client.query("UPDATE inventory_items SET quantity=quantity+$1, updated_at=now() WHERE id=$2", [units, row.id]);
+        const why = d.reason ? ": " + d.reason : "";
+        await client.query(
+          `INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by)
+           VALUES ($1,$2,$3,'in',$4,$5,$6)`,
+          [`invtx_${randomBytes(5).toString("hex")}`, p.hospital_id, row.id, units,
+           `Returned ${back} at hand over from ${p.patient_name} (Rx ${p.id}) - took ${given} of ${line.tablets}${why}`,
+           req.user.pharmacyStaffId || req.user.id || null]
+        );
+        line.packedTablets = line.packedTablets ?? line.tablets;
+        line.tablets = given;
+        line.returned = back;
+        line.handoverReason = d.reason || null;
+        changed = true;
+      }
+      if (changed) dispensedJson = JSON.stringify(lines);
+    }
+
     const now = new Date().toISOString();
     const timestampCol = status === "packed" ? "packed_at" : status === "ready" ? "ready_at" : "handed_over_at";
     const vals = [status, now];
@@ -221,6 +266,7 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
       vals.push(req.user.pharmacyStaffId || null); setClause += `, packed_by=$${vals.length}`;
       if (dispensedJson) { vals.push(dispensedJson); setClause += `, dispensed_items=$${vals.length}`; }
     }
+    if (status === "handed_over" && dispensedJson) { vals.push(dispensedJson); setClause += `, dispensed_items=$${vals.length}`; }
     vals.push(p.id);
     const upd = await client.query(`UPDATE prescriptions SET ${setClause} WHERE id=$${vals.length} RETURNING *`, vals);
     await client.query("COMMIT");
