@@ -42,7 +42,8 @@ pool.query(`
   CREATE INDEX IF NOT EXISTS idx_inventory_hospital ON inventory_items(hospital_id);
   CREATE INDEX IF NOT EXISTS idx_inventory_category ON inventory_items(category);
   CREATE INDEX IF NOT EXISTS idx_inv_tx_item ON inventory_transactions(item_id);
-`).catch(e => console.warn("[inventory] migration:", e.message));
+`).then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS pack_size REAL NOT NULL DEFAULT 1"))
+.catch(e => console.warn("[inventory] migration:", e.message));
 
 // GET /inventory
 router.get("/", requireAuth, adminOnly, async (req, res) => {
@@ -61,7 +62,7 @@ router.get("/", requireAuth, adminOnly, async (req, res) => {
 router.post("/", requireAuth, adminOnly, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
-    const { name, category, unit, quantity, minQuantity, purchasePrice, supplier, location, notes } = req.body;
+    const { name, category, unit, quantity, minQuantity, purchasePrice, supplier, location, notes, packSize } = req.body;
     if (!name) return res.status(400).json({ error: "name required" });
     const id = `inv_${nanoid(10)}`;
     const { rows } = await pool.query(
@@ -72,15 +73,32 @@ router.post("/", requireAuth, adminOnly, async (req, res) => {
        quantity||0, minQuantity||5, purchasePrice||null,
        supplier||null, location||null, notes||null]
     );
+    if (packSize) {
+      const ps = Number(packSize) || 1;
+      await pool.query("UPDATE inventory_items SET pack_size=$1 WHERE id=$2", [ps, id]);
+      rows[0].pack_size = ps;
+    }
     res.status(201).json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// sets pack_size (tablets per unit) before the main PATCH handler runs
+router.patch("/:id", requireAuth, adminOnly, async (req, res, next) => {
+  try {
+    if (req.body.packSize !== undefined) {
+      const hid = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
+      await pool.query("UPDATE inventory_items SET pack_size=$1 WHERE id=$2 AND hospital_id=$3",
+        [Number(req.body.packSize) || 1, req.params.id, hid]);
+    }
+  } catch (e) { console.warn("[inventory] pack_size:", e.message); }
+  next();
 });
 
 // PATCH /inventory/:id — update item or adjust stock
 router.patch("/:id", requireAuth, adminOnly, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
-    const { name, category, unit, quantity, minQuantity, purchasePrice, supplier, location, notes } = req.body;
+    const { name, category, unit, quantity, minQuantity, purchasePrice, supplier, location, notes, packSize } = req.body;
     const { rows } = await pool.query(
       `UPDATE inventory_items SET
          name=$1, category=$2, unit=$3, quantity=$4, min_quantity=$5,
