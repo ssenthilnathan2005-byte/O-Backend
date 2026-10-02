@@ -139,7 +139,7 @@ router.get("/:id/photo", async (req, res) => {
   try {
     const wantV = req.query.v ? String(req.query.v) : null;
     let entry = photoMem.get(req.params.id);
-    if (!entry || (wantV && entry.v !== wantV)) {
+    if (!entry) {
       const { rows } = await pool.query("SELECT photo_data FROM hospitals WHERE id=$1", [req.params.id]);
       const raw = rows[0] && rows[0].photo_data;
       const mm = raw && /^data:([^;,]+);base64,([\s\S]*)$/.exec(raw);
@@ -200,7 +200,7 @@ router.post("/", requireAdmin, async (req, res) => {
       await pool.query("UPDATE hospitals SET login_id=$1, admin_user_id=$2 WHERE id=$3", [trimmedLoginId, adminUserId, id]);
     }
 
-    const { rows } = await pool.query("SELECT * FROM hospitals WHERE id=$1", [id]);
+    const { rows } = await pool.query("SELECT id, name, area, address, phone, rating, gradient, photo_url, login_id, " + PHOTO_COLS + ", is_free, has_pharmacy, plan, rate_per_token FROM hospitals WHERE id=$1", [id]);
     invalidateHospitalCache();
     res.status(201).json({ ...(await row2hospital(rows[0], req, true)), loginId: rows[0].login_id || null });
   } catch (err) {
@@ -296,7 +296,7 @@ router.patch("/:id", requireAdmin, async (req, res) => {
       ]
     );
 
-    const { rows } = await pool.query("SELECT * FROM hospitals WHERE id=$1", [req.params.id]);
+    const { rows } = await pool.query("SELECT id, name, area, address, phone, rating, gradient, photo_url, login_id, " + PHOTO_COLS + ", is_free, has_pharmacy, plan, rate_per_token FROM hospitals WHERE id=$1", [req.params.id]);
     cache.clear("plan:" + req.params.id);
     invalidateHospitalCache();
     res.json(await row2hospital(rows[0], req, true));
