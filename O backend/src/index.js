@@ -99,6 +99,8 @@ app.use(morgan(process.env.NODE_ENV === "production" ? "combined" : "dev", {
 
 // ── Rate limiting ─────────────────────────────────────────────────────────────
 // Global: 3000 req / 15 min per IP
+const apiCache = require("./utils/apiCache");
+app.use(apiCache.invalidateOnWrite);
 app.use("/api/", rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 3000, // raised from 500 — shared IPs (college/hospital WiFi) + 10s polling can legitimately exceed the old limit
@@ -140,8 +142,10 @@ app.use("/uploads", express.static(UPLOAD_DIR, {
 app.use("/api/auth",      authRoutes);
 app.use("/api/hospitals", hospitalRoutes);
 app.use("/api/doctors",   doctorRoutes);
+app.use("/api/bookings", apiCache.cacheGet(120000));
 app.use("/api/bookings",  bookingRoutes);
 app.use("/api/tokens",    tokenRoutes);
+app.use("/api/patients", apiCache.cacheGet(300000, (r) => r.path === "/"));
 app.use("/api/patients",  patientRoutes);
 app.use("/api/payments",  paymentRoutes);
 app.use("/api/push", pushRoutes);
