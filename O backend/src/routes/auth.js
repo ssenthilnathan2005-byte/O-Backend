@@ -515,13 +515,30 @@ router.post(
 );
 
 // ── Pharmacy staff login ───────────────────────────────────────────────────────
+// Pharmacy staff password check (legacy staff without a password use their phone as a temporary one)
+async function checkPharmacyPassword(staff, pw) {
+  if (staff.password) return bcrypt.compare(String(pw), staff.password);
+  return String(pw).trim() === String(staff.phone || "").trim();
+}
+
+function pharmacyPayload(staff) {
+  return {
+    id: "ph_" + staff.code,
+    code: staff.code,
+    pharmacyStaffId: staff.id,
+    hospitalId: staff.hospital_id,
+    hospitalName: staff.hospital_name,
+    role: "pharmacy",
+  };
+}
+
 router.post(
   "/pharmacy/login",
-  [body("code").trim().notEmpty(), body("phone").trim().notEmpty()],
+  [body("code").trim().notEmpty(), body("password").notEmpty()],
   async (req, res) => {
     if (!validate(req, res)) return;
     try {
-      const { code, phone } = req.body;
+      const { code, password } = req.body;
       const { rows: staffRows } = await pool.query(
         "SELECT ps.*, h.name AS hospital_name, h.plan AS hospital_plan FROM pharmacy_staff ps JOIN hospitals h ON h.id = ps.hospital_id WHERE UPPER(ps.code)=UPPER($1)",
         [String(code || "").trim()]
@@ -531,21 +548,14 @@ router.post(
       if (!staff || staff.is_active === 0) {
         return res.status(401).json({ error: "Invalid access code. Please check with your admin." });
       }
-      if (String(phone || "").trim() !== String(staff.phone || "").trim()) {
-        return res
-          .status(401)
-          .json({ error: "Incorrect password. Use your registered phone number." });
+      if (!(await checkPharmacyPassword(staff, password))) {
+        return res.status(401).json({ error: "Incorrect password." });
+      }
+      if (!staff.password || staff.first_login === 1) {
+        return res.json({ firstLogin: true });
       }
 
-      const payload = {
-        id: `ph_${staff.code}`,
-        code: staff.code,
-        pharmacyStaffId: staff.id,
-        hospitalId: staff.hospital_id,
-        hospitalName: staff.hospital_name,
-        role: "pharmacy",
-      };
-
+      const payload = pharmacyPayload(staff);
       return res.json({ token: sign(payload), user: payload });
     } catch (err) {
       console.error("[auth pharmacy/login]", err.message);
@@ -553,6 +563,36 @@ router.post(
     }
   }
 );
+
+router.post("/pharmacy/set-password", async (req, res) => {
+  try {
+    const { code, currentPassword, newPassword } = req.body;
+    if (!code || !currentPassword || !newPassword)
+      return res.status(400).json({ error: "code, currentPassword and newPassword are required" });
+    if (String(newPassword).length < 6)
+      return res.status(400).json({ error: "Password must be at least 6 characters" });
+    if (String(newPassword) === String(currentPassword))
+      return res.status(400).json({ error: "New password must be different from the current one" });
+
+    const { rows } = await pool.query(
+      "SELECT ps.*, h.name AS hospital_name FROM pharmacy_staff ps JOIN hospitals h ON h.id = ps.hospital_id WHERE UPPER(ps.code)=UPPER($1)",
+      [String(code).trim()]
+    );
+    const staff = rows[0];
+    if (!staff || staff.is_active === 0) return res.status(401).json({ error: "Invalid access code" });
+    if (!(await checkPharmacyPassword(staff, currentPassword)))
+      return res.status(401).json({ error: "Current password is incorrect" });
+
+    const hash = await bcrypt.hash(String(newPassword), 10);
+    await pool.query("UPDATE pharmacy_staff SET password=$1, first_login=0 WHERE id=$2", [hash, staff.id]);
+
+    const payload = pharmacyPayload(staff);
+    return res.json({ token: sign(payload), user: payload });
+  } catch (err) {
+    console.error("[auth pharmacy/set-password]", err.message);
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 // ── Admin login ──────────────────────────────────────────────────────────────
 router.post(

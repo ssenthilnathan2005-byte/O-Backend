@@ -6,6 +6,7 @@ const { broadcast } = require("../services/ws");
 const { requireAuth, requireAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
 
 const { randomBytes } = require("crypto");
+const bcrypt = require("bcrypt");
 
 pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS dispensed_items TEXT")
   .catch(err => console.warn("[pharmacy] migration:", err.message));
@@ -323,7 +324,10 @@ router.get("/staff", requireAdminOrHospitalAdmin, async (req, res) => {
 router.post("/staff", requireAdminOrHospitalAdmin, async (req, res) => {
   try {
     
-    const { name, phone, hospitalId } = req.body;
+    const { name, phone, hospitalId, password } = req.body;
+    if (!password || String(password).length < 6)
+      return res.status(400).json({ error: "Password must be at least 6 characters" });
+    const passwordHash = await bcrypt.hash(String(password), 10);
     if (!name || !phone || !hospitalId)
       return res.status(400).json({ error: "name, phone, hospitalId required" });
     if (req.user.role === "hospital_admin" && req.user.hospitalId !== hospitalId)
@@ -332,8 +336,8 @@ router.post("/staff", requireAdminOrHospitalAdmin, async (req, res) => {
     const code = Math.random().toString(36).substring(2, 8).toUpperCase();
     const id = "ps_" + uuidv4().replace(/-/g, "").substring(0, 16);
     const { rows } = await pool.query(
-      "INSERT INTO pharmacy_staff (id, hospital_id, code, name, phone) VALUES ($1,$2,$3,$4,$5) RETURNING *",
-      [id, hospitalId, code, name, phone]
+      "INSERT INTO pharmacy_staff (id, hospital_id, code, name, phone, password) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, name, phone, code, is_active, created_at",
+      [id, hospitalId, code, name, phone, passwordHash]
     );
     res.status(201).json(rows[0]);
   } catch (err) {
@@ -354,6 +358,32 @@ router.delete("/staff/:id", requireAdminOrHospitalAdmin, async (req, res) => {
       return res.json({ success: true });
     }
     await pool.query("UPDATE pharmacy_staff SET is_active=0 WHERE id=$1", [req.params.id]);
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH reset pharmacy staff password (admin / hospital-admin)
+router.patch("/staff/:id/password", requireAdminOrHospitalAdmin, async (req, res) => {
+  try {
+    const { password } = req.body;
+    if (!password || String(password).length < 6)
+      return res.status(400).json({ error: "Password must be at least 6 characters" });
+    const hash = await bcrypt.hash(String(password), 10);
+    let result;
+    if (req.user.role === "hospital_admin") {
+      result = await pool.query(
+        "UPDATE pharmacy_staff SET password=$1, first_login=0 WHERE id=$2 AND hospital_id=$3 RETURNING id",
+        [hash, req.params.id, req.user.hospitalId]
+      );
+    } else {
+      result = await pool.query(
+        "UPDATE pharmacy_staff SET password=$1, first_login=0 WHERE id=$2 RETURNING id",
+        [hash, req.params.id]
+      );
+    }
+    if (!result.rows.length) return res.status(404).json({ error: "Staff not found" });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });
