@@ -801,7 +801,7 @@ router.post("/hospital/login", async (req, res) => {
     const { loginId, password } = req.body;
     if (!loginId || !password) return res.status(400).json({ error: "loginId and password are required" });
 
-    const { rows: hospRows } = await pool.query("SELECT * FROM hospitals WHERE login_id=$1", [String(loginId).trim()]);
+    const { rows: hospRows } = await pool.query("SELECT id, name, admin_user_id, login_id FROM hospitals WHERE login_id=$1", [String(loginId).trim()]);
     const hospital = hospRows[0];
     if (!hospital) return res.status(401).json({ error: "Invalid login ID" });
     if (!hospital.admin_user_id) return res.status(401).json({ error: "No admin account set up for this hospital" });
@@ -832,7 +832,7 @@ router.post("/hospital/set-password", async (req, res) => {
     if (!loginId || !newPassword) return res.status(400).json({ error: "loginId and newPassword are required" });
     if (String(newPassword).length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
 
-    const { rows: hospRows } = await pool.query("SELECT * FROM hospitals WHERE login_id=$1", [String(loginId).trim()]);
+    const { rows: hospRows } = await pool.query("SELECT id, name, admin_user_id, login_id FROM hospitals WHERE login_id=$1", [String(loginId).trim()]);
     const hospital = hospRows[0];
     if (!hospital || !hospital.admin_user_id) return res.status(404).json({ error: "Hospital not found" });
 
