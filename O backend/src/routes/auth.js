@@ -476,11 +476,12 @@ router.post("/patient/google-phone-otp", async (req, res) => {
 // ── Doctor login ─────────────────────────────────────────────────────────────
 router.post(
   "/doctor/login",
-  [body("code").trim().notEmpty(), body("phone").trim().notEmpty()],
+  [body("code").trim().notEmpty(), body("password").notEmpty()],
   async (req, res) => {
     if (!validate(req, res)) return;
     try {
-      const { code, phone } = req.body;
+      const { code, password } = req.body;
+      const phone = password; // password is stored in doctors.phone
       const { rows: doctorRows } = await pool.query(
         "SELECT * FROM doctors WHERE UPPER(code)=UPPER($1)",
         [String(code || "").trim()]
@@ -496,7 +497,7 @@ router.post(
       if (String(phone || "").trim() !== String(doctor.phone || "").trim()) {
         return res
           .status(401)
-          .json({ error: "Incorrect password. Use your registered phone number." });
+          .json({ error: "Incorrect password." });
       }
 
       const payload = {
