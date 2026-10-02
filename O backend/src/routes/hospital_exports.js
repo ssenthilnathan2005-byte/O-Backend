@@ -148,7 +148,7 @@ router.get("/exports/pending-months", requireAdminOrHospitalAdmin, async (req, r
   try {
     const hospitalId = resolveHospitalId(req);
     if (!hospitalId) return res.status(400).json({ error: "hospitalId is required" });
-    res.json(await monthly.pendingMonths("hospital", hospitalId));
+    res.json([]); // hospital records are never cleared
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -169,7 +169,7 @@ router.get("/exports/month/:month", requireAdminOrHospitalAdmin, async (req, res
 // Only the hospital admin can clear; the super admin can download but never hides anything.
 router.post("/exports/month/:month/confirm", requireAdminOrHospitalAdmin, async (req, res) => {
   try {
-    if (req.user.role !== "hospital_admin") return res.status(403).json({ error: "Only the hospital admin can clear records." });
+    return res.json({ ok: true, cleared: 0 }); // hospital records are never hidden
     const hospitalId = resolveHospitalId(req);
     if (!hospitalId) return res.status(400).json({ error: "hospitalId is required" });
     const { month } = req.params;

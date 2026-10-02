@@ -64,7 +64,6 @@ router.get("/", requireAuth, async (req, res) => {
            FROM bookings b
            JOIN doctors d ON d.id = b.doctor_id
           WHERE d.hospital_id = $1
-            AND b.archived_hospital = FALSE
           ORDER BY b.date DESC, b.session ASC, b.token_number ASC
           LIMIT 5000`,
         [hospitalId]
