@@ -20,6 +20,34 @@ function photoEndpoint(r, req) {
   return proto + "://" + host + req.baseUrl + "/" + r.id + "/photo?v=" + v;
 }
 const photoMem = new Map(); // hospital id -> { v, type, buf }
+const sharp = require("sharp");
+// Shrink uploaded photos so every later read from Supabase is small.
+async function shrinkToDataUrl(buf, mimetype) {
+  try {
+    const out = await sharp(buf).rotate()
+      .resize({ width: 1000, withoutEnlargement: true })
+      .flatten({ background: "#ffffff" })
+      .jpeg({ quality: 75, mozjpeg: true }).toBuffer();
+    if (out.length < buf.length) return "data:image/jpeg;base64," + out.toString("base64");
+  } catch (e) {
+    console.error("[hospitals photo] shrink failed, keeping original:", e.message);
+  }
+  return "data:" + mimetype + ";base64," + buf.toString("base64");
+}
+async function shrinkDataUrl(dataUrl) {
+  const m = /^data:([^;,]+);base64,([\s\S]*)$/.exec(dataUrl);
+  if (!m) return dataUrl;
+  return shrinkToDataUrl(Buffer.from(m[2], "base64"), m[1]);
+}
+// Put a freshly saved photo straight into the memory cache (no re-read from Supabase).
+function seedPhotoCache(id, dataUrl) {
+  const m = /^data:([^;,]+);base64,([\s\S]*)$/.exec(dataUrl);
+  if (!m) { photoMem.delete(String(id)); return; }
+  photoMem.set(String(id), {
+    v: crypto.createHash("md5").update(dataUrl, "utf8").digest("hex").slice(0, 10),
+    type: m[1], buf: Buffer.from(m[2], "base64"),
+  });
+}
 
 
 const upload = multer({
@@ -331,9 +359,9 @@ router.post("/:id/photo", requireAdmin, upload.single("photo"), async (req, res)
     if (!rows[0]) return res.status(404).json({ error: "Hospital not found" });
     if (!req.file) return res.status(400).json({ error: "No file uploaded" });
 
-    const base64 = `data:${req.file.mimetype};base64,${req.file.buffer.toString("base64")}`;
+    const base64 = await shrinkToDataUrl(req.file.buffer, req.file.mimetype);
 
-    await pool.query("UPDATE hospitals SET photo_data=$1, photo_url=NULL WHERE id=$2", [base64, req.params.id]); photoMem.delete(req.params.id); invalidateHospitalCache();
+    await pool.query("UPDATE hospitals SET photo_data=$1, photo_url=NULL WHERE id=$2", [base64, req.params.id]); seedPhotoCache(req.params.id, base64); invalidateHospitalCache();
 
     console.log(`[hospitals photo] saved base64 for id=${req.params.id} size=${req.file.size} bytes`);
     invalidateHospitalCache();
@@ -350,11 +378,12 @@ router.post("/:id/photo-base64", requireAdmin, async (req, res) => {
     const { rows } = await pool.query("SELECT id FROM hospitals WHERE id=$1", [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: "Hospital not found" });
 
-    const { base64 } = req.body;
+    let { base64 } = req.body;
     if (!base64 || !base64.startsWith("data:image/"))
       return res.status(400).json({ error: "Invalid base64 image data" });
+    base64 = await shrinkDataUrl(base64);
 
-    await pool.query("UPDATE hospitals SET photo_data=$1, photo_url=NULL WHERE id=$2", [base64, req.params.id]); photoMem.delete(req.params.id); invalidateHospitalCache();
+    await pool.query("UPDATE hospitals SET photo_data=$1, photo_url=NULL WHERE id=$2", [base64, req.params.id]); seedPhotoCache(req.params.id, base64); invalidateHospitalCache();
     console.log(`[hospitals photo-base64] saved for id=${req.params.id}`);
     invalidateHospitalCache();
     res.json({ photoUrl: base64 });
