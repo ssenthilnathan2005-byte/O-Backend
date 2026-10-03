@@ -25,9 +25,9 @@ const sharp = require("sharp");
 async function shrinkToDataUrl(buf, mimetype) {
   try {
     const out = await sharp(buf).rotate()
-      .resize({ width: 1000, withoutEnlargement: true })
+      .resize({ width: 800, withoutEnlargement: true })
       .flatten({ background: "#ffffff" })
-      .jpeg({ quality: 75, mozjpeg: true }).toBuffer();
+      .jpeg({ quality: 60, mozjpeg: true }).toBuffer();
     if (out.length < buf.length) return "data:image/jpeg;base64," + out.toString("base64");
   } catch (e) {
     console.error("[hospitals photo] shrink failed, keeping original:", e.message);
