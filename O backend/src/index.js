@@ -174,6 +174,7 @@ app.use("/api/nursing", nursingRoutes);
 app.use("/api/prescriptions", pharmacyRoutes);
 app.use("/api/ambulance", ambulanceRoutes);
 app.use("/api/labs", labRoutes);
+app.use("/api/hospital-integrations", require("./routes/hospital_integrations"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
