@@ -70,6 +70,7 @@ router.post("/ingest", async (req, res) => {
     if (list.length > 500) return res.status(413).json({ error: "Max 500 punches per request" });
 
     let inserted = 0, invalid = 0;
+    const seenIds = new Set();
     for (const p of list) {
       const deviceUserId = p && (p.deviceUserId != null ? p.deviceUserId : p.userId);
       const ts = new Date(p && (p.timestamp || p.time));
@@ -82,6 +83,23 @@ router.post("/ingest", async (req, res) => {
          p.method || integ.type, JSON.stringify(p)]
       );
       inserted += r.rowCount;
+      if (r.rowCount > 0) {
+        const sid = String(deviceUserId);
+        if (!seenIds.has(sid)) {
+          seenIds.add(sid);
+          try {
+            const nm = (typeof p.name === "string" && p.name.trim())
+              ? p.name.trim().slice(0, 100) : `New staff (ID ${sid})`;
+            await pool.query(
+              `INSERT INTO hospital_staff (id, hospital_id, name, role, employee_id, shift, shifts, notes)
+               SELECT $1::text, $2::text, $3::text, 'other', $4::text, 'morning', ARRAY['morning'],
+                      'Auto-created from attendance device. Please update details.'
+                WHERE NOT EXISTS (SELECT 1 FROM hospital_staff WHERE hospital_id=$2::text AND employee_id=$4::text)`,
+              [newId("staff"), integ.hospital_id, nm, sid]
+            );
+          } catch (e) { console.warn("[hospital_integrations] auto-staff:", e.message); }
+        }
+      }
     }
     await pool.query("UPDATE hospital_integrations SET last_seen_at=now() WHERE id=$1", [integ.id]);
     res.json({ success: true, received: list.length, inserted, invalid });
@@ -108,6 +126,23 @@ router.get("/attendance", requireAuth, adminOrHospitalAdmin, async (req, res) =>
         WHERE l.hospital_id=$1 AND l.punched_at >= $2 AND l.punched_at <= $3
         ORDER BY l.punched_at DESC LIMIT 2000`,
       [hospitalId, from.toISOString(), to.toISOString()]
+    );
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ---- Today's first/last punch per device user (for HR page) ----
+router.get("/today", requireAuth, adminOrHospitalAdmin, async (req, res) => {
+  try {
+    const hospitalId = scopeHospital(req);
+    if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
+    const { rows } = await pool.query(
+      `SELECT device_user_id, MIN(punched_at) AS first_punch, MAX(punched_at) AS last_punch, COUNT(*)::int AS punches
+         FROM attendance_logs
+        WHERE hospital_id=$1
+          AND punched_at >= (date_trunc('day', now() AT TIME ZONE 'Asia/Kolkata') AT TIME ZONE 'Asia/Kolkata')
+        GROUP BY device_user_id`,
+      [hospitalId]
     );
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
