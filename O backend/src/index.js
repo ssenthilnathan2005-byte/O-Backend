@@ -153,6 +153,8 @@ app.use("/api/chat", chatRoutes);
 app.use("/api/admin/cleanup", adminCleanupRoutes);
 const doctorExportRoutes = require("./routes/doctor_exports");
 app.use("/api/doctor", doctorExportRoutes);
+const doctorHistoryRoutes = require("./routes/doctor_history");
+app.use("/api/doctor", doctorHistoryRoutes);
 const hospitalExportRoutes = require("./routes/hospital_exports");
 const pharmacyRoutes = require("./routes/pharmacy");
 const inwardRoutes   = require("./routes/inward");
