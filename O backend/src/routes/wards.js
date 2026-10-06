@@ -390,4 +390,182 @@ router.delete("/:wardId", requireAuth, adminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+// ─── Ward / bed management: edit ward, add / edit / remove bed ────────────
+async function refreshWardBedCount(db, wardId) {
+  await db.query(
+    `UPDATE wards SET total_beds=(SELECT COUNT(*) FROM beds WHERE ward_id=$1) WHERE id=$1`,
+    [wardId]
+  );
+}
+
+function rollbackQuietly(client) {
+  return client.query("ROLLBACK").catch(() => {});
+}
+
+// PATCH /wards/:wardId — edit ward { name?, type? }
+router.patch("/:wardId", requireAuth, adminOnly, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const hospitalId = hospitalIdOf(req);
+    if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
+    const name = typeof req.body.name === "string" ? req.body.name.trim() : undefined;
+    const type = typeof req.body.type === "string" ? req.body.type.trim() : undefined;
+    if (name === undefined && type === undefined) return res.status(400).json({ error: "Nothing to update" });
+    if (name !== undefined && !name) return res.status(400).json({ error: "name cannot be empty" });
+
+    await client.query("BEGIN");
+    const { rows: cur } = await client.query(
+      `SELECT * FROM wards WHERE id=$1 AND hospital_id=$2 FOR UPDATE`,
+      [req.params.wardId, hospitalId]
+    );
+    if (!cur.length) { await rollbackQuietly(client); return res.status(404).json({ error: "Ward not found" }); }
+
+    const { rows } = await client.query(
+      `UPDATE wards SET name=COALESCE($1,name), type=COALESCE($2,type) WHERE id=$3 RETURNING *`,
+      [name !== undefined ? name : null, type ? type : null, req.params.wardId]
+    );
+    // Keep the ward name on currently admitted patients in sync
+    if (name !== undefined && name !== cur[0].name) {
+      await client.query(
+        `UPDATE inward_patients SET ward=$1
+         WHERE hospital_id=$2 AND id IN (SELECT inward_id FROM beds WHERE ward_id=$3 AND inward_id IS NOT NULL)`,
+        [name, hospitalId, req.params.wardId]
+      );
+    }
+    await client.query("COMMIT");
+    res.json(rows[0]);
+  } catch (err) {
+    await rollbackQuietly(client);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// POST /wards/:wardId/beds — add a bed { bedNumber? } (auto-numbered when omitted)
+router.post("/:wardId/beds", requireAuth, adminOnly, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const hospitalId = hospitalIdOf(req);
+    if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
+    let bedNumber = typeof req.body.bedNumber === "string" ? req.body.bedNumber.trim() : "";
+    if (bedNumber.length > 30) return res.status(400).json({ error: "Bed number is too long" });
+
+    await client.query("BEGIN");
+    const { rows: wr } = await client.query(
+      `SELECT * FROM wards WHERE id=$1 AND hospital_id=$2 FOR UPDATE`,
+      [req.params.wardId, hospitalId]
+    );
+    if (!wr.length) { await rollbackQuietly(client); return res.status(404).json({ error: "Ward not found" }); }
+
+    const { rows: existing } = await client.query(
+      `SELECT bed_number FROM beds WHERE ward_id=$1`, [req.params.wardId]
+    );
+    if (bedNumber) {
+      if (existing.some(b => b.bed_number.toLowerCase() === bedNumber.toLowerCase())) {
+        await rollbackQuietly(client);
+        return res.status(409).json({ error: "A bed with this number already exists in this ward" });
+      }
+    } else {
+      let max = 0;
+      for (const b of existing) {
+        const m = /(\d+)$/.exec(b.bed_number);
+        if (m) max = Math.max(max, parseInt(m[1], 10));
+      }
+      bedNumber = `${wr[0].name.slice(0, 2).toUpperCase()}-${String(max + 1).padStart(2, "0")}`;
+    }
+
+    const { rows } = await client.query(
+      `INSERT INTO beds (id, hospital_id, ward_id, bed_number)
+       VALUES ($1,$2,$3,$4) RETURNING *`,
+      [`bed_${nanoid(10)}`, hospitalId, req.params.wardId, bedNumber]
+    );
+    await refreshWardBedCount(client, req.params.wardId);
+    await client.query("COMMIT");
+    res.status(201).json(rows[0]);
+  } catch (err) {
+    await rollbackQuietly(client);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// PATCH /wards/:wardId/beds/:bedId — edit bed { bedNumber }
+router.patch("/:wardId/beds/:bedId", requireAuth, adminOnly, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const hospitalId = hospitalIdOf(req);
+    if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
+    const bedNumber = typeof req.body.bedNumber === "string" ? req.body.bedNumber.trim() : "";
+    if (!bedNumber) return res.status(400).json({ error: "bedNumber required" });
+    if (bedNumber.length > 30) return res.status(400).json({ error: "Bed number is too long" });
+
+    await client.query("BEGIN");
+    const { rows: wr } = await client.query(
+      `SELECT id FROM wards WHERE id=$1 AND hospital_id=$2 FOR UPDATE`,
+      [req.params.wardId, hospitalId]
+    );
+    if (!wr.length) { await rollbackQuietly(client); return res.status(404).json({ error: "Ward not found" }); }
+
+    const { rows: bedRows } = await client.query(
+      `SELECT * FROM beds WHERE id=$1 AND ward_id=$2 AND hospital_id=$3 FOR UPDATE`,
+      [req.params.bedId, req.params.wardId, hospitalId]
+    );
+    if (!bedRows.length) { await rollbackQuietly(client); return res.status(404).json({ error: "Bed not found" }); }
+
+    const { rows: dup } = await client.query(
+      `SELECT 1 FROM beds WHERE ward_id=$1 AND id<>$2 AND LOWER(bed_number)=LOWER($3)`,
+      [req.params.wardId, req.params.bedId, bedNumber]
+    );
+    if (dup.length) { await rollbackQuietly(client); return res.status(409).json({ error: "A bed with this number already exists in this ward" }); }
+
+    const { rows } = await client.query(
+      `UPDATE beds SET bed_number=$1, updated_at=now() WHERE id=$2 RETURNING *`,
+      [bedNumber, req.params.bedId]
+    );
+    // Keep the occupant's record in sync
+    if (bedRows[0].inward_id) {
+      await client.query(
+        `UPDATE inward_patients SET bed_number=$1 WHERE id=$2 AND hospital_id=$3`,
+        [bedNumber, bedRows[0].inward_id, hospitalId]
+      );
+    }
+    await client.query("COMMIT");
+    res.json(rows[0]);
+  } catch (err) {
+    await rollbackQuietly(client);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
+
+// DELETE /wards/:wardId/beds/:bedId — remove a bed (blocked while occupied)
+router.delete("/:wardId/beds/:bedId", requireAuth, adminOnly, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const hospitalId = hospitalIdOf(req);
+    if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
+
+    await client.query("BEGIN");
+    const { rows: wr } = await client.query(
+      `SELECT id FROM wards WHERE id=$1 AND hospital_id=$2 FOR UPDATE`,
+      [req.params.wardId, hospitalId]
+    );
+    if (!wr.length) { await rollbackQuietly(client); return res.status(404).json({ error: "Ward not found" }); }
+
+    const { rows: bedRows } = await client.query(
+      `SELECT * FROM beds WHERE id=$1 AND ward_id=$2 AND hospital_id=$3 FOR UPDATE`,
+      [req.params.bedId, req.params.wardId, hospitalId]
+    );
+    if (!bedRows.length) { await rollbackQuietly(client); return res.status(404).json({ error: "Bed not found" }); }
+    if (bedRows[0].status === "occupied" || bedRows[0].inward_id) {
+      await rollbackQuietly(client);
+      return res.status(409).json({ error: "This bed has a patient. Discharge the patient before removing the bed." });
+    }
+
+    await client.query(`DELETE FROM beds WHERE id=$1`, [req.params.bedId]);
+    await refreshWardBedCount(client, req.params.wardId);
+    await client.query("COMMIT");
+    res.json({ success: true });
+  } catch (err) {
+    await rollbackQuietly(client);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
+});
 module.exports = router;
