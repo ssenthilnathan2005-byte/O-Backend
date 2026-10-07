@@ -147,7 +147,7 @@ router.post("/", requireAdminOrHospitalAdmin, async (req, res) => {
             price = 10, tokensPerSession = 20,
             sessions = ["morning","afternoon"],
             sessionTimings = null, scheduleConfig = null, yearsOfExperience = "",
-            education = "", languages = [] } = req.body;
+            education = "", languages = [], doctorFee = null } = req.body;
 
     if (!name || !specialty || !hospitalId)
       return res.status(400).json({ error: "name, specialty, and hospitalId are required" });
@@ -158,6 +158,13 @@ router.post("/", requireAdminOrHospitalAdmin, async (req, res) => {
     const { rows: hospitalRows } = await pool.query("SELECT id FROM hospitals WHERE id=$1", [hospitalId]);
     if (!hospitalRows[0]) return res.status(404).json({ error: "Hospital not found" });
 
+    let feeVal = null;
+    if (doctorFee !== undefined && doctorFee !== null && doctorFee !== "") {
+      feeVal = Number(doctorFee);
+      if (!Number.isFinite(feeVal) || feeVal < 0 || feeVal > 100000)
+        return res.status(400).json({ error: "Invalid consultation fee" });
+    }
+
     const code = await nextDoctorCode({ name, hospitalId });
     const id   = `d_${Date.now()}`;
 
@@ -165,8 +172,8 @@ router.post("/", requireAdminOrHospitalAdmin, async (req, res) => {
       `INSERT INTO doctors
         (id, hospital_id, code, name, specialty, phone, bio, price, consultation_fee,
          tokens_per_session, sessions, session_timings, schedule_config, is_available,
-         years_of_experience, education, languages)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,$14,$15,$16)`,
+         years_of_experience, education, languages, doctor_fee)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,$14,$15,$16,$17)`,
       [
         id, hospitalId, code, name, specialty, phone, bio, price, price,
         tokensPerSession,
@@ -175,6 +182,7 @@ router.post("/", requireAdminOrHospitalAdmin, async (req, res) => {
         scheduleConfig ? JSON.stringify(scheduleConfig) : null,
         yearsOfExperience, education,
         languages.length ? JSON.stringify(languages) : null,
+        feeVal,
       ]
     );
 
@@ -218,8 +226,6 @@ router.patch("/:id", async (req, res, next) => {
 
     let feeVal = null;
     if (doctorFee !== undefined && doctorFee !== null && doctorFee !== "") {
-      if (req.user.role === "hospital_admin")
-        return res.status(403).json({ error: "Only the doctor or an admin can set the consultation fee" });
       feeVal = Number(doctorFee);
       if (!Number.isFinite(feeVal) || feeVal < 0 || feeVal > 100000)
         return res.status(400).json({ error: "Invalid consultation fee" });
