@@ -180,6 +180,7 @@ app.use("/api/ambulance", ambulanceRoutes);
 app.use("/api/labs", labRoutes);
 app.use("/api/hospital-integrations", require("./routes/hospital_integrations"));
 app.use("/api/dashboard", require("./routes/dashboard_kpis"));
+app.use("/api/pharmacy-stats", require("./routes/pharmacy_stats"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
