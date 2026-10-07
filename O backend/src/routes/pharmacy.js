@@ -285,6 +285,8 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
     if (status === "handed_over") {
       vals.push(billAmount); setClause += `, bill_amount=$${vals.length}`;
       vals.push(tabletsSold); setClause += `, tablets_sold=$${vals.length}`;
+      { const pm = String(req.body.paymentMode || "cash").toLowerCase();
+        vals.push(["cash", "upi", "insurance"].includes(pm) ? pm : "cash"); setClause += `, payment_mode=$${vals.length}`; }
     }
     vals.push(p.id);
     const upd = await client.query(`UPDATE prescriptions SET ${setClause} WHERE id=$${vals.length} RETURNING *`, vals);
@@ -297,6 +299,7 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
         type: "prescription_update", prescriptionId: row.id, status: row.status, patientId: row.patient_id,
       });
     } catch (_) {}
+    try { broadcast(`hospital_${row.hospital_id}`, { type: "pharmacy_update", status: row.status }); } catch (_) {}
     res.json(updated);
   } catch (err) {
     try { await client.query("ROLLBACK"); } catch (_) {}
