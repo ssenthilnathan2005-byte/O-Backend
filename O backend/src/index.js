@@ -172,11 +172,14 @@ app.use("/api/wards", wardsRoutes);
 app.use("/api/hr", hrRoutes);
 app.use("/api/inventory", inventoryRoutes);
 app.use("/api/hospital-lab", hospitalLabRoutes);
+app.use("/api/hospital-lab", require("./routes/hospital_lab_public"));
+app.use("/api/hospital-lab-staff", require("./routes/hospital_lab_staff"));
 app.use("/api/nursing", nursingRoutes);
 app.use("/api/prescriptions", pharmacyRoutes);
 app.use("/api/ambulance", ambulanceRoutes);
 app.use("/api/labs", labRoutes);
 app.use("/api/hospital-integrations", require("./routes/hospital_integrations"));
+app.use("/api/dashboard", require("./routes/dashboard_kpis"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
