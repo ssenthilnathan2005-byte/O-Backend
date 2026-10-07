@@ -10,6 +10,10 @@ const bcrypt = require("bcrypt");
 
 pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS dispensed_items TEXT")
   .catch(err => console.warn("[pharmacy] migration:", err.message));
+pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS bill_amount NUMERIC(12,2)")
+  .then(() => pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS tablets_sold INTEGER"))
+  .then(() => pool.query("CREATE INDEX IF NOT EXISTS idx_prescriptions_handed_over ON prescriptions(hospital_id, handed_over_at)"))
+  .catch(err => console.warn("[pharmacy] revenue migration:", err.message));
 
 // tablets needed = tablets per dose x doses per day x days
 function suggestQty(item) {
@@ -171,6 +175,8 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
     const p = cur.rows[0];
 
     let dispensedJson = null;
+    let billAmount = null;
+    let tabletsSold = null;
     if (status === "packed") {
       if (p.status !== "pending") {
         await client.query("ROLLBACK");
@@ -221,6 +227,13 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
       }
       let lines = [];
       try { lines = p.dispensed_items ? JSON.parse(p.dispensed_items) : []; } catch (_) {}
+      const rawAmt = req.body.billAmount;
+      billAmount = (rawAmt === undefined || rawAmt === null || String(rawAmt).trim() === "")
+        ? NaN : Math.round(Number(rawAmt) * 100) / 100;
+      if (!Number.isFinite(billAmount) || billAmount < 0 || billAmount > 10000000) {
+        await client.query("ROLLBACK");
+        return res.status(400).json({ error: "Enter the bill amount (0 or more) before marking as given" });
+      }
       const adj = Array.isArray(req.body.handover) ? req.body.handover : [];
       let changed = false;
       for (const d of adj) {
@@ -257,6 +270,7 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
         changed = true;
       }
       if (changed) dispensedJson = JSON.stringify(lines);
+      tabletsSold = lines.reduce((s, l) => s + (Number(l.tablets) || 0), 0);
     }
 
     const now = new Date().toISOString();
@@ -268,6 +282,10 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
       if (dispensedJson) { vals.push(dispensedJson); setClause += `, dispensed_items=$${vals.length}`; }
     }
     if (status === "handed_over" && dispensedJson) { vals.push(dispensedJson); setClause += `, dispensed_items=$${vals.length}`; }
+    if (status === "handed_over") {
+      vals.push(billAmount); setClause += `, bill_amount=$${vals.length}`;
+      vals.push(tabletsSold); setClause += `, tablets_sold=$${vals.length}`;
+    }
     vals.push(p.id);
     const upd = await client.query(`UPDATE prescriptions SET ${setClause} WHERE id=$${vals.length} RETURNING *`, vals);
     await client.query("COMMIT");
