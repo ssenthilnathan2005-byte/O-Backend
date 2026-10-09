@@ -132,7 +132,7 @@ router.get("/inventory", guard, async (req, res) => {
       else if (r.expiry_date && r.expiry_date <= soon) status = "expiring_soon";
       return {
         id: r.id, name: r.name, unit: r.unit, quantity: qty, packSize: pack,
-        tabletsAvailable: Math.floor(qty * pack), reorderLevel: Number(r.min_quantity),
+        tabletsAvailable: Math.round(qty * pack), reorderLevel: Number(r.min_quantity),
         purchasePrice: r.purchase_price, sellingPrice: r.selling_price,
         supplier: r.supplier, location: r.location, batchNo: r.batch_no, expiryDate: r.expiry_date, status,
         updatedAt: r.updated_at,
@@ -185,18 +185,41 @@ router.post("/inventory", guard, async (req, res) => {
 });
 
 router.patch("/inventory/:id/meta", guard, async (req, res) => {
+  const client = await pool.connect();
   try {
-    const { batchNo, expiryDate, sellingPrice, supplier, location } = req.body || {};
+    const { batchNo, expiryDate, sellingPrice, supplier, location, packSize } = req.body || {};
     if (expiryDate && !DATE_RE.test(expiryDate)) return res.status(400).json({ error: "expiryDate must be YYYY-MM-DD" });
     if (sellingPrice != null && !(Number(sellingPrice) >= 0)) return res.status(400).json({ error: "Invalid sellingPrice" });
-    const { rows } = await pool.query(
+    let newPack = null;
+    if (packSize !== undefined && packSize !== null && packSize !== "") {
+      newPack = Number(packSize);
+      if (!Number.isInteger(newPack) || newPack < 1 || newPack > 100000)
+        return res.status(400).json({ error: "Tablets per pack must be a whole number of 1 or more" });
+    }
+    await client.query("BEGIN");
+    const cur = await client.query(
+      "SELECT quantity, pack_size FROM inventory_items WHERE id=$1 AND hospital_id=$2 FOR UPDATE", [req.params.id, req.hid]);
+    if (!cur.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Item not found" }); }
+    const oldPack = Number(cur.rows[0].pack_size) || 1;
+    let newQty = null;
+    if (newPack !== null && newPack !== oldPack) {
+      // keep the total tablet count the same when the pack size changes
+      const tablets = Number(cur.rows[0].quantity) * oldPack;
+      newQty = Math.round((tablets / newPack) * 1000000) / 1000000;
+    }
+    await client.query(
       "UPDATE inventory_items SET batch_no=COALESCE($1,batch_no), expiry_date=COALESCE($2::date,expiry_date), " +
-      "selling_price=COALESCE($3,selling_price), supplier=COALESCE($4,supplier), location=COALESCE($7,location), updated_at=now() " +
-      "WHERE id=$5 AND hospital_id=$6 RETURNING id",
-      [batchNo ?? null, expiryDate ?? null, sellingPrice ?? null, supplier ?? null, req.params.id, req.hid, location ?? null]);
-    if (!rows.length) return res.status(404).json({ error: "Item not found" });
+      "selling_price=COALESCE($3,selling_price), supplier=COALESCE($4,supplier), location=COALESCE($7,location), " +
+      "pack_size=COALESCE($8,pack_size), quantity=COALESCE($9,quantity), updated_at=now() " +
+      "WHERE id=$5 AND hospital_id=$6",
+      [batchNo ?? null, expiryDate ?? null, sellingPrice ?? null, supplier ?? null, req.params.id, req.hid, location ?? null, newPack, newQty]);
+    await client.query("COMMIT");
+    try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    res.status(500).json({ error: e.message });
+  } finally { client.release(); }
 });
 
 // ── Medicine Buying by Patient (dispensing log) ──────────────────────────────
