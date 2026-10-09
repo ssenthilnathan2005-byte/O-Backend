@@ -305,6 +305,112 @@ router.get("/medicines-sold", guard, async (req, res) => {
 });
 
 // ── Itemized invoice for one prescription ────────────────────────────────────
+// ---- Stock Update: medicines sold on a day vs what is already deducted from stock ----
+function suggestQtyLocal(item) {
+  const dm = /([\d.]+)\s*(tablet|capsule)/i.exec(item.dosage || "");
+  const perDose = dm ? parseFloat(dm[1]) : 1;
+  const times = ["Morning", "Afternoon", "Evening"].filter(t => (item.instructions || "").includes(t)).length || 1;
+  const du = /([\d.]+)\s*(day|week)/i.exec(item.duration || "");
+  const days = du ? Math.ceil(parseFloat(du[1]) * (du[2].toLowerCase() === "week" ? 7 : 1)) : 1;
+  return Math.max(1, Math.ceil(perDose * times * days));
+}
+
+router.get("/stock-pending", guard, async (req, res) => {
+  try {
+    const day = DATE_RE.test(String(req.query.date || "")) ? String(req.query.date) : await todayIST();
+    const { rows } = await pool.query(
+      "SELECT id, patient_name, items, dispensed_items FROM prescriptions WHERE " + HANDED_WHERE,
+      [req.hid, day, day]);
+    const agg = {};
+    const pending = [];
+    for (const r of rows) {
+      const dispensed = parse(r.dispensed_items);
+      const doneIdx = new Set(dispensed.filter(l => l.index !== undefined && l.index !== null).map(l => Number(l.index)));
+      const doneNames = new Set(dispensed.map(l => String(l.name || "").toLowerCase()));
+      parse(r.items).forEach((it, idx) => {
+        const name = it.name || "Unknown";
+        const tablets = suggestQtyLocal(it);
+        const done = doneIdx.has(idx) || doneNames.has(name.toLowerCase());
+        const a = agg[name] || (agg[name] = { name, soldTablets: 0, deductedTablets: 0, pendingTablets: 0, pendingLines: 0 });
+        a.soldTablets += tablets;
+        if (done) {
+          a.deductedTablets += tablets;
+        } else {
+          a.pendingTablets += tablets;
+          a.pendingLines += 1;
+          pending.push({ rxId: r.id, patient: r.patient_name, index: idx, name, tablets });
+        }
+      });
+    }
+    res.set("Cache-Control", "no-store");
+    res.json({
+      date: day,
+      medicines: Object.values(agg).sort((x, y) => y.pendingTablets - x.pendingTablets),
+      pending,
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post("/stock-deduct", guard, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { rxId, index, inventoryItemId, tablets, reason } = req.body || {};
+    const idx = Number(index);
+    const qty = Math.round(Number(tablets));
+    if (!rxId || !inventoryItemId || !Number.isInteger(idx) || idx < 0)
+      return res.status(400).json({ error: "rxId, index and inventoryItemId are required" });
+    if (!Number.isFinite(qty) || qty <= 0 || qty > 1000000)
+      return res.status(400).json({ error: "Enter a valid number of tablets" });
+
+    await client.query("BEGIN");
+    const cur = await client.query(
+      "SELECT * FROM prescriptions WHERE id=$1 AND hospital_id=$2 AND status='handed_over' FOR UPDATE",
+      [rxId, req.hid]);
+    if (!cur.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Handed-over prescription not found" }); }
+    const p = cur.rows[0];
+    const item = parse(p.items)[idx];
+    if (!item) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Medicine line not found" }); }
+    const lines = parse(p.dispensed_items);
+    const itemName = String(item.name || "").toLowerCase();
+    const already = lines.some(l =>
+      (l.index !== undefined && l.index !== null && Number(l.index) === idx) ||
+      String(l.name || "").toLowerCase() === itemName);
+    if (already) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Already deducted from stock" }); }
+
+    const inv = await client.query(
+      "SELECT * FROM inventory_items WHERE id=$1 AND hospital_id=$2 AND category='medicines' FOR UPDATE",
+      [inventoryItemId, req.hid]);
+    if (!inv.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Stock item not found" }); }
+    const row = inv.rows[0];
+    const pack = Number(row.pack_size) || 1;
+    const units = Math.round((qty / pack) * 1000) / 1000;
+    if (Number(row.quantity) + 1e-6 < units) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: "Not enough stock for " + row.name + ": available " + Math.floor(Number(row.quantity) * pack) + ", needed " + qty });
+    }
+
+    const why = String(reason || "").trim();
+    await client.query("UPDATE inventory_items SET quantity=quantity-$1, updated_at=now() WHERE id=$2", [units, row.id]);
+    await client.query(
+      "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'out',$4,$5,$6)",
+      ["invtx_" + randomBytes(5).toString("hex"), req.hid, row.id, units,
+       "Stock Update: " + qty + " sold to " + p.patient_name + " (Rx " + p.id + ") deducted after hand over" + (why ? " - " + why : ""),
+       req.user.pharmacyStaffId || req.user.id || null]);
+
+    lines.push({ index: idx, name: item.name, inventoryItemId: row.id, inventoryName: row.name,
+                 tablets: qty, suggested: qty, reduced: false, reason: why || null, units, lateDeduct: true });
+    await client.query(
+      "UPDATE prescriptions SET dispensed_items=$1, tablets_sold=COALESCE(tablets_sold,0)+$2 WHERE id=$3",
+      [JSON.stringify(lines), qty, p.id]);
+    await client.query("COMMIT");
+    try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
+    res.json({ ok: true, name: row.name, tabletsAvailable: Math.round((Number(row.quantity) - units) * pack) });
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    res.status(500).json({ error: e.message });
+  } finally { client.release(); }
+});
+
 router.get("/invoice/:id", guard, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM prescriptions WHERE id=$1 AND hospital_id=$2", [req.params.id, req.hid]);
