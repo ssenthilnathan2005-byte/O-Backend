@@ -234,6 +234,8 @@ router.post("/verify", requireAuth, async (req, res) => {
         throw Object.assign(new Error("You already have a booking in this session."), { status: 409 });
 
       const tokenNumber = freshCount + 1;
+      const bookingYob = birthYearFrom(req.body);
+      const bookingYobAge = bookingYob != null ? new Date().getFullYear() - bookingYob : null;
       const { rows: rateRows } = await client.query("SELECT rate_per_token FROM hospitals WHERE id=$1", [doctor.hospital_id]);
       const ratePerToken = rateRows[0]?.rate_per_token ?? 15;
       const bookingId   = `b_${Date.now()}_${Math.random().toString(36).slice(2,7)}`;
@@ -242,15 +244,16 @@ router.post("/verify", requireAuth, async (req, res) => {
         `INSERT INTO bookings
           (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name,
            date, session, token_number, session_id, payment_done, status,
-           phone, complaint, razorpay_order_id, razorpay_payment_id, patient_age, rate_per_token)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,$15,$16)`,
+           phone, complaint, razorpay_order_id, razorpay_payment_id, patient_age, patient_year_of_birth, rate_per_token)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,$15,$16,$17)`,
         [
           bookingId, req.user.id, (submittedName || patient.name),
           doctorId, doctorName || doctor.name, hospitalName || "",
           date, session, tokenNumber, sessionId,
           phoneValidation.phone, complaint,
           razorpay_order_id, razorpay_payment_id,
-          patientAge !== "" && patientAge != null ? Number(patientAge) : null,
+          bookingYobAge != null ? bookingYobAge : (patientAge !== "" && patientAge != null ? Number(patientAge) : null),
+          bookingYob,
           ratePerToken,
         ]
       );
@@ -318,6 +321,17 @@ router.post("/verify", requireAuth, async (req, res) => {
     res.status(err.status || 500).json({ error: err.message });
   }
 });
+
+
+// ---- Year of birth (added) ----
+// Reads patientYearOfBirth from the request; returns a valid year or null.
+function birthYearFrom(body) {
+  const v = body && body.patientYearOfBirth;
+  if (v === undefined || v === null || v === "") return null;
+  const y = Number(v);
+  const now = new Date().getFullYear();
+  return Number.isInteger(y) && y >= now - 120 && y <= now ? y : null;
+}
 
 function formatBooking(b) {
   return {

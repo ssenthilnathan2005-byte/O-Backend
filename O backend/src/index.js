@@ -184,6 +184,7 @@ app.use("/api/hospital-integrations", require("./routes/hospital_integrations"))
 app.use("/api/dashboard", require("./routes/dashboard_kpis"));
 app.use("/api/pharmacy-stats", require("./routes/pharmacy_stats"));
 app.use("/api/pharmacy-module", require("./routes/pharmacy_module"));
+app.use("/api/voice", require("./routes/voice"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
