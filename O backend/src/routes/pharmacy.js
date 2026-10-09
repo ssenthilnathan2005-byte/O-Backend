@@ -15,6 +15,36 @@ pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS bill_amount NUMER
   .then(() => pool.query("CREATE INDEX IF NOT EXISTS idx_prescriptions_handed_over ON prescriptions(hospital_id, handed_over_at)"))
   .catch(err => console.warn("[pharmacy] revenue migration:", err.message));
 
+// Sequential bill numbers: one counter per hospital (1, 2, 3...), saved on the prescription
+async function billNoMigration() {
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    await c.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS bill_no INTEGER");
+    await c.query("CREATE TABLE IF NOT EXISTS pharmacy_bill_counters (hospital_id TEXT PRIMARY KEY, last_no INTEGER NOT NULL DEFAULT 0)");
+    await c.query("LOCK TABLE prescriptions IN SHARE ROW EXCLUSIVE MODE");
+    // Number existing bills that have no number yet, oldest first, continuing after any existing numbers
+    await c.query(
+      "UPDATE prescriptions p SET bill_no = n.rn + COALESCE(m.mx, 0) " +
+      "FROM (SELECT id, hospital_id, ROW_NUMBER() OVER (PARTITION BY hospital_id ORDER BY handed_over_at ASC NULLS LAST, id ASC) AS rn " +
+      "      FROM prescriptions WHERE status = 'handed_over' AND bill_no IS NULL) n " +
+      "LEFT JOIN (SELECT hospital_id, MAX(bill_no) AS mx FROM prescriptions WHERE bill_no IS NOT NULL GROUP BY hospital_id) m " +
+      "  ON m.hospital_id = n.hospital_id " +
+      "WHERE p.id = n.id");
+    await c.query(
+      "INSERT INTO pharmacy_bill_counters (hospital_id, last_no) " +
+      "SELECT hospital_id, MAX(bill_no) FROM prescriptions WHERE bill_no IS NOT NULL GROUP BY hospital_id " +
+      "ON CONFLICT (hospital_id) DO UPDATE SET last_no = GREATEST(pharmacy_bill_counters.last_no, EXCLUDED.last_no)");
+    await c.query("CREATE UNIQUE INDEX IF NOT EXISTS uq_prescriptions_bill_no ON prescriptions (hospital_id, bill_no) WHERE bill_no IS NOT NULL");
+    await c.query("COMMIT");
+  } catch (e) {
+    try { await c.query("ROLLBACK"); } catch (_) {}
+    throw e;
+  } finally { c.release(); }
+}
+const billReady = billNoMigration();
+billReady.catch(err => console.warn("[pharmacy] bill number migration:", err.message));
+
 // tablets needed = tablets per dose x doses per day x days
 function suggestQty(item) {
   if (Number(item.quantity) > 0) return Math.round(Number(item.quantity)); // doctor's dispensing quantity wins
@@ -300,6 +330,14 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
       vals.push(tabletsSold); setClause += `, tablets_sold=$${vals.length}`;
       { const pm = String(req.body.paymentMode || "cash").toLowerCase();
         vals.push(["cash", "upi", "insurance"].includes(pm) ? pm : "cash"); setClause += `, payment_mode=$${vals.length}`; }
+    }
+    if (status === "handed_over" && !p.bill_no) {
+      await billReady;
+      const bn = await client.query(
+        "INSERT INTO pharmacy_bill_counters (hospital_id, last_no) VALUES ($1, 1) " +
+        "ON CONFLICT (hospital_id) DO UPDATE SET last_no = pharmacy_bill_counters.last_no + 1 RETURNING last_no",
+        [p.hospital_id]);
+      vals.push(bn.rows[0].last_no); setClause += `, bill_no=$${vals.length}`;
     }
     vals.push(p.id);
     const upd = await client.query(`UPDATE prescriptions SET ${setClause} WHERE id=$${vals.length} RETURNING *`, vals);
