@@ -23,7 +23,18 @@ router.patch("/profile", requireAuth, async (req, res) => {
   if (req.user.role !== "patient")
     return res.status(403).json({ error: "Patients only" });
 
-  const { name, phone, age } = req.body;
+  const { name, phone, yearOfBirth, age } = req.body;
+  const thisYear = new Date().getFullYear();
+  let yob = null;
+  let calcAge = null;
+  if (yearOfBirth !== undefined && yearOfBirth !== null && yearOfBirth !== "") {
+    yob = Number(yearOfBirth);
+    if (!Number.isInteger(yob) || yob < thisYear - 120 || yob > thisYear)
+      return res.status(400).json({ error: "Enter a valid 4-digit year of birth" });
+    calcAge = thisYear - yob;
+  } else {
+    calcAge = age ?? null;
+  }
   if (!phone || !name)
     return res.status(400).json({ error: "name and phone are required" });
 
@@ -33,8 +44,8 @@ router.patch("/profile", requireAuth, async (req, res) => {
 
   try {
     await pool.query(
-      "UPDATE users SET name=$1, phone=$2, age=$3 WHERE id=$4",
-      [name.trim(), normalised, age ?? null, req.user.id]
+      "UPDATE users SET name=$1, phone=$2, age=$3, year_of_birth=COALESCE($4, year_of_birth) WHERE id=$5",
+      [name.trim(), normalised, calcAge, yob, req.user.id]
     );
     // Also patch bookings so future queries pick up the right name
     await pool.query(
@@ -55,15 +66,18 @@ router.get("/profile", requireAuth, async (req, res) => {
     return res.status(403).json({ error: "Patients only" });
   try {
     const { rows } = await pool.query(
-      "SELECT name, phone, age FROM users WHERE id=$1",
+      "SELECT name, phone, age, year_of_birth FROM users WHERE id=$1",
       [req.user.id]
     );
     const u = rows[0] || {};
-    const isComplete = !!(u.name && u.phone && u.age);
+    const thisYear = new Date().getFullYear();
+    const liveAge = u.year_of_birth ? thisYear - Number(u.year_of_birth) : (u.age != null ? Number(u.age) : null);
+    const isComplete = !!(u.name && u.phone && (u.year_of_birth || u.age));
     return res.json({
       name: u.name || "",
       phone: u.phone || "",
-      age: u.age != null ? String(u.age) : "",
+      age: liveAge != null ? String(liveAge) : "",
+      yearOfBirth: u.year_of_birth ? String(u.year_of_birth) : "",
       isComplete,
     });
   } catch (err) {
