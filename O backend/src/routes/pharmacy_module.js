@@ -68,7 +68,8 @@ function lineAmounts(rx, inv) {
     const sp = Number(it && it.selling_price) || 0;
     const cp = Number(it && it.purchase_price) || 0;
     let unitPrice, amount, priceSource;
-    if (sp > 0) { unitPrice = sp / pack; amount = tabs * unitPrice; priceSource = "inventory"; }
+    if (l.unitPrice != null && l.unitPrice !== "" && Number.isFinite(Number(l.unitPrice))) { unitPrice = Number(l.unitPrice); amount = tabs * unitPrice; priceSource = "billed"; }
+    else if (sp > 0) { unitPrice = sp / pack; amount = tabs * unitPrice; priceSource = "inventory"; }
     else { amount = totalTabs ? (tabs / totalTabs) * bill : 0; unitPrice = tabs ? amount / tabs : 0; priceSource = "bill-share"; }
     return {
       name: l.inventoryName || l.name, tablets: tabs,
