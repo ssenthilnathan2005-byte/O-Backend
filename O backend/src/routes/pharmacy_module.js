@@ -418,7 +418,8 @@ router.get("/invoice/:id", guard, async (req, res) => {
     const rx = rows[0];
     const lines = lineAmounts(rx, await invMap(req.hid));
     res.json({
-      invoiceNo: "PH-" + rx.id, prescriptionId: rx.id, hospitalName: rx.hospital_name,
+      billNo: rx.bill_no == null ? null : Number(rx.bill_no),
+      invoiceNo: rx.bill_no == null ? "Bill pending" : "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
       patientId: rx.patient_id, patientName: rx.patient_name, doctorName: rx.doctor_name,
       issuedAt: rx.handed_over_at, paymentMode: rx.payment_mode || null,
       lines: lines.map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
