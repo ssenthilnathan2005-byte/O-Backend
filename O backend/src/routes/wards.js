@@ -89,6 +89,7 @@ pool.query(`
     updated_at      TIMESTAMPTZ NOT NULL DEFAULT now()
   );
   ALTER TABLE wards ADD COLUMN IF NOT EXISTS cleaning_minutes INTEGER;
+  ALTER TABLE wards ADD COLUMN IF NOT EXISTS bed_prefix TEXT;
   ALTER TABLE beds  ADD COLUMN IF NOT EXISTS cleaning_override_minutes INTEGER;
   ALTER TABLE beds  ADD COLUMN IF NOT EXISTS cleaning_started_at TIMESTAMPTZ;
   ALTER TABLE beds  ADD COLUMN IF NOT EXISTS cleaning_ends_at TIMESTAMPTZ;
@@ -219,7 +220,7 @@ router.get("/:wardId/beds", requireAuth, adminOnly, async (req, res) => {
        LEFT JOIN hospital_cleaning_settings hs ON hs.hospital_id = b.hospital_id
        LEFT JOIN inward_patients ip ON ip.id = b.inward_id
        WHERE b.ward_id=$1 AND b.hospital_id=$2
-       ORDER BY b.bed_number ASC`,
+       ORDER BY regexp_replace(b.bed_number, '[0-9]+$', '') ASC, length(substring(b.bed_number from '[0-9]+$')) ASC, b.bed_number ASC`,
       [req.params.wardId, hospitalId]
     );
     res.json(rows);
@@ -410,7 +411,9 @@ router.patch("/:wardId", requireAuth, adminOnly, async (req, res) => {
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
     const name = typeof req.body.name === "string" ? req.body.name.trim() : undefined;
     const type = typeof req.body.type === "string" ? req.body.type.trim() : undefined;
-    if (name === undefined && type === undefined) return res.status(400).json({ error: "Nothing to update" });
+    const prefix = typeof req.body.bedPrefix === "string" ? req.body.bedPrefix.trim().toUpperCase() : "";
+    if (prefix && !/^[A-Z0-9-]{1,10}$/.test(prefix)) return res.status(400).json({ error: "Bed prefix can have only letters, numbers and dashes (max 10 characters)" });
+    if (name === undefined && type === undefined && !prefix) return res.status(400).json({ error: "Nothing to update" });
     if (name !== undefined && !name) return res.status(400).json({ error: "name cannot be empty" });
 
     await client.query("BEGIN");
@@ -421,8 +424,8 @@ router.patch("/:wardId", requireAuth, adminOnly, async (req, res) => {
     if (!cur.length) { await rollbackQuietly(client); return res.status(404).json({ error: "Ward not found" }); }
 
     const { rows } = await client.query(
-      `UPDATE wards SET name=COALESCE($1,name), type=COALESCE($2,type) WHERE id=$3 RETURNING *`,
-      [name !== undefined ? name : null, type ? type : null, req.params.wardId]
+      "UPDATE wards SET name=COALESCE($1,name), type=COALESCE($2,type), bed_prefix=COALESCE($4,bed_prefix) WHERE id=$3 RETURNING *",
+      [name !== undefined ? name : null, type ? type : null, req.params.wardId, prefix || null]
     );
     // Keep the ward name on currently admitted patients in sync
     if (name !== undefined && name !== cur[0].name) {
@@ -431,6 +434,29 @@ router.patch("/:wardId", requireAuth, adminOnly, async (req, res) => {
          WHERE hospital_id=$2 AND id IN (SELECT inward_id FROM beds WHERE ward_id=$3 AND inward_id IS NOT NULL)`,
         [name, hospitalId, req.params.wardId]
       );
+    }
+    // Apply a changed bed prefix to this ward's existing beds (all or nothing)
+    if (prefix && prefix !== (cur[0].bed_prefix || "")) {
+      const { rows: wardBeds } = await client.query(
+        "SELECT id, bed_number, inward_id FROM beds WHERE ward_id=$1 ORDER BY bed_number",
+        [req.params.wardId]
+      );
+      const used = new Set();
+      const renames = [];
+      for (const b of wardBeds) {
+        const m = /(\d+)$/.exec(b.bed_number);
+        const next = m ? prefix + parseInt(m[1], 10) : b.bed_number;
+        if (used.has(next.toLowerCase())) {
+          await rollbackQuietly(client);
+          return res.status(409).json({ error: "Cannot apply prefix: two beds would both become " + next });
+        }
+        used.add(next.toLowerCase());
+        if (next !== b.bed_number) renames.push({ id: b.id, next: next, inwardId: b.inward_id });
+      }
+      for (const r of renames) {
+        await client.query("UPDATE beds SET bed_number=$1, updated_at=now() WHERE id=$2", [r.next, r.id]);
+        if (r.inwardId) await client.query("UPDATE inward_patients SET bed_number=$1 WHERE id=$2 AND hospital_id=$3", [r.next, r.inwardId, hospitalId]);
+      }
     }
     await client.query("COMMIT");
     res.json(rows[0]);
@@ -448,6 +474,8 @@ router.post("/:wardId/beds", requireAuth, adminOnly, async (req, res) => {
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
     let bedNumber = typeof req.body.bedNumber === "string" ? req.body.bedNumber.trim() : "";
     if (bedNumber.length > 30) return res.status(400).json({ error: "Bed number is too long" });
+    const count = req.body.count === undefined ? 1 : Number(req.body.count);
+    if (!Number.isInteger(count) || count < 1 || count > 100) return res.status(400).json({ error: "count must be a whole number between 1 and 100" });
 
     await client.query("BEGIN");
     const { rows: wr } = await client.query(
@@ -459,28 +487,38 @@ router.post("/:wardId/beds", requireAuth, adminOnly, async (req, res) => {
     const { rows: existing } = await client.query(
       `SELECT bed_number FROM beds WHERE ward_id=$1`, [req.params.wardId]
     );
-    if (bedNumber) {
-      if (existing.some(b => b.bed_number.toLowerCase() === bedNumber.toLowerCase())) {
-        await rollbackQuietly(client);
-        return res.status(409).json({ error: "A bed with this number already exists in this ward" });
-      }
-    } else {
-      let max = 0;
-      for (const b of existing) {
-        const m = /(\d+)$/.exec(b.bed_number);
-        if (m) max = Math.max(max, parseInt(m[1], 10));
-      }
-      bedNumber = `${wr[0].name.slice(0, 2).toUpperCase()}-${String(max + 1).padStart(2, "0")}`;
+    // Wards with a bed prefix number beds M1, M2...; wards without one keep the old style (NO-01)
+    const prefix = wr[0].bed_prefix || "";
+    let max = 0;
+    for (const b of existing) {
+      const m = /(\d+)$/.exec(b.bed_number);
+      if (m) max = Math.max(max, parseInt(m[1], 10));
     }
+    const makeName = (n) => prefix
+      ? prefix + n
+      : wr[0].name.slice(0, 2).toUpperCase() + "-" + String(n).padStart(2, "0");
+    const names = [];
+    if (bedNumber) {
+      if (count > 1) { await rollbackQuietly(client); return res.status(400).json({ error: "A custom bed number can only be used when adding one bed" }); }
+      names.push(bedNumber);
+    } else {
+      for (let i = 1; i <= count; i++) names.push(makeName(max + i));
+    }
+    const taken = new Set(existing.map(b => b.bed_number.toLowerCase()));
+    const dup = names.find(n => taken.has(n.toLowerCase()));
+    if (dup) { await rollbackQuietly(client); return res.status(409).json({ error: "A bed with this number already exists in this ward" }); }
 
-    const { rows } = await client.query(
-      `INSERT INTO beds (id, hospital_id, ward_id, bed_number)
-       VALUES ($1,$2,$3,$4) RETURNING *`,
-      [`bed_${nanoid(10)}`, hospitalId, req.params.wardId, bedNumber]
-    );
+    const created = [];
+    for (const n of names) {
+      const { rows } = await client.query(
+        "INSERT INTO beds (id, hospital_id, ward_id, bed_number) VALUES ($1,$2,$3,$4) RETURNING *",
+        ["bed_" + nanoid(10), hospitalId, req.params.wardId, n]
+      );
+      created.push(rows[0]);
+    }
     await refreshWardBedCount(client, req.params.wardId);
     await client.query("COMMIT");
-    res.status(201).json(rows[0]);
+    res.status(201).json(count > 1 ? created : created[0]);
   } catch (err) {
     await rollbackQuietly(client);
     res.status(500).json({ error: err.message });
