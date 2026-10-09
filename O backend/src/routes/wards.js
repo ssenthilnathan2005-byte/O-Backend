@@ -220,7 +220,7 @@ router.get("/:wardId/beds", requireAuth, adminOnly, async (req, res) => {
        LEFT JOIN hospital_cleaning_settings hs ON hs.hospital_id = b.hospital_id
        LEFT JOIN inward_patients ip ON ip.id = b.inward_id
        WHERE b.ward_id=$1 AND b.hospital_id=$2
-       ORDER BY b.bed_number ASC`,
+       ORDER BY regexp_replace(b.bed_number, '[0-9]+$', '') ASC, length(substring(b.bed_number from '[0-9]+$')) ASC, b.bed_number ASC`,
       [req.params.wardId, hospitalId]
     );
     res.json(rows);
