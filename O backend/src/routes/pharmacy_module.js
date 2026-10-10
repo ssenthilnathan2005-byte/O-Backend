@@ -10,11 +10,30 @@ pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_no TEXT")
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS expiry_date DATE"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS selling_price REAL"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS med_category TEXT"))
+  .then(() => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_med_categories (hospital_id TEXT NOT NULL, name TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (hospital_id, name))"))
   .then(() => pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS payment_mode TEXT"))
   .catch(e => console.warn("[pharmacy_module] migration:", e.message));
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MED_CATEGORIES = ["Tablet", "Capsule", "Syrup/Tonic", "Injection", "Oil", "Ointment/Cream", "Drops", "Powder", "Others"];
+
+// Returns { value } with the canonical category name (null when blank) or { error }.
+// A new custom name is saved per hospital so it appears in the dropdown next time.
+async function resolveCategory(db, hid, raw) {
+  if (raw === undefined || raw === null) return { value: null };
+  const name = String(raw).replace(/\s+/g, " ").trim();
+  if (!name) return { value: null };
+  if (name.length > 40) return { error: "Category name must be 40 characters or less" };
+  if (/[<>]/.test(name)) return { error: "Category name has invalid characters" };
+  const std = MED_CATEGORIES.find(c => c.toLowerCase() === name.toLowerCase());
+  if (std) return { value: std };
+  const ex = await db.query("SELECT name FROM pharmacy_med_categories WHERE hospital_id=$1 AND lower(name)=lower($2)", [hid, name]);
+  if (ex.rows.length) return { value: ex.rows[0].name };
+  const cnt = await db.query("SELECT COUNT(*)::int AS n FROM pharmacy_med_categories WHERE hospital_id=$1", [hid]);
+  if (cnt.rows[0].n >= 100) return { error: "Custom category limit reached" };
+  await db.query("INSERT INTO pharmacy_med_categories (hospital_id, name) VALUES ($1,$2) ON CONFLICT DO NOTHING", [hid, name]);
+  return { value: name };
+}
 const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
 function addDays(s, n) {
   const d = new Date(s + "T00:00:00Z");
@@ -152,8 +171,6 @@ router.post("/inventory", guard, async (req, res) => {
     const name = String(b.name || "").trim();
     if (!name) return res.status(400).json({ error: "Medicine name is required" });
     const pack = num(b.packSize) > 0 ? num(b.packSize) : 1;
-    const medCat = (b.medCategory === undefined || b.medCategory === null || b.medCategory === "") ? null : String(b.medCategory);
-    if (medCat !== null && !MED_CATEGORIES.includes(medCat)) return res.status(400).json({ error: "Invalid category" });
     const openTabs = num(b.openingTablets) === null ? 0 : num(b.openingTablets);
     const reorder = num(b.reorderLevel) === null ? 5 : num(b.reorderLevel);
     const pp = num(b.purchasePrice);
@@ -167,6 +184,9 @@ router.post("/inventory", guard, async (req, res) => {
     const dup = await client.query(
       "SELECT 1 FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND lower(name)=lower($2)", [req.hid, name]);
     if (dup.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "A medicine with this name already exists" }); }
+    const cr = await resolveCategory(client, req.hid, b.medCategory);
+    if (cr.error) { await client.query("ROLLBACK"); return res.status(400).json({ error: cr.error }); }
+    const medCat = cr.value;
     const id = "inv_" + randomBytes(5).toString("hex");
     const qty = Math.round((openTabs / pack) * 1000) / 1000;
     await client.query(
@@ -188,15 +208,19 @@ router.post("/inventory", guard, async (req, res) => {
   } finally { client.release(); }
 });
 
+router.get("/inventory-categories", guard, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT name FROM pharmacy_med_categories WHERE hospital_id=$1 ORDER BY lower(name)", [req.hid]);
+    res.set("Cache-Control", "no-store");
+    res.json([...MED_CATEGORIES, ...rows.map(r => r.name)]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.patch("/inventory/:id/meta", guard, async (req, res) => {
   const client = await pool.connect();
   try {
     const { batchNo, expiryDate, sellingPrice, supplier, location, packSize, medCategory } = req.body || {};
-    let newCat = null;
-    if (medCategory !== undefined && medCategory !== null && medCategory !== "") {
-      if (!MED_CATEGORIES.includes(String(medCategory))) return res.status(400).json({ error: "Invalid category" });
-      newCat = String(medCategory);
-    }
     if (expiryDate && !DATE_RE.test(expiryDate)) return res.status(400).json({ error: "expiryDate must be YYYY-MM-DD" });
     if (sellingPrice != null && !(Number(sellingPrice) >= 0)) return res.status(400).json({ error: "Invalid sellingPrice" });
     let newPack = null;
@@ -209,6 +233,9 @@ router.patch("/inventory/:id/meta", guard, async (req, res) => {
     const cur = await client.query(
       "SELECT quantity, pack_size FROM inventory_items WHERE id=$1 AND hospital_id=$2 FOR UPDATE", [req.params.id, req.hid]);
     if (!cur.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Item not found" }); }
+    const cr = await resolveCategory(client, req.hid, medCategory);
+    if (cr.error) { await client.query("ROLLBACK"); return res.status(400).json({ error: cr.error }); }
+    const newCat = cr.value;
     const oldPack = Number(cur.rows[0].pack_size) || 1;
     let newQty = null;
     if (newPack !== null && newPack !== oldPack) {
