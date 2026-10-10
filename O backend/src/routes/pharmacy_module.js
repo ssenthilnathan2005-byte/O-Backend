@@ -4,6 +4,7 @@ const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
 const { broadcast } = require("../services/ws");
 const { randomBytes } = require("crypto");
+const { ready: batchesReady, takeFromBatches, addBatch } = require("../services/batches");
 const router = express.Router();
 
 pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_no TEXT")
@@ -156,25 +157,38 @@ router.get("/revenue", guard, async (req, res) => {
 // ── Inventory (medicines) ────────────────────────────────────────────────────
 router.get("/inventory", guard, async (req, res) => {
   try {
+    await batchesReady;
     const t = await todayIST();
     const soon = addDays(t, 30);
     const { rows } = await pool.query(
       "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, schedule, gst_percent, " +
       "to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, updated_at " +
       "FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC", [req.hid]);
+    const bq = await pool.query(
+      "SELECT item_id, batch_no, to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, tablets, supplier FROM inventory_batches " +
+      "WHERE hospital_id=$1 AND tablets>0 ORDER BY expiry_date ASC NULLS LAST, received_at ASC", [req.hid]);
+    const byItem = {};
+    for (const b of bq.rows) (byItem[b.item_id] = byItem[b.item_id] || []).push({ batchNo: b.batch_no, expiryDate: b.expiry_date, tablets: Number(b.tablets), supplier: b.supplier });
     res.set("Cache-Control", "no-store");
     res.json(rows.map(r => {
       const qty = Number(r.quantity) || 0, pack = Number(r.pack_size) || 1;
+      const total = Math.round(qty * pack);
+      const batches = byItem[r.id] || [];
+      const sum = batches.reduce((s, b) => s + b.tablets, 0);
+      if (total > sum) batches.push({ batchNo: null, expiryDate: null, tablets: total - sum, supplier: null });
+      const dated = batches.filter(b => b.expiryDate);
+      const exps = dated.length ? dated.map(b => b.expiryDate) : (r.expiry_date ? [r.expiry_date] : []);
       let status = "ok";
-      if (r.expiry_date && r.expiry_date < t) status = "expired";
+      if (exps.some(e => e < t)) status = "expired";
       else if (qty <= 0) status = "out_of_stock";
       else if (qty <= Number(r.min_quantity)) status = "low_stock";
-      else if (r.expiry_date && r.expiry_date <= soon) status = "expiring_soon";
+      else if (exps.some(e => e <= soon)) status = "expiring_soon";
       return {
         id: r.id, name: r.name, unit: r.unit, quantity: qty, packSize: pack,
-        tabletsAvailable: Math.round(qty * pack), reorderLevel: Number(r.min_quantity),
+        tabletsAvailable: total, reorderLevel: Number(r.min_quantity),
         purchasePrice: r.purchase_price, sellingPrice: r.selling_price, stripsPerBox: r.strips_per_box, tabletsPerBox: r.strips_per_box ? r.strips_per_box * pack : null, schedule: r.schedule || "none", gstPercent: r.gst_percent, breakdown: breakdownOf(qty * pack, pack, r.strips_per_box),
-        supplier: r.supplier, location: r.location, batchNo: r.batch_no, medCategory: r.med_category || null, expiryDate: r.expiry_date, status,
+        supplier: r.supplier, location: r.location, batchNo: r.batch_no, medCategory: r.med_category || null,
+        expiryDate: dated.length ? dated[0].expiryDate : r.expiry_date, batches, status,
         updatedAt: r.updated_at,
       };
     }));
@@ -242,6 +256,7 @@ router.delete("/inventory/:id", guard, async (req, res) => {
     const pack = Number(row.pack_size) || 1;
     const tabs = Math.round(qty * pack);
     await client.query("UPDATE inventory_items SET quantity=0, archived_at=now(), updated_at=now() WHERE id=$1", [row.id]);
+    await client.query("UPDATE inventory_batches SET tablets=0 WHERE item_id=$1", [row.id]);
     if (qty > 0) {
       await client.query(
         "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'out',$4,$5,$6)",
@@ -333,6 +348,7 @@ router.post("/inventory/:id/stock", guard, async (req, res) => {
     if (delta === 0) { await client.query("ROLLBACK"); return res.status(400).json({ error: "No change in stock" }); }
     const why = String(reason || "").trim();
     if (delta < 0 && !why) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Reason is required when reducing stock" }); }
+    if (delta < 0) await takeFromBatches(client, row.id, Math.round(-delta * pack), { untrackedFirst: true });
     await client.query("UPDATE inventory_items SET quantity=$1, updated_at=now() WHERE id=$2", [finalQty, row.id]);
     const label = mode === "add"
       ? "Stock received: +" + n + " tablets"
@@ -416,6 +432,7 @@ router.post("/inventory/:id/packing", guard, async (req, res) => {
 router.post("/inventory/:id/receive", guard, async (req, res) => {
   const client = await pool.connect();
   try {
+    await batchesReady;
     const b = req.body || {};
     const n = v => (v === undefined || v === null || v === "") ? 0 : Number(v);
     const boxes = n(b.boxes), strips = n(b.strips), loose = n(b.tablets);
@@ -444,20 +461,16 @@ router.post("/inventory/:id/receive", guard, async (req, res) => {
     const total = boxes * spb * pack + strips * pack + loose;
     if (total <= 0) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Enter how many boxes, strips or tablets were received" }); }
     const onHand = Math.round(Number(row.quantity) * pack);
-    const oldBatch = String(row.batch_no || "").trim();
-    if (onHand > 0 && oldBatch && oldBatch.toLowerCase() !== batchNo.toLowerCase()) {
-      await client.query("ROLLBACK");
-      return res.status(409).json({ error: onHand + " tablets of batch " + oldBatch + " are still in stock. Several batches at once come in the next update; for now finish or correct that stock first." });
-    }
     const newQty = Math.round(((onHand + total) / pack) * 1000000) / 1000000;
     const pp = pbox === null ? null : pbox / spb;
+    const sup = b.supplier ? String(b.supplier).trim() : null;
     await client.query(
       "UPDATE inventory_items SET quantity=$1, batch_no=$2, expiry_date=$3::date, selling_price=COALESCE($4,selling_price), " +
       "purchase_price=COALESCE($5,purchase_price), supplier=COALESCE($6,supplier), updated_at=now() WHERE id=$7 AND hospital_id=$8",
-      [newQty, batchNo, expiry, mrp, pp, b.supplier ? String(b.supplier).trim() : null, row.id, req.hid]);
+      [newQty, batchNo, expiry, mrp, pp, sup, row.id, req.hid]);
+    await addBatch(client, row.id, req.hid, batchNo, expiry, total, sup);
     const note = "Stock received: +" + total + " tablets (" + boxes + " box, " + strips + " strip, " + loose + " tablet) batch " + batchNo +
-      " exp " + expiry + (b.invoiceNo ? " invoice " + String(b.invoiceNo).trim() : "") + (b.supplier ? " from " + String(b.supplier).trim() : "") +
-      (onHand > 0 && !oldBatch ? " (existing " + onHand + " tablets had no batch recorded)" : "");
+      " exp " + expiry + (b.invoiceNo ? " invoice " + String(b.invoiceNo).trim() : "") + (sup ? " from " + sup : "");
     await client.query(
       "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
       ["invtx_" + randomBytes(5).toString("hex"), req.hid, row.id, Math.round((total / pack) * 1000) / 1000, note,
@@ -620,6 +633,7 @@ router.post("/stock-deduct", guard, async (req, res) => {
     }
 
     const why = String(reason || "").trim();
+    const usedBatches = await takeFromBatches(client, row.id, qty);
     await client.query("UPDATE inventory_items SET quantity=quantity-$1, updated_at=now() WHERE id=$2", [units, row.id]);
     await client.query(
       "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'out',$4,$5,$6)",
@@ -628,7 +642,7 @@ router.post("/stock-deduct", guard, async (req, res) => {
        req.user.pharmacyStaffId || req.user.id || null]);
 
     lines.push({ index: idx, name: item.name, inventoryItemId: row.id, inventoryName: row.name,
-                 tablets: qty, suggested: qty, reduced: false, reason: why || null, units, lateDeduct: true });
+                 tablets: qty, suggested: qty, reduced: false, reason: why || null, units, lateDeduct: true, batches: usedBatches });
     await client.query(
       "UPDATE prescriptions SET dispensed_items=$1, tablets_sold=COALESCE(tablets_sold,0)+$2 WHERE id=$3",
       [JSON.stringify(lines), qty, p.id]);
