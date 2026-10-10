@@ -181,7 +181,7 @@ router.get("/stock", requirePharmacyOrAdmin, async (req, res) => {
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
     const { rows } = await pool.query(
       `SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price
-         FROM inventory_items WHERE hospital_id=$1 AND category='medicines' ORDER BY name ASC`,
+         FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC`,
       [hospitalId]
     );
     res.json(rows);

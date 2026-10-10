@@ -10,6 +10,7 @@ pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_no TEXT")
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS expiry_date DATE"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS selling_price REAL"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS med_category TEXT"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS strips_per_box INTEGER"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS schedule TEXT"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS gst_percent REAL"))
@@ -160,7 +161,7 @@ router.get("/inventory", guard, async (req, res) => {
     const { rows } = await pool.query(
       "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, schedule, gst_percent, " +
       "to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, updated_at " +
-      "FROM inventory_items WHERE hospital_id=$1 AND category='medicines' ORDER BY name ASC", [req.hid]);
+      "FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC", [req.hid]);
     res.set("Cache-Control", "no-store");
     res.json(rows.map(r => {
       const qty = Number(r.quantity) || 0, pack = Number(r.pack_size) || 1;
@@ -200,7 +201,7 @@ router.post("/inventory", guard, async (req, res) => {
     if (b.expiryDate && !DATE_RE.test(b.expiryDate)) return res.status(400).json({ error: "expiryDate must be YYYY-MM-DD" });
     await client.query("BEGIN");
     const dup = await client.query(
-      "SELECT 1 FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND lower(name)=lower($2)", [req.hid, name]);
+      "SELECT 1 FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL AND lower(name)=lower($2)", [req.hid, name]);
     if (dup.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "A medicine with this name already exists" }); }
     const cr = await resolveCategory(client, req.hid, b.medCategory);
     if (cr.error) { await client.query("ROLLBACK"); return res.status(400).json({ error: cr.error }); }
@@ -220,6 +221,37 @@ router.post("/inventory", guard, async (req, res) => {
     await client.query("COMMIT");
     try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
     res.status(201).json({ ok: true, id });
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    res.status(500).json({ error: e.message });
+  } finally { client.release(); }
+});
+
+// Remove a medicine: archived, not deleted, so old bills keep their cost data.
+router.delete("/inventory/:id", guard, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const why = String((req.body && req.body.reason) || "").trim();
+    await client.query("BEGIN");
+    const cur = await client.query(
+      "SELECT id, quantity, pack_size FROM inventory_items WHERE id=$1 AND hospital_id=$2 AND category='medicines' AND archived_at IS NULL FOR UPDATE",
+      [req.params.id, req.hid]);
+    if (!cur.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Medicine not found" }); }
+    const row = cur.rows[0];
+    const qty = Number(row.quantity) || 0;
+    const pack = Number(row.pack_size) || 1;
+    const tabs = Math.round(qty * pack);
+    await client.query("UPDATE inventory_items SET quantity=0, archived_at=now(), updated_at=now() WHERE id=$1", [row.id]);
+    if (qty > 0) {
+      await client.query(
+        "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'out',$4,$5,$6)",
+        ["invtx_" + randomBytes(5).toString("hex"), req.hid, row.id, qty,
+         "Removed from inventory: " + tabs + " tablets written off" + (why ? " - " + why : ""),
+         req.user.pharmacyStaffId || req.user.id || null]);
+    }
+    await client.query("COMMIT");
+    try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
+    res.json({ ok: true, removedTablets: tabs });
   } catch (e) {
     try { await client.query("ROLLBACK"); } catch (_) {}
     res.status(500).json({ error: e.message });
