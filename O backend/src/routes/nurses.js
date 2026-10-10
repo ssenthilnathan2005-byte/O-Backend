@@ -1,3 +1,30 @@
+"use strict";
+
+const express = require("express");
+const bcrypt = require("bcrypt");
+const crypto = require("crypto");
+const jwt = require("jsonwebtoken");
+const { pool } = require("../db/init");
+const { requireAdminOrHospitalAdmin } = require("../middleware/auth");
+
+const SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
+const EXPIRES = process.env.JWT_EXPIRES_IN || "7d";
+const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+const PW_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+
+function pick(chars, n) {
+  let out = "";
+  for (let i = 0; i < n; i++) out += chars[crypto.randomInt(chars.length)];
+  return out;
+}
+function sign(p) { return jwt.sign(p, SECRET, { expiresIn: EXPIRES }); }
+function hospitalOf(req) {
+  if (req.user.role === "hospital_admin") return req.user.hospitalId;
+  return (req.body && req.body.hospitalId) || req.query.hospitalId || null;
+}
+
+const adminRouter = express.Router();
+adminRouter.use(requireAdminOrHospitalAdmin);
 adminRouter.get("/", async (req, res) => {
   try {
     const hospitalId = hospitalOf(req);
