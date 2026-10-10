@@ -6,6 +6,11 @@ const { randomBytes } = require("crypto");
 function nanoid(n=10) { return randomBytes(n).toString("hex").slice(0,n); }
 const router = express.Router();
 
+function staffOrAdmin(req, res, next) {
+  if (!["hospital_admin", "admin", "nurse"].includes(req.user.role))
+    return res.status(403).json({ error: "Forbidden" });
+  next();
+}
 function adminOnly(req, res, next) {
   if (req.user.role !== "hospital_admin" && req.user.role !== "admin")
     return res.status(403).json({ error: "Forbidden" });
@@ -48,7 +53,7 @@ pool.query(`
 `).catch(e => console.warn("[nursing] migration:", e.message));
 
 // ── Vitals ────────────────────────────────────────────────────────────────────
-router.get("/vitals", requireAuth, adminOnly, async (req, res) => {
+router.get("/vitals", requireAuth, staffOrAdmin, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     const { patientName, patientId } = req.query;
@@ -62,7 +67,7 @@ router.get("/vitals", requireAuth, adminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post("/vitals", requireAuth, adminOnly, async (req, res) => {
+router.post("/vitals", requireAuth, staffOrAdmin, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { patientName, patientId, bedId, wardId, temperature, pulse, bpSystolic, bpDiastolic, spo2, respRate, recordedBy } = req.body;
@@ -87,7 +92,7 @@ router.delete("/vitals/:id", requireAuth, adminOnly, async (req, res) => {
 });
 
 // ── Notes ─────────────────────────────────────────────────────────────────────
-router.get("/notes", requireAuth, adminOnly, async (req, res) => {
+router.get("/notes", requireAuth, staffOrAdmin, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     const { patientName, patientId } = req.query;
@@ -101,7 +106,7 @@ router.get("/notes", requireAuth, adminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post("/notes", requireAuth, adminOnly, async (req, res) => {
+router.post("/notes", requireAuth, staffOrAdmin, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { patientName, patientId, bedId, wardId, note, shift, recordedBy } = req.body;
