@@ -239,6 +239,8 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
         const reduced = qty < suggested;
         const reason = `Dispensed ${qty} to ${p.patient_name} (Rx ${p.id})` +
           (reduced ? ` - reduced from ${suggested}${d.reason ? ": " + d.reason : ""}` : "");
+        const { takeFromBatches } = require("../services/batches");
+        const usedBatches = await takeFromBatches(client, row.id, qty);
         await client.query("UPDATE inventory_items SET quantity=quantity-$1, updated_at=now() WHERE id=$2", [units, row.id]);
         await client.query(
           `INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by)
@@ -246,7 +248,7 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
           [`invtx_${randomBytes(5).toString("hex")}`, p.hospital_id, row.id, units, reason, req.user.pharmacyStaffId || req.user.id || null]
         );
         lines.push({ index: idx, name: item.name, inventoryItemId: row.id, inventoryName: row.name,
-                     tablets: qty, suggested, reduced, reason: d.reason || null, units,
+                     tablets: qty, suggested, reduced, reason: d.reason || null, units, batches: usedBatches,
                      unitPrice: (d.unitPrice != null && d.unitPrice !== "" && Number(d.unitPrice) >= 0)
                        ? Math.round(Number(d.unitPrice) * 10000) / 10000
                        : undefined });
@@ -288,6 +290,8 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
         const packSize = Number(row.pack_size) || 1;
         const back = line.tablets - given;
         const units = Math.round((back / packSize) * 1000) / 1000;
+        const { returnToBatches } = require("../services/batches");
+        await returnToBatches(client, row.id, back, line.batches);
         await client.query("UPDATE inventory_items SET quantity=quantity+$1, updated_at=now() WHERE id=$2", [units, row.id]);
         const why = d.reason ? ": " + d.reason : "";
         await client.query(
