@@ -380,6 +380,11 @@ router.post("/inventory/:id/packing", guard, async (req, res) => {
       sched = SCHEDULES.find(x => x.toLowerCase() === String(b.schedule).trim().toLowerCase());
       if (!sched) return res.status(400).json({ error: "Schedule must be none, H, H1 or X" });
     }
+    let reorder = null;
+    if (has(b.reorderLevel)) {
+      reorder = Number(b.reorderLevel);
+      if (!(reorder >= 0 && reorder <= 10000000)) return res.status(400).json({ error: "Reorder level must be 0 or more" });
+    }
     let gst = null;
     if (has(b.gstPercent)) {
       gst = Number(b.gstPercent);
@@ -395,9 +400,9 @@ router.post("/inventory/:id/packing", guard, async (req, res) => {
     const newQty = Math.round((tablets / tps) * 1000000) / 1000000;
     await client.query(
       "UPDATE inventory_items SET pack_size=$1, strips_per_box=$2, quantity=$3, selling_price=$4, " +
-      "purchase_price=COALESCE($5,purchase_price), schedule=COALESCE($6,schedule), gst_percent=COALESCE($7,gst_percent), updated_at=now() " +
-      "WHERE id=$8 AND hospital_id=$9",
-      [tps, spb, newQty, mrp, pp, sched, gst, req.params.id, req.hid]);
+      "purchase_price=COALESCE($5,purchase_price), schedule=COALESCE($6,schedule), gst_percent=COALESCE($7,gst_percent), min_quantity=COALESCE($8,min_quantity), updated_at=now() " +
+      "WHERE id=$9 AND hospital_id=$10",
+      [tps, spb, newQty, mrp, pp, sched, gst, reorder, req.params.id, req.hid]);
     await client.query("COMMIT");
     try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
     res.json({ ok: true, tabletsAvailable: tablets, breakdown: breakdownOf(tablets, tps, spb) });
