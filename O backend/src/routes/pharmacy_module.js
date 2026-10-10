@@ -10,6 +10,9 @@ pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_no TEXT")
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS expiry_date DATE"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS selling_price REAL"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS med_category TEXT"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS strips_per_box INTEGER"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS schedule TEXT"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS gst_percent REAL"))
   .then(() => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_med_categories (hospital_id TEXT NOT NULL, name TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (hospital_id, name))"))
   .then(() => pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS payment_mode TEXT"))
   .catch(e => console.warn("[pharmacy_module] migration:", e.message));
@@ -80,8 +83,14 @@ function parse(s) { try { return JSON.parse(s || "[]"); } catch (_) { return [];
 // otherwise shares the entered bill amount by tablets.
 function lineAmounts(rx, inv) {
   const lines = parse(rx.dispensed_items);
-  const totalTabs = lines.reduce((s, l) => s + (Number(l.tablets) || 0), 0);
+  const hasBill = rx.bill_amount != null && rx.bill_amount !== "";
   const bill = Number(rx.bill_amount) || 0;
+  const isPriced = l => l.unitPrice != null && l.unitPrice !== "" && Number.isFinite(Number(l.unitPrice));
+  const pricedSum = lines.reduce((s, l) => s + (isPriced(l) ? (Number(l.tablets) || 0) * Number(l.unitPrice) : 0), 0);
+  const unpriced = lines.filter(l => !isPriced(l));
+  const unpricedTabs = unpriced.reduce((s, l) => s + (Number(l.tablets) || 0), 0);
+  const remainder = Math.max(0, r2(bill - pricedSum));
+  let left = remainder, seen = 0;
   return lines.map(l => {
     const tabs = Number(l.tablets) || 0;
     const it = inv[l.inventoryItemId];
@@ -89,9 +98,18 @@ function lineAmounts(rx, inv) {
     const sp = Number(it && it.selling_price) || 0;
     const cp = Number(it && it.purchase_price) || 0;
     let unitPrice, amount, priceSource;
-    if (l.unitPrice != null && l.unitPrice !== "" && Number.isFinite(Number(l.unitPrice))) { unitPrice = Number(l.unitPrice); amount = tabs * unitPrice; priceSource = "billed"; }
-    else if (sp > 0) { unitPrice = sp / pack; amount = tabs * unitPrice; priceSource = "inventory"; }
-    else { amount = totalTabs ? (tabs / totalTabs) * bill : 0; unitPrice = tabs ? amount / tabs : 0; priceSource = "bill-share"; }
+    if (isPriced(l)) {
+      unitPrice = Number(l.unitPrice); amount = tabs * unitPrice; priceSource = "billed";
+    } else if (hasBill) {
+      seen++;
+      amount = (seen === unpriced.length || !unpricedTabs) ? left : r2(remainder * tabs / unpricedTabs);
+      left = r2(left - amount);
+      unitPrice = tabs ? amount / tabs : 0; priceSource = "bill-share";
+    } else if (sp > 0) {
+      unitPrice = sp / pack; amount = tabs * unitPrice; priceSource = "inventory";
+    } else {
+      unitPrice = 0; amount = 0; priceSource = "none";
+    }
     return {
       name: l.inventoryName || l.name, tablets: tabs,
       unitPrice: r2(unitPrice), amount: r2(amount), priceSource,
@@ -140,7 +158,7 @@ router.get("/inventory", guard, async (req, res) => {
     const t = await todayIST();
     const soon = addDays(t, 30);
     const { rows } = await pool.query(
-      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, " +
+      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, schedule, gst_percent, " +
       "to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, updated_at " +
       "FROM inventory_items WHERE hospital_id=$1 AND category='medicines' ORDER BY name ASC", [req.hid]);
     res.set("Cache-Control", "no-store");
@@ -154,7 +172,7 @@ router.get("/inventory", guard, async (req, res) => {
       return {
         id: r.id, name: r.name, unit: r.unit, quantity: qty, packSize: pack,
         tabletsAvailable: Math.round(qty * pack), reorderLevel: Number(r.min_quantity),
-        purchasePrice: r.purchase_price, sellingPrice: r.selling_price,
+        purchasePrice: r.purchase_price, sellingPrice: r.selling_price, stripsPerBox: r.strips_per_box, tabletsPerBox: r.strips_per_box ? r.strips_per_box * pack : null, schedule: r.schedule || "none", gstPercent: r.gst_percent, breakdown: breakdownOf(qty * pack, pack, r.strips_per_box),
         supplier: r.supplier, location: r.location, batchNo: r.batch_no, medCategory: r.med_category || null, expiryDate: r.expiry_date, status,
         updatedAt: r.updated_at,
       };
@@ -294,6 +312,122 @@ router.post("/inventory/:id/stock", guard, async (req, res) => {
     await client.query("COMMIT");
     try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
     res.json({ ok: true, quantity: finalQty, tabletsAvailable: Math.round(finalQty * pack) });
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    res.status(500).json({ error: e.message });
+  } finally { client.release(); }
+});
+
+const SCHEDULES = ["none", "H", "H1", "X"];
+function breakdownOf(tablets, pack, spb) {
+  const t = Math.max(0, Math.round(Number(tablets) || 0));
+  const per = Number(pack) >= 1 ? Number(pack) : 1;
+  const perBox = spb ? per * Number(spb) : 0;
+  if (!perBox) return { boxes: 0, strips: Math.floor(t / per), tablets: t % per };
+  return { boxes: Math.floor(t / perBox), strips: Math.floor((t % perBox) / per), tablets: t % per };
+}
+
+// ── Set how a medicine is packed and priced (strip = one pack) ──
+router.post("/inventory/:id/packing", guard, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const b = req.body || {};
+    const has = v => !(v === undefined || v === null || v === "");
+    const tps = Number(b.tabletsPerStrip), spb = Number(b.stripsPerBox), mrp = Number(b.mrpStrip);
+    if (!Number.isInteger(tps) || tps < 1 || tps > 100000) return res.status(400).json({ error: "Tablets per strip must be a whole number of 1 or more" });
+    if (!Number.isInteger(spb) || spb < 1 || spb > 100000) return res.status(400).json({ error: "Strips per box must be a whole number of 1 or more" });
+    if (!has(b.mrpStrip) || !(mrp >= 0)) return res.status(400).json({ error: "MRP per strip is required" });
+    let pp = null;
+    if (has(b.purchaseBox)) {
+      const pb = Number(b.purchaseBox);
+      if (!(pb >= 0)) return res.status(400).json({ error: "Invalid purchase price per box" });
+      pp = pb / spb;
+    }
+    let sched = null;
+    if (has(b.schedule)) {
+      sched = SCHEDULES.find(x => x.toLowerCase() === String(b.schedule).trim().toLowerCase());
+      if (!sched) return res.status(400).json({ error: "Schedule must be none, H, H1 or X" });
+    }
+    let gst = null;
+    if (has(b.gstPercent)) {
+      gst = Number(b.gstPercent);
+      if (!(gst >= 0 && gst <= 40)) return res.status(400).json({ error: "GST percent must be between 0 and 40" });
+    }
+    await client.query("BEGIN");
+    const cur = await client.query(
+      "SELECT quantity, pack_size FROM inventory_items WHERE id=$1 AND hospital_id=$2 AND category='medicines' FOR UPDATE",
+      [req.params.id, req.hid]);
+    if (!cur.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Medicine not found" }); }
+    const oldPack = Number(cur.rows[0].pack_size) || 1;
+    const tablets = Math.round(Number(cur.rows[0].quantity) * oldPack);
+    const newQty = Math.round((tablets / tps) * 1000000) / 1000000;
+    await client.query(
+      "UPDATE inventory_items SET pack_size=$1, strips_per_box=$2, quantity=$3, selling_price=$4, " +
+      "purchase_price=COALESCE($5,purchase_price), schedule=COALESCE($6,schedule), gst_percent=COALESCE($7,gst_percent), updated_at=now() " +
+      "WHERE id=$8 AND hospital_id=$9",
+      [tps, spb, newQty, mrp, pp, sched, gst, req.params.id, req.hid]);
+    await client.query("COMMIT");
+    try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
+    res.json({ ok: true, tabletsAvailable: tablets, breakdown: breakdownOf(tablets, tps, spb) });
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    res.status(500).json({ error: e.message });
+  } finally { client.release(); }
+});
+
+// ── Receive stock as boxes / strips / loose tablets, with batch and expiry ──
+router.post("/inventory/:id/receive", guard, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const b = req.body || {};
+    const n = v => (v === undefined || v === null || v === "") ? 0 : Number(v);
+    const boxes = n(b.boxes), strips = n(b.strips), loose = n(b.tablets);
+    if (![boxes, strips, loose].every(x => Number.isInteger(x) && x >= 0 && x <= 10000000))
+      return res.status(400).json({ error: "Boxes, strips and tablets must be whole numbers" });
+    const batchNo = String(b.batchNo || "").trim();
+    if (!batchNo) return res.status(400).json({ error: "Batch number is required" });
+    const expiry = String(b.expiryDate || "");
+    if (!DATE_RE.test(expiry)) return res.status(400).json({ error: "Expiry date is required (YYYY-MM-DD)" });
+    if (expiry <= await todayIST()) return res.status(400).json({ error: "This batch is already expired" });
+    const has = v => !(v === undefined || v === null || v === "");
+    const mrp = has(b.mrpStrip) ? Number(b.mrpStrip) : null;
+    if (mrp !== null && !(mrp >= 0)) return res.status(400).json({ error: "Invalid MRP" });
+    const pbox = has(b.purchaseBox) ? Number(b.purchaseBox) : null;
+    if (pbox !== null && !(pbox >= 0)) return res.status(400).json({ error: "Invalid purchase price per box" });
+
+    await client.query("BEGIN");
+    const cur = await client.query(
+      "SELECT * FROM inventory_items WHERE id=$1 AND hospital_id=$2 AND category='medicines' FOR UPDATE",
+      [req.params.id, req.hid]);
+    if (!cur.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Medicine not found" }); }
+    const row = cur.rows[0];
+    const pack = Number(row.pack_size) || 1;
+    const spb = Number(row.strips_per_box) || 0;
+    if (!spb) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Set tablets per strip and strips per box first" }); }
+    const total = boxes * spb * pack + strips * pack + loose;
+    if (total <= 0) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Enter how many boxes, strips or tablets were received" }); }
+    const onHand = Math.round(Number(row.quantity) * pack);
+    const oldBatch = String(row.batch_no || "").trim();
+    if (onHand > 0 && oldBatch && oldBatch.toLowerCase() !== batchNo.toLowerCase()) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: onHand + " tablets of batch " + oldBatch + " are still in stock. Several batches at once come in the next update; for now finish or correct that stock first." });
+    }
+    const newQty = Math.round(((onHand + total) / pack) * 1000000) / 1000000;
+    const pp = pbox === null ? null : pbox / spb;
+    await client.query(
+      "UPDATE inventory_items SET quantity=$1, batch_no=$2, expiry_date=$3::date, selling_price=COALESCE($4,selling_price), " +
+      "purchase_price=COALESCE($5,purchase_price), supplier=COALESCE($6,supplier), updated_at=now() WHERE id=$7 AND hospital_id=$8",
+      [newQty, batchNo, expiry, mrp, pp, b.supplier ? String(b.supplier).trim() : null, row.id, req.hid]);
+    const note = "Stock received: +" + total + " tablets (" + boxes + " box, " + strips + " strip, " + loose + " tablet) batch " + batchNo +
+      " exp " + expiry + (b.invoiceNo ? " invoice " + String(b.invoiceNo).trim() : "") + (b.supplier ? " from " + String(b.supplier).trim() : "") +
+      (onHand > 0 && !oldBatch ? " (existing " + onHand + " tablets had no batch recorded)" : "");
+    await client.query(
+      "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
+      ["invtx_" + randomBytes(5).toString("hex"), req.hid, row.id, Math.round((total / pack) * 1000) / 1000, note,
+       req.user.pharmacyStaffId || req.user.id || null]);
+    await client.query("COMMIT");
+    try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
+    res.json({ ok: true, added: total, tabletsAvailable: onHand + total, breakdown: breakdownOf(onHand + total, pack, spb) });
   } catch (e) {
     try { await client.query("ROLLBACK"); } catch (_) {}
     res.status(500).json({ error: e.message });
@@ -470,6 +604,20 @@ router.post("/stock-deduct", guard, async (req, res) => {
   } finally { client.release(); }
 });
 
+// Makes invoice lines add up to the saved bill total by adding one adjustment line.
+function withAdjustment(lines, billAmount) {
+  if (billAmount == null || billAmount === "") return lines;
+  const total = Number(billAmount);
+  if (!Number.isFinite(total)) return lines;
+  const sum = lines.reduce((s, l) => s + (Number(l.amount) || 0), 0);
+  const diff = r2(total - sum);
+  if (Math.abs(diff) < 0.01) return lines;
+  return lines.concat([{
+    name: diff > 0 ? "Other / manual charges" : "Discount / adjustment",
+    tablets: 1, unitPrice: diff, amount: diff, priceSource: "adjustment",
+  }]);
+}
+
 router.get("/invoice/:id", guard, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM prescriptions WHERE id=$1 AND hospital_id=$2", [req.params.id, req.hid]);
@@ -481,7 +629,7 @@ router.get("/invoice/:id", guard, async (req, res) => {
       invoiceNo: rx.bill_no == null ? "Bill pending" : "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
       patientId: rx.patient_id, patientName: rx.patient_name, doctorName: rx.doctor_name,
       issuedAt: rx.handed_over_at, paymentMode: rx.payment_mode || null,
-      lines: lines.map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
+      lines: withAdjustment(lines, rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
       total: rx.bill_amount == null ? null : Number(rx.bill_amount),
       status: rx.status === "handed_over" ? "Billed" : "Pending",
     });
