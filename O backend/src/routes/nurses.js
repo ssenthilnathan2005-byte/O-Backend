@@ -132,3 +132,15 @@ authRouter.post("/set-password", async (req, res) => {
 });
 
 module.exports = { adminRouter, authRouter };
+pool.query(
+  "CREATE TABLE IF NOT EXISTS nurses (" +
+  "id TEXT PRIMARY KEY, " +
+  "hospital_id TEXT NOT NULL REFERENCES hospitals(id) ON DELETE CASCADE, " +
+  "nurse_code TEXT UNIQUE NOT NULL, " +
+  "name TEXT NOT NULL, " +
+  "phone TEXT NOT NULL, " +
+  "password TEXT NOT NULL, " +
+  "first_login INTEGER NOT NULL DEFAULT 1, " +
+  "is_active INTEGER NOT NULL DEFAULT 1, " +
+  "created_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+).catch((e) => console.error("[nurses] table init failed:", e.message));
