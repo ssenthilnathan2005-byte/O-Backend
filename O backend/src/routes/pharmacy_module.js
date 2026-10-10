@@ -9,10 +9,12 @@ const router = express.Router();
 pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_no TEXT")
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS expiry_date DATE"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS selling_price REAL"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS med_category TEXT"))
   .then(() => pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS payment_mode TEXT"))
   .catch(e => console.warn("[pharmacy_module] migration:", e.message));
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MED_CATEGORIES = ["Tablet", "Capsule", "Syrup/Tonic", "Injection", "Oil", "Ointment/Cream", "Drops", "Powder", "Others"];
 const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
 function addDays(s, n) {
   const d = new Date(s + "T00:00:00Z");
@@ -119,7 +121,7 @@ router.get("/inventory", guard, async (req, res) => {
     const t = await todayIST();
     const soon = addDays(t, 30);
     const { rows } = await pool.query(
-      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, " +
+      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, " +
       "to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, updated_at " +
       "FROM inventory_items WHERE hospital_id=$1 AND category='medicines' ORDER BY name ASC", [req.hid]);
     res.set("Cache-Control", "no-store");
@@ -134,7 +136,7 @@ router.get("/inventory", guard, async (req, res) => {
         id: r.id, name: r.name, unit: r.unit, quantity: qty, packSize: pack,
         tabletsAvailable: Math.round(qty * pack), reorderLevel: Number(r.min_quantity),
         purchasePrice: r.purchase_price, sellingPrice: r.selling_price,
-        supplier: r.supplier, location: r.location, batchNo: r.batch_no, expiryDate: r.expiry_date, status,
+        supplier: r.supplier, location: r.location, batchNo: r.batch_no, medCategory: r.med_category || null, expiryDate: r.expiry_date, status,
         updatedAt: r.updated_at,
       };
     }));
@@ -150,6 +152,8 @@ router.post("/inventory", guard, async (req, res) => {
     const name = String(b.name || "").trim();
     if (!name) return res.status(400).json({ error: "Medicine name is required" });
     const pack = num(b.packSize) > 0 ? num(b.packSize) : 1;
+    const medCat = (b.medCategory === undefined || b.medCategory === null || b.medCategory === "") ? null : String(b.medCategory);
+    if (medCat !== null && !MED_CATEGORIES.includes(medCat)) return res.status(400).json({ error: "Invalid category" });
     const openTabs = num(b.openingTablets) === null ? 0 : num(b.openingTablets);
     const reorder = num(b.reorderLevel) === null ? 5 : num(b.reorderLevel);
     const pp = num(b.purchasePrice);
@@ -166,9 +170,9 @@ router.post("/inventory", guard, async (req, res) => {
     const id = "inv_" + randomBytes(5).toString("hex");
     const qty = Math.round((openTabs / pack) * 1000) / 1000;
     await client.query(
-      "INSERT INTO inventory_items (id, hospital_id, name, category, unit, quantity, min_quantity, purchase_price, supplier, location, pack_size, batch_no, expiry_date, selling_price) " +
-      "VALUES ($1,$2,$3,'medicines','tablets',$4,$5,$6,$7,$8,$9,$10,$11::date,$12)",
-      [id, req.hid, name, qty, reorder, pp, b.supplier || null, b.location || null, pack, b.batchNo || null, b.expiryDate || null, sp]);
+      "INSERT INTO inventory_items (id, hospital_id, name, category, unit, quantity, min_quantity, purchase_price, supplier, location, pack_size, batch_no, expiry_date, selling_price, med_category) " +
+      "VALUES ($1,$2,$3,'medicines','tablets',$4,$5,$6,$7,$8,$9,$10,$11::date,$12,$13)",
+      [id, req.hid, name, qty, reorder, pp, b.supplier || null, b.location || null, pack, b.batchNo || null, b.expiryDate || null, sp, medCat]);
     if (qty > 0) {
       await client.query(
         "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
@@ -187,7 +191,12 @@ router.post("/inventory", guard, async (req, res) => {
 router.patch("/inventory/:id/meta", guard, async (req, res) => {
   const client = await pool.connect();
   try {
-    const { batchNo, expiryDate, sellingPrice, supplier, location, packSize } = req.body || {};
+    const { batchNo, expiryDate, sellingPrice, supplier, location, packSize, medCategory } = req.body || {};
+    let newCat = null;
+    if (medCategory !== undefined && medCategory !== null && medCategory !== "") {
+      if (!MED_CATEGORIES.includes(String(medCategory))) return res.status(400).json({ error: "Invalid category" });
+      newCat = String(medCategory);
+    }
     if (expiryDate && !DATE_RE.test(expiryDate)) return res.status(400).json({ error: "expiryDate must be YYYY-MM-DD" });
     if (sellingPrice != null && !(Number(sellingPrice) >= 0)) return res.status(400).json({ error: "Invalid sellingPrice" });
     let newPack = null;
@@ -210,9 +219,9 @@ router.patch("/inventory/:id/meta", guard, async (req, res) => {
     await client.query(
       "UPDATE inventory_items SET batch_no=COALESCE($1,batch_no), expiry_date=COALESCE($2::date,expiry_date), " +
       "selling_price=COALESCE($3,selling_price), supplier=COALESCE($4,supplier), location=COALESCE($7,location), " +
-      "pack_size=COALESCE($8,pack_size), quantity=COALESCE($9,quantity), updated_at=now() " +
+      "pack_size=COALESCE($8,pack_size), quantity=COALESCE($9,quantity), med_category=COALESCE($10,med_category), updated_at=now() " +
       "WHERE id=$5 AND hospital_id=$6",
-      [batchNo ?? null, expiryDate ?? null, sellingPrice ?? null, supplier ?? null, req.params.id, req.hid, location ?? null, newPack, newQty]);
+      [batchNo ?? null, expiryDate ?? null, sellingPrice ?? null, supplier ?? null, req.params.id, req.hid, location ?? null, newPack, newQty, newCat]);
     await client.query("COMMIT");
     try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
     res.json({ ok: true });
