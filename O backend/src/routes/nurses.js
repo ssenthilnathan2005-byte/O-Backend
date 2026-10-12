@@ -7,6 +7,7 @@ const jwt = require("jsonwebtoken");
 const { pool } = require("../db/init");
 const { requireAdminOrHospitalAdmin } = require("../middleware/auth");
 
+const { issueCode } = require("../services/loginCodes");
 const SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
 const EXPIRES = process.env.JWT_EXPIRES_IN || "7d";
 const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
@@ -52,7 +53,7 @@ adminRouter.post("/", async (req, res) => {
     const hash = await bcrypt.hash(tempPassword, 10);
     const id = "nu_" + crypto.randomBytes(8).toString("hex");
     for (let attempt = 0; attempt < 5; attempt++) {
-      const code = "NUR-" + pick(CODE_CHARS, 6);
+      const code = await issueCode(hospitalId, "nurse");
       try {
         const { rows } = await pool.query(
           "INSERT INTO nurses (id, hospital_id, nurse_code, name, phone, password, first_login) VALUES ($1,$2,$3,$4,$5,$6,1) RETURNING id, nurse_code, name, phone, is_active, first_login, created_at",

@@ -189,6 +189,7 @@ app.use("/api/pharmacy-stats", require("./routes/pharmacy_stats"));
 app.use("/api/pharmacy-module", require("./routes/pharmacy_module"));
 app.use("/api/pharmacy-import", require("./routes/pharmacy_import"));
 app.use("/api/voice", require("./routes/voice"));
+app.use("/api/front-office", require("./routes/front_office"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {

@@ -206,6 +206,16 @@ router.post("/", requireAdmin, async (req, res) => {
     const { name, area, address = "", phone = "", gradient = "from-slate-400 to-slate-600", loginId, plan } = req.body;
     if (!name || !area) return res.status(400).json({ error: "name and area are required" });
 
+    if (loginId) {
+      const lid = String(loginId).trim();
+      if (!/^[A-Za-z0-9]{2,12}$/.test(lid)) return res.status(400).json({ error: "Login ID must be 2-12 letters or digits, no spaces or symbols" });
+      const { rows: taken } = await pool.query(
+        "SELECT 1 FROM (SELECT login_id AS c FROM hospitals UNION ALL SELECT code FROM doctors UNION ALL SELECT code FROM pharmacy_staff UNION ALL SELECT nurse_code FROM nurses UNION ALL SELECT code FROM front_office_staff UNION ALL SELECT code FROM hospital_lab_staff UNION ALL SELECT login_id FROM labs) t WHERE LOWER(c)=LOWER($1) OR LOWER(c) LIKE LOWER($1) || 'd%' LIMIT 1", [lid]);
+      if (taken[0]) {
+        const m = /^(.*?)(\d*)$/.exec(lid);
+        return res.status(409).json({ error: "Login ID '" + lid + "' is already in use. Try '" + m[1] + (Number(m[2] || 0) + 1) + "'." });
+      }
+    }
     const id = `h_${Date.now()}`;
     const planVal = plan === "basic" ? "basic" : "premium";
     const rateVal = planVal === "basic" ? 8 : 15;
