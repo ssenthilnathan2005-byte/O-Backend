@@ -65,6 +65,7 @@ async function importRow(client, req, r, defSupplier, invoiceNo) {
   let qty = numOrNull(r.quantity); if (qty === null) qty = 0;
   if (!Number.isFinite(qty) || qty < 0 || qty > 10000000) throw new Error("Invalid quantity");
   const packIn = numOrNull(r.tabletsPerStrip) > 0 ? numOrNull(r.tabletsPerStrip) : null;
+  const spbIn = numOrNull(r.stripsPerBox) > 0 ? Math.round(numOrNull(r.stripsPerBox)) : null;
   const pp = numOrNull(r.purchasePrice), sp = numOrNull(r.sellingPrice);
   if ((pp !== null && !(pp >= 0)) || (sp !== null && !(sp >= 0))) throw new Error("Prices must be 0 or more");
   let gst = numOrNull(r.gstPercent); if (gst !== null && !(gst >= 0 && gst <= 100)) gst = null;
@@ -91,8 +92,8 @@ async function importRow(client, req, r, defSupplier, invoiceNo) {
     await client.query(
       "UPDATE inventory_items SET quantity=$1, batch_no=COALESCE($2,batch_no), expiry_date=COALESCE($3::date,expiry_date), " +
       "selling_price=COALESCE($4,selling_price), purchase_price=COALESCE($5,purchase_price), supplier=COALESCE($6,supplier), " +
-      "med_category=COALESCE($7,med_category), gst_percent=COALESCE($8,gst_percent), updated_at=now() WHERE id=$9 AND hospital_id=$10",
-      [newQty, batchNo, expiry, sp, pp, supplier, medCat, gst, row.id, req.hid]);
+      "med_category=COALESCE($7,med_category), gst_percent=COALESCE($8,gst_percent), strips_per_box=COALESCE(strips_per_box,$9), updated_at=now() WHERE id=$10 AND hospital_id=$11",
+      [newQty, batchNo, expiry, sp, pp, supplier, medCat, gst, spbIn, row.id, req.hid]);
     if (tablets > 0) {
       await addBatch(client, row.id, req.hid, batchNo, expiry, tablets, supplier);
       await client.query(
@@ -107,9 +108,9 @@ async function importRow(client, req, r, defSupplier, invoiceNo) {
   const tablets = Math.round(qty * pack);
   const id = "inv_" + randomBytes(5).toString("hex");
   await client.query(
-    "INSERT INTO inventory_items (id, hospital_id, name, category, unit, quantity, min_quantity, purchase_price, supplier, pack_size, batch_no, expiry_date, selling_price, med_category, gst_percent) " +
-    "VALUES ($1,$2,$3,'medicines','tablets',$4,5,$5,$6,$7,$8,$9::date,$10,$11,$12)",
-    [id, req.hid, name, tablets / pack, pp, supplier, pack, batchNo, expiry, sp, medCat, gst]);
+    "INSERT INTO inventory_items (id, hospital_id, name, category, unit, quantity, min_quantity, purchase_price, supplier, pack_size, batch_no, expiry_date, selling_price, med_category, gst_percent, strips_per_box) " +
+    "VALUES ($1,$2,$3,'medicines','tablets',$4,5,$5,$6,$7,$8,$9::date,$10,$11,$12,$13)",
+    [id, req.hid, name, tablets / pack, pp, supplier, pack, batchNo, expiry, sp, medCat, gst, spbIn]);
   if (tablets > 0) {
     await addBatch(client, id, req.hid, batchNo, expiry, tablets, supplier);
     await client.query(

@@ -7,6 +7,8 @@ const FIELD_PATTERNS = [
   ["batchNo", /batch|lot\b/],
   ["expiryDate", /exp/],
   ["gstPercent", /gst|tax|vat/],
+  ["stripsPerBox", /strips? ?(per|\/) ?box|per box|^spb$/],
+  ["invoiceNo", /invoice ?(no|num|#)|bill ?no/],
   ["tabletsPerStrip", /pack ?size|strip ?size|per strip|tabs? per|tablets per|^pack(ing)?$|^conv/],
   ["sellingPrice", /mrp|selling|sale|retail/],
   ["purchasePrice", /purchase|ptr|pts|cost|rate|price|landing|buy/],
@@ -124,6 +126,8 @@ function parseSpreadsheet(buf) {
       medCategory: normalizeCategory(get(r, "category"), name),
       quantity: qty,
       tabletsPerStrip: pack && pack > 0 ? pack : null,
+      stripsPerBox: lastNumber(get(r, "stripsPerBox")) > 0 ? Math.round(lastNumber(get(r, "stripsPerBox"))) : null,
+      invoiceNo: str(get(r, "invoiceNo")) || null,
       batchNo: str(get(r, "batchNo")) || null,
       expiryDate,
       purchasePrice: num(get(r, "purchasePrice")),
@@ -133,7 +137,8 @@ function parseSpreadsheet(buf) {
       warnings,
     });
   }
-  return { sheet: sheetName, headerRow: bestIdx + 1, mapped: best.names, rows };
+  const invoiceNo = (rows.find(r => r.invoiceNo) || {}).invoiceNo || null;
+  return { sheet: sheetName, headerRow: bestIdx + 1, mapped: best.names, invoiceNo, rows };
 }
 
 module.exports = { parseSpreadsheet, parseExpiry, normalizeCategory, STD_CATEGORIES };
