@@ -85,7 +85,7 @@ async function importRow(client, req, r, defSupplier, invoiceNo) {
   if (cur.rows.length) {
     const row = cur.rows[0];
     const pack = Number(row.pack_size) || 1;
-    const tablets = Math.round(qty * (packIn || pack));
+    if (packIn && packIn !== pack) throw new Error("Tabs/strip (" + packIn + ") does not match this medicine pack size (" + pack + "). Fix the pack size in Edit, or correct the row."); const tablets = Math.round(qty * pack);
     const onHand = Math.round(Number(row.quantity) * pack);
     const newQty = Math.round(((onHand + tablets) / pack) * 1000000) / 1000000;
     await client.query(
