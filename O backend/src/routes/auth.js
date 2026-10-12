@@ -487,14 +487,16 @@ router.post(
         [String(code || "").trim()]
       );
       const doctor = doctorRows[0];
+      if (doctor && doctor.is_active === 0) return res.status(401).json({ error: "Invalid access code. Please check with your admin." });
 
       if (!doctor) {
         return res.status(401).json({ error: "Invalid access code. Please check with your admin." });
       }
-      if (!(doctor.phone || "").trim()) {
+      const _stored = String(doctor.password || doctor.phone || "").trim();
+      if (!_stored) {
         return res.status(401).json({ error: "No phone number set for this doctor. Contact admin." });
       }
-      if (String(phone || "").trim() !== String(doctor.phone || "").trim()) {
+      if (!(_stored.startsWith("$2") ? await bcrypt.compare(String(phone || "").trim(), _stored) : String(phone || "").trim() === _stored)) {
         return res
           .status(401)
           .json({ error: "Incorrect password." });

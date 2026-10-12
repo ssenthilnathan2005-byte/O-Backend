@@ -1,4 +1,5 @@
 "use strict";
+const { issueCode } = require("../services/loginCodes");
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAdmin, requireDoctorOrAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
@@ -71,12 +72,22 @@ async function nextDoctorCode({ name, hospitalId }) {
   }
 }
 
+function viewDoctor(req, d) {
+  try {
+    const h = req.headers.authorization || "";
+    const t = h.startsWith("Bearer ") ? h.slice(7).trim() : null;
+    const u = t ? require("jsonwebtoken").verify(t, process.env.JWT_SECRET || "fallback_dev_secret") : null;
+    if (u && (u.role === "admin" || (u.role === "hospital_admin" && u.hospitalId === d.hospitalId) || (u.role === "doctor" && u.doctorId === d.id))) return d;
+  } catch (e) {}
+  return { ...d, phone: "", contactPhone: "", password: "" };
+}
+
 function row2doctor(r) {
   if (!r) return null;
   return {
     id: r.id, hospitalId: r.hospital_id, code: r.code,
     name: r.name, specialty: r.specialty,
-    phone: r.phone || "", contactPhone: r.phone || "",
+    phone: r.phone || "", contactPhone: r.phone || "", password: r.password || "",
     bio: r.bio || "", photo: r.photo || null,
     price: r.price, consultationFee: r.consultation_fee, doctorFee: r.doctor_fee ?? null,
     tokensPerSession: r.tokens_per_session,
@@ -85,7 +96,7 @@ function row2doctor(r) {
     sessions: r.sessions ? r.sessions.split(",") : ["morning","afternoon"],
     sessionTimings: r.session_timings ? JSON.parse(r.session_timings) : null,
     scheduleConfig: r.schedule_config ? JSON.parse(r.schedule_config) : null,
-    isAvailable: r.is_available === 1,
+    isAvailable: r.is_available === 1 && r.is_active !== 0,
     yearsOfExperience: r.years_of_experience || "",
     education: r.education || "",
     languages: r.languages ? JSON.parse(r.languages) : [],
@@ -100,7 +111,7 @@ function row2doctor(r) {
 // Cached per query-key (e.g. by hospitalId) so filtered and unfiltered
 // requests don't collide.
 const doctorListCache = new Map();
-const DOCTOR_CACHE_TTL_MS = 10 * 60 * 1000; // 10 minutes
+const DOCTOR_CACHE_TTL_MS = 30 * 1000; // 30 seconds (HR deactivation is a DB trigger and can't clear this cache)
 
 function invalidateDoctorCache() {
   doctorListCache.clear();
@@ -113,16 +124,16 @@ router.get("/", async (req, res) => {
     const cacheKey = req.query.hospitalId || "__all__";
     const cached = doctorListCache.get(cacheKey);
     if (cached && (Date.now() - cached.time) < DOCTOR_CACHE_TTL_MS) {
-      return res.json(cached.data);
+      return res.json(cached.data.map((d) => viewDoctor(req, d)));
     }
 
     const { rows } = req.query.hospitalId
-      ? await pool.query("SELECT id, hospital_id, code, name, specialty, phone, bio, photo, price, consultation_fee, doctor_fee, tokens_per_session, walk_in_interval, sessions, session_timings, schedule_config, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient FROM doctors WHERE hospital_id=$1 ORDER BY name ASC", [req.query.hospitalId])
-      : await pool.query("SELECT id, hospital_id, code, name, specialty, phone, bio, photo, price, consultation_fee, doctor_fee, tokens_per_session, walk_in_interval, sessions, session_timings, schedule_config, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient FROM doctors ORDER BY name ASC");
+      ? await pool.query("SELECT id, hospital_id, code, name, specialty, phone, password, bio, photo, price, consultation_fee, doctor_fee, tokens_per_session, walk_in_interval, sessions, session_timings, schedule_config, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient, is_active FROM doctors WHERE hospital_id=$1 AND code NOT LIKE '%~%' ORDER BY name ASC", [req.query.hospitalId])
+      : await pool.query("SELECT id, hospital_id, code, name, specialty, phone, password, bio, photo, price, consultation_fee, doctor_fee, tokens_per_session, walk_in_interval, sessions, session_timings, schedule_config, is_available, years_of_experience, education, languages, status_override, avg_minutes_per_patient, is_active FROM doctors WHERE code NOT LIKE '%~%' ORDER BY name ASC");
 
     const result = rows.map(row2doctor);
     doctorListCache.set(cacheKey, { data: result, time: Date.now() });
-    res.json(result);
+    res.json(result.map((d) => viewDoctor(req, d)));
   } catch (err) {
     console.error("[doctors GET /]", err.message);
     res.status(500).json({ error: err.message });
@@ -134,7 +145,7 @@ router.get("/:id", async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: "Doctor not found" });
-    res.json(row2doctor(rows[0]));
+    res.json(viewDoctor(req, row2doctor(rows[0])));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
@@ -165,7 +176,7 @@ router.post("/", requireAdminOrHospitalAdmin, async (req, res) => {
         return res.status(400).json({ error: "Invalid consultation fee" });
     }
 
-    const code = await nextDoctorCode({ name, hospitalId });
+    const code = await issueCode(hospitalId, "doctor");
     const id   = `d_${Date.now()}`;
 
     await pool.query(
@@ -186,6 +197,8 @@ router.post("/", requireAdminOrHospitalAdmin, async (req, res) => {
       ]
     );
 
+    const _pw = String((req.body || {}).password || "").trim();
+    if (_pw.length >= 6) await pool.query("UPDATE doctors SET password=$1 WHERE id=$2", [_pw, id]);
     const { rows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [id]);
     invalidateDoctorCache();
     res.status(201).json(row2doctor(rows[0]));
@@ -334,7 +347,7 @@ router.delete("/:id", requireAdminOrHospitalAdmin, async (req, res) => {
         [req.params.id]
       );
       await client.query("DELETE FROM token_states WHERE doctor_id=$1", [req.params.id]);
-      await client.query("DELETE FROM doctors WHERE id=$1", [req.params.id]);
+      await client.query("UPDATE doctors SET is_active=0, is_available=0 WHERE id=$1", [req.params.id]);
       await client.query("COMMIT");
     } catch (txErr) {
       await client.query("ROLLBACK");
@@ -350,6 +363,21 @@ router.delete("/:id", requireAdminOrHospitalAdmin, async (req, res) => {
   } finally {
     client.release();
   }
+});
+
+
+// POST /doctors/:id/reset-password: sets the login password only, never the phone
+router.post("/:id/reset-password", requireAdminOrHospitalAdmin, async (req, res) => {
+  try {
+    const pw = String((req.body || {}).password || "").trim();
+    if (pw.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+    const d = (await pool.query("SELECT id, hospital_id FROM doctors WHERE id=$1", [req.params.id])).rows[0];
+    if (!d) return res.status(404).json({ error: "Doctor not found" });
+    if (req.user.role === "hospital_admin" && req.user.hospitalId !== d.hospital_id) return res.status(403).json({ error: "Not your hospital" });
+    await pool.query("UPDATE doctors SET password=$1 WHERE id=$2", [pw, d.id]);
+    invalidateDoctorCache();
+    res.json({ ok: true });
+  } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
 module.exports = router;

@@ -143,7 +143,7 @@ router.post("/", requireAuth, async (req, res) => {
     const { rows: doctorRows } = await client.query("SELECT * FROM doctors WHERE id=$1", [doctorId]);
     const doctor = doctorRows[0];
     if (!doctor) { return res.status(404).json({ error: "Doctor not found" }); }
-    if (!doctor.is_available) { return res.status(409).json({ error: "Doctor is not available" }); }
+    if (!doctor.is_available || doctor.is_active === 0) { return res.status(409).json({ error: "Doctor is not available" }); }
 
     const { rows: hospitalRows } = await client.query(
       "SELECT name, is_free, rate_per_token FROM hospitals WHERE id=$1",

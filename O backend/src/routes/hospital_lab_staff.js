@@ -3,6 +3,7 @@ const express = require("express");
 const bcrypt = require("bcrypt");
 const jwt = require("jsonwebtoken");
 const { randomBytes } = require("crypto");
+const { issueCode } = require("../services/loginCodes");
 const { pool } = require("../db/init");
 const { requireAuth, requireAdminOrHospitalAdmin } = require("../middleware/auth");
 const router = express.Router();
@@ -89,11 +90,12 @@ router.post("/staff", requireAdminOrHospitalAdmin, async (req, res) => {
   try {
     const hid = hospitalIdOf(req);
     const { name, phone, password } = req.body;
+    if (phone && !/^[0-9+\-\s]{7,15}$/.test(String(phone).trim())) return res.status(400).json({ error: "Enter a valid contact number" });
     if (!hid || !name || !String(name).trim()) return res.status(400).json({ error: "Name required" });
     if (!password || String(password).length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
     const hash = await bcrypt.hash(String(password), 10);
     for (let i = 0; i < 5; i++) {
-      const code = "HL" + randomBytes(4).toString("hex").slice(0, 5).toUpperCase();
+      const code = await issueCode(hid, "lab");
       try {
         const { rows } = await pool.query(
           "INSERT INTO hospital_lab_staff (id, hospital_id, code, name, phone, password) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, name, phone, code, created_at",
@@ -107,8 +109,9 @@ router.post("/staff", requireAdminOrHospitalAdmin, async (req, res) => {
 router.delete("/staff/:id", requireAdminOrHospitalAdmin, async (req, res) => {
   try {
     const hid = hospitalIdOf(req);
-    const { rows } = await pool.query("UPDATE hospital_lab_staff SET is_active=0 WHERE id=$1 AND hospital_id=$2 RETURNING id", [req.params.id, hid]);
+    const { rows } = await pool.query("UPDATE hospital_lab_staff SET is_active=0, code=CASE WHEN code LIKE '%~%' THEN code ELSE code || '~' || (SELECT count(*)+1 FROM hospital_lab_staff x WHERE x.code LIKE hospital_lab_staff.code || '~%') END WHERE id=$1 AND hospital_id=$2 RETURNING id", [req.params.id, hid]);
     if (!rows.length) return res.status(404).json({ error: "Staff not found" });
+    await pool.query("UPDATE hospital_staff SET is_active=0, removed_at=now() WHERE login_type='lab' AND login_id=$1", [req.params.id]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

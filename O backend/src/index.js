@@ -141,6 +141,9 @@ app.use("/uploads", express.static(UPLOAD_DIR, {
 
 // ── API routes ────────────────────────────────────────────────────────────────
 app.use("/api/auth",      authRoutes);
+const nurseRoutes = require("./routes/nurses");
+app.use("/api/auth/nurse", nurseRoutes.authRouter);
+app.use("/api/nurses", nurseRoutes.adminRouter);
 app.use("/api/hospitals", hospitalRoutes);
 app.use("/api/doctors",   doctorRoutes);
 app.use("/api/bookings", apiCache.cacheGet(120000));
@@ -185,6 +188,7 @@ app.use("/api/dashboard", require("./routes/dashboard_kpis"));
 app.use("/api/pharmacy-stats", require("./routes/pharmacy_stats"));
 app.use("/api/pharmacy-module", require("./routes/pharmacy_module"));
 app.use("/api/voice", require("./routes/voice"));
+app.use("/api/front-office", require("./routes/front_office"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
