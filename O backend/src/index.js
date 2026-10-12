@@ -187,6 +187,7 @@ app.use("/api/hospital-integrations", require("./routes/hospital_integrations"))
 app.use("/api/dashboard", require("./routes/dashboard_kpis"));
 app.use("/api/pharmacy-stats", require("./routes/pharmacy_stats"));
 app.use("/api/pharmacy-module", require("./routes/pharmacy_module"));
+app.use("/api/pharmacy-import", require("./routes/pharmacy_import"));
 app.use("/api/voice", require("./routes/voice"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
