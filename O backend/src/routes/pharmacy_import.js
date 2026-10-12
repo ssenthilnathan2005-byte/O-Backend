@@ -80,7 +80,7 @@ async function importRow(client, req, r, defSupplier, invoiceNo) {
   const cur = await client.query(
     "SELECT * FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL " +
     "AND lower(regexp_replace(name,'\\s+','','g')) = lower(regexp_replace($2,'\\s+','','g')) FOR UPDATE", [req.hid, name]);
-  const note = c => "Imported from invoice: +" + c + " tablets" + (batchNo ? " batch " + batchNo : "") + (expiry ? " exp " + expiry : "") +
+  const note = (c, p) => "Imported from invoice: +" + c + " strips" + (p > 1 ? " (" + p + " tabs/strip)" : "") + (batchNo ? " batch " + batchNo : "") + (expiry ? " exp " + expiry : "") +
     (invoiceNo ? " invoice " + invoiceNo : "") + (supplier ? " from " + supplier : "");
 
   if (cur.rows.length) {
@@ -98,7 +98,7 @@ async function importRow(client, req, r, defSupplier, invoiceNo) {
       await addBatch(client, row.id, req.hid, batchNo, expiry, tablets, supplier);
       await client.query(
         "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
-        ["invtx_" + randomBytes(5).toString("hex"), req.hid, row.id, Math.round((tablets / pack) * 1000) / 1000, note(tablets), by]);
+        ["invtx_" + randomBytes(5).toString("hex"), req.hid, row.id, Math.round((tablets / pack) * 1000) / 1000, note(Math.round(tablets / pack * 1000) / 1000, pack), by]);
     }
     await client.query("COMMIT");
     return "updated";
@@ -115,7 +115,7 @@ async function importRow(client, req, r, defSupplier, invoiceNo) {
     await addBatch(client, id, req.hid, batchNo, expiry, tablets, supplier);
     await client.query(
       "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
-      ["invtx_" + randomBytes(5).toString("hex"), req.hid, id, tablets / pack, note(tablets), by]);
+      ["invtx_" + randomBytes(5).toString("hex"), req.hid, id, tablets / pack, note(Math.round(tablets / pack * 1000) / 1000, pack), by]);
   }
   await client.query("COMMIT");
   return "created";
