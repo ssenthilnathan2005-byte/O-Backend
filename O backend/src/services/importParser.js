@@ -11,10 +11,10 @@ const FIELD_PATTERNS = [
   ["gstPercent", /gst|tax|vat/],
   ["stripsPerBox", /strips? ?(per|\/) ?box|per box|^spb$/],
   ["invoiceNo", /invoice ?(no|num|#)|bill ?no/],
-  ["tabletsPerStrip", /pack ?size|strip ?size|per strip|tabs? per|tablets per|^pack(ing)?$|^conv/],
+  ["tabletsPerStrip", /strip ?size|per strip|tabs? per|tablets per|^conv/], ["packSize", /pack ?size|^pack(ing)?$/],
   ["sellingPrice", /mrp|selling|sale|retail/],
   ["purchasePrice", /purchase|ptr|pts|cost|rate|price|landing|buy/],
-  ["quantityUnit", /^(qty|quantity|order(ed)?|supplied?|purchase(d)?|received) ?(unit|uom)$|^uom$|unit of measure|^sold in$|^supplied in$|^received in$/],
+  ["quantityUnit", /^(qty|quantity|stock|order(ed)?|supplied?|purchase(d)?|received) ?(unit|uom)$|^uom$|unit of measure|^sold in$|^supplied in$|^received in$/],
   ["quantity", /qty|quantity|qnty|^nos$|^units?$|^strips?$|^packs?$/],
   ["supplier", /supplier|vendor|distributor/],
   ["category", /categor|dosage form|^form$|^type$/],
@@ -130,7 +130,7 @@ function parseSpreadsheet(buf) {
     const expiryDate = parseExpiry(expRaw);
     if (str(expRaw) && !expiryDate) warnings.push("Expiry not understood: " + str(expRaw));
     const qty = num(get(r, "quantity"));
-    const pack = lastNumber(get(r, "tabletsPerStrip"));
+    const packFallback = /\b(mg|mcg|iu)\b|%/i.test(str(get(r, "packSize"))) ? null : lastNumber(get(r, "packSize")); const pack = lastNumber(get(r, "tabletsPerStrip")) || packFallback;
     rows.push({
       _row: i + 1,
       name,
