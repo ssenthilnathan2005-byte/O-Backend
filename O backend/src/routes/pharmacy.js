@@ -46,9 +46,19 @@ async function billNoMigration() {
 const billReady = billNoMigration();
 billReady.catch(err => console.warn("[pharmacy] bill number migration:", err.message));
 
+// Anything that is not a tablet is dispensed as 1 pack (bottle / vial / tube / inhaler), never multiplied by dose x days.
+function isPackagedItem(item) {
+  const f = String(item.form || "").toLowerCase();
+  if (f) return f !== "tablet" && f !== "other";
+  const t = " " + String(item.name || "").toLowerCase() + " ";
+  if (/\b(syrup|syp|tonic|suspension|solution|linctus|mixture|liquid|elixir|drops?|ointment|cream|gel|lotion|spray|inhaler|injection|inj|vial|ampoule|insulin)\b/.test(t)) return true;
+  return /\d\s*mls?\b/i.test(item.dosage || "") && !/tablet|capsule/i.test(item.dosage || "");
+}
+
 // tablets needed = tablets per dose x doses per day x days
 function suggestQty(item) {
   if (Number(item.quantity) > 0) return Math.round(Number(item.quantity)); // doctor's dispensing quantity wins
+  if (isPackagedItem(item)) return 1; // liquids, drops, creams, injections, sprays: 1 pack
   const dm = /([\d.]+)\s*(tablet|capsule)/i.exec(item.dosage || "");
   const perDose = dm ? parseFloat(dm[1]) : 1;
   const times = ["Morning", "Afternoon", "Evening"].filter(t => (item.instructions || "").includes(t)).length || 1;
