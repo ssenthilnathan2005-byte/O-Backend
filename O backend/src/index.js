@@ -182,6 +182,7 @@ app.use("/api/labs", labRoutes);
 app.use("/api/prescription-presets", presetRoutes);
 app.use("/api/hospital-integrations", require("./routes/hospital_integrations"));
 app.use("/api/dashboard", require("./routes/dashboard_kpis"));
+app.use("/api/permissions", require("./routes/permissions"));
 app.use("/api/pharmacy-stats", require("./routes/pharmacy_stats"));
 app.use("/api/pharmacy-module", require("./routes/pharmacy_module"));
 
