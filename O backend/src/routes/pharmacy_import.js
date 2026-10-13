@@ -7,10 +7,20 @@ const { broadcast } = require("../services/ws");
 const { randomBytes } = require("crypto");
 const { ready: batchesReady, addBatch } = require("../services/batches");
 const { parseSpreadsheet, STD_CATEGORIES } = require("../services/importParser");
+const { evaluateRow, categoryLabels, exactKey, looseKey } = require("../services/packaging");
 const router = express.Router();
 
-const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } }).single("file");
+
+// One row per saved import, used to warn when the same invoice is imported twice.
+const ready = pool.query(
+  "CREATE TABLE IF NOT EXISTS pharmacy_imports (id TEXT PRIMARY KEY, hospital_id TEXT NOT NULL, invoice_no TEXT, supplier TEXT, " +
+  "created_count INTEGER NOT NULL DEFAULT 0, updated_count INTEGER NOT NULL DEFAULT 0, skipped_count INTEGER NOT NULL DEFAULT 0, " +
+  "created_by TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now())")
+  .then(() => pool.query("CREATE INDEX IF NOT EXISTS idx_pharm_imports_inv ON pharmacy_imports(hospital_id, invoice_no)"))
+  .catch(e => console.warn("[pharmacy_import] migration:", e.message));
+
+const istToday = () => new Date(Date.now() + 330 * 60 * 1000).toISOString().slice(0, 10);
 
 function scope(req, res, next) {
   const role = req.user.role;
@@ -58,67 +68,121 @@ async function resolveCategory(client, hid, raw) {
 
 const numOrNull = v => (v === undefined || v === null || v === "") ? null : Number(v);
 
-async function importRow(client, req, r, defSupplier, invoiceNo) {
+// Existing medicines, used to match rows by name and to suggest "similar" names.
+async function loadContext(db, hid) {
+  const { rows } = await db.query(
+    "SELECT id, name, pack_size, strips_per_box, selling_price, med_category, pack_unit FROM inventory_items " +
+    "WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL", [hid]);
+  const byKey = new Map(), similar = new Map();
+  for (const r of rows) {
+    byKey.set(exactKey(r.name), r);
+    const lk = looseKey(r.name);
+    if (lk && !similar.has(lk)) similar.set(lk, r.name);
+  }
+  return { byKey, similar };
+}
+function similarFor(ctx, name) {
+  const ek = exactKey(name);
+  if (ctx.byKey.has(ek)) return null;
+  const s = ctx.similar.get(looseKey(name));
+  return s && exactKey(s) !== ek ? s : null;
+}
+async function findDuplicate(db, hid, invoiceNo, supplier) {
+  if (!invoiceNo) return null;
+  const r = await db.query(
+    "SELECT created_at FROM pharmacy_imports WHERE hospital_id=$1 AND lower(invoice_no)=lower($2) AND lower(COALESCE(supplier,''))=lower($3) " +
+    "ORDER BY created_at DESC LIMIT 1", [hid, invoiceNo, supplier || ""]);
+  return r.rows[0] || null;
+}
+
+// Step 1b: dry run. Same checks as the save, nothing is written.
+router.post("/validate", guard, async (req, res) => {
+  const body = req.body || {};
+  const rows = Array.isArray(body.rows) ? body.rows : null;
+  if (!rows || !rows.length) return res.status(400).json({ error: "No rows to check" });
+  if (rows.length > 500) return res.status(400).json({ error: "Import up to 500 rows at a time" });
+  try {
+    await ready;
+    const ctx = await loadContext(pool, req.hid);
+    const today = istToday();
+    const invoiceNo = String(body.invoiceNo || "").trim();
+    const supplier = String(body.supplier || "").trim();
+    const dup = await findDuplicate(pool, req.hid, invoiceNo, supplier);
+    const out = rows.map(r => {
+      r = r || {};
+      const ex = ctx.byKey.get(exactKey(r.name)) || null;
+      const ev = evaluateRow(r, ex, today, { allowNoBatchExpiry: r.allowNoBatchExpiry === true, similar: similarFor(ctx, r.name) });
+      return { status: ev.status, issues: ev.issues, preview: ev.preview, existing: !!ex };
+    });
+    res.json({ rows: out, duplicate: dup ? { importedAt: dup.created_at } : null });
+  } catch (e) {
+    res.status(500).json({ error: e.message });
+  }
+});
+
+// Saves one row. Rows that are held or blocked are rolled back and reported, never guessed.
+async function importRow(client, req, r, defSupplier, invoiceNo, today) {
   const name = String(r.name || "").replace(/\s+/g, " ").trim();
-  if (!name) throw new Error("Medicine name is required");
-  if (name.length > 200) throw new Error("Medicine name is too long");
-  let qty = numOrNull(r.quantity); if (qty === null) qty = 0;
-  if (!Number.isFinite(qty) || qty < 0 || qty > 10000000) throw new Error("Invalid quantity");
-  const packIn = numOrNull(r.tabletsPerStrip) > 0 ? numOrNull(r.tabletsPerStrip) : null;
-  const spbIn = numOrNull(r.stripsPerBox) > 0 ? Math.round(numOrNull(r.stripsPerBox)) : null;
-  const pp = numOrNull(r.purchasePrice), sp = numOrNull(r.sellingPrice);
-  if ((pp !== null && !(pp >= 0)) || (sp !== null && !(sp >= 0))) throw new Error("Prices must be 0 or more");
-  let gst = numOrNull(r.gstPercent); if (gst !== null && !(gst >= 0 && gst <= 100)) gst = null;
-  const expiry = r.expiryDate ? String(r.expiryDate) : null;
-  if (expiry && !DATE_RE.test(expiry)) throw new Error("Expiry must be YYYY-MM-DD");
   const batchNo = String(r.batchNo || "").trim() || null;
+  const expiry = r.expiryDate ? String(r.expiryDate) : null;
   const supplier = String(r.supplier || "").trim() || defSupplier || null;
   const by = req.user.pharmacyStaffId || req.user.id || null;
+  const gstRaw = numOrNull(r.gstPercent);
+  const gst = gstRaw !== null && gstRaw >= 0 && gstRaw <= 100 ? gstRaw : null;
 
   await client.query("BEGIN");
-  const medCat = await resolveCategory(client, req.hid, r.medCategory);
   const cur = await client.query(
     "SELECT * FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL " +
     "AND lower(regexp_replace(name,'\\s+','','g')) = lower(regexp_replace($2,'\\s+','','g')) FOR UPDATE", [req.hid, name]);
-  const note = (c, p) => "Imported from invoice: +" + c + " strips" + (p > 1 ? " (" + p + " tabs/strip)" : "") + (batchNo ? " batch " + batchNo : "") + (expiry ? " exp " + expiry : "") +
-    (invoiceNo ? " invoice " + invoiceNo : "") + (supplier ? " from " + supplier : "");
+  const row = cur.rows[0] || null;
 
-  if (cur.rows.length) {
-    const row = cur.rows[0];
-    const pack = Number(row.pack_size) || 1;
-    if (packIn && packIn !== pack) throw new Error("Tabs/strip (" + packIn + ") does not match this medicine pack size (" + pack + "). Fix the pack size in Edit, or correct the row."); const tablets = Math.round(qty * pack);
+  const ev = evaluateRow(r, row, today, { allowNoBatchExpiry: r.allowNoBatchExpiry === true });
+  if (ev.status === "held" || ev.status === "blocked") {
+    await client.query("ROLLBACK");
+    return { skipped: ev };
+  }
+  const R = ev.resolved;
+  const medCat = await resolveCategory(client, req.hid, r.medCategory);
+
+  const L = categoryLabels(R.category);
+  const fmt = n => String(Math.round(n * 1000) / 1000);
+  const packName = Math.abs(R.packs - 1) < 1e-9 ? R.packWord : R.packWord + "s";
+  const note = "Imported from invoice: +" + fmt(R.packs) + " " + packName +
+    (R.unitsPerPack > 1 ? " (" + R.unitsPerPack + " " + L.baseShort + "/" + R.packWord + ")" : "") +
+    (R.kind === "box" ? " [" + fmt(Number(r.quantity)) + " box]" : "") +
+    (batchNo ? " batch " + batchNo : "") + (expiry ? " exp " + expiry : "") +
+    (invoiceNo ? " invoice " + invoiceNo : "") + (supplier ? " from " + supplier : "") +
+    (!batchNo || !expiry ? " [saved without batch/expiry - override by " + (by || "staff") + "]" : "");
+
+  const pack = R.unitsPerPack;
+  if (row) {
     const onHand = Math.round(Number(row.quantity) * pack);
-    const newQty = Math.round(((onHand + tablets) / pack) * 1000000) / 1000000;
+    const newQty = Math.round(((onHand + R.tablets) / pack) * 1000000) / 1000000;
     await client.query(
       "UPDATE inventory_items SET quantity=$1, batch_no=COALESCE($2,batch_no), expiry_date=COALESCE($3::date,expiry_date), " +
       "selling_price=COALESCE($4,selling_price), purchase_price=COALESCE($5,purchase_price), supplier=COALESCE($6,supplier), " +
-      "med_category=COALESCE($7,med_category), gst_percent=COALESCE($8,gst_percent), strips_per_box=COALESCE(strips_per_box,$9), updated_at=now() WHERE id=$10 AND hospital_id=$11",
-      [newQty, batchNo, expiry, sp, pp, supplier, medCat, gst, spbIn, row.id, req.hid]);
-    if (tablets > 0) {
-      await addBatch(client, row.id, req.hid, batchNo, expiry, tablets, supplier);
-      await client.query(
-        "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
-        ["invtx_" + randomBytes(5).toString("hex"), req.hid, row.id, Math.round((tablets / pack) * 1000) / 1000, note(Math.round(tablets / pack * 1000) / 1000, pack), by]);
-    }
-    await client.query("COMMIT");
-    return "updated";
-  }
-
-  const pack = packIn || 1;
-  const tablets = Math.round(qty * pack);
-  const id = "inv_" + randomBytes(5).toString("hex");
-  await client.query(
-    "INSERT INTO inventory_items (id, hospital_id, name, category, unit, quantity, min_quantity, purchase_price, supplier, pack_size, batch_no, expiry_date, selling_price, med_category, gst_percent, strips_per_box) " +
-    "VALUES ($1,$2,$3,'medicines','tablets',$4,5,$5,$6,$7,$8,$9::date,$10,$11,$12,$13)",
-    [id, req.hid, name, tablets / pack, pp, supplier, pack, batchNo, expiry, sp, medCat, gst, spbIn]);
-  if (tablets > 0) {
-    await addBatch(client, id, req.hid, batchNo, expiry, tablets, supplier);
+      "med_category=COALESCE($7,med_category), gst_percent=COALESCE($8,gst_percent), strips_per_box=COALESCE(strips_per_box,$9), " +
+      "pack_unit=COALESCE(pack_unit,$10), updated_at=now() WHERE id=$11 AND hospital_id=$12",
+      [newQty, batchNo, expiry, R.sellingPerPack, R.purchasePerPack, supplier, medCat, gst, R.packsPerBox, R.packWord, row.id, req.hid]);
+    await addBatch(client, row.id, req.hid, batchNo, expiry, R.tablets, supplier);
     await client.query(
       "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
-      ["invtx_" + randomBytes(5).toString("hex"), req.hid, id, tablets / pack, note(Math.round(tablets / pack * 1000) / 1000, pack), by]);
+      ["invtx_" + randomBytes(5).toString("hex"), req.hid, row.id, Math.round((R.tablets / pack) * 1000) / 1000, note, by]);
+    await client.query("COMMIT");
+    return { kind: "updated" };
   }
+
+  const id = "inv_" + randomBytes(5).toString("hex");
+  await client.query(
+    "INSERT INTO inventory_items (id, hospital_id, name, category, unit, quantity, min_quantity, purchase_price, supplier, pack_size, batch_no, expiry_date, selling_price, med_category, gst_percent, strips_per_box, pack_unit) " +
+    "VALUES ($1,$2,$3,'medicines','tablets',$4,5,$5,$6,$7,$8,$9::date,$10,$11,$12,$13,$14)",
+    [id, req.hid, name, R.tablets / pack, R.purchasePerPack, supplier, pack, batchNo, expiry, R.sellingPerPack, medCat, gst, R.packsPerBox, R.packWord]);
+  await addBatch(client, id, req.hid, batchNo, expiry, R.tablets, supplier);
+  await client.query(
+    "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
+    ["invtx_" + randomBytes(5).toString("hex"), req.hid, id, R.tablets / pack, note, by]);
   await client.query("COMMIT");
-  return "created";
+  return { kind: "created" };
 }
 
 // Step 2: save the rows the staff reviewed. Each row is its own transaction.
@@ -129,17 +193,40 @@ router.post("/commit", guard, async (req, res) => {
   if (rows.length > 500) return res.status(400).json({ error: "Import up to 500 rows at a time" });
   const defSupplier = String(body.supplier || "").trim() || null;
   const invoiceNo = String(body.invoiceNo || "").trim() || null;
-  const out = { created: 0, updated: 0, errors: [] };
-  try { await batchesReady; } catch (_) {}
+  const out = { created: 0, updated: 0, skipped: [], errors: [] };
+  try { await batchesReady; await ready; } catch (_) {}
+  const today = istToday();
+  try {
+    const dup = await findDuplicate(pool, req.hid, invoiceNo, defSupplier);
+    if (dup && body.confirmDuplicate !== true)
+      return res.status(409).json({
+        error: "Invoice " + invoiceNo + " was already imported on " + new Date(dup.created_at).toISOString().slice(0, 10) +
+          ". Tick \"Import again\" if you really want to add it again.",
+        duplicate: true,
+      });
+  } catch (_) {}
   for (let i = 0; i < rows.length; i++) {
     const client = await pool.connect();
+    const r = rows[i] || {};
     try {
-      const kind = await importRow(client, req, rows[i] || {}, defSupplier, invoiceNo);
-      out[kind]++;
+      const done = await importRow(client, req, r, defSupplier, invoiceNo, today);
+      if (done.kind) out[done.kind]++;
+      else out.skipped.push({
+        row: i + 1, name: String(r.name || ""), status: done.skipped.status,
+        reasons: done.skipped.issues.filter(x => x.level !== "warn").map(x => x.msg),
+      });
     } catch (e) {
       try { await client.query("ROLLBACK"); } catch (_) {}
-      out.errors.push({ row: i + 1, name: String((rows[i] && rows[i].name) || ""), error: e.message });
+      out.errors.push({ row: i + 1, name: String(r.name || ""), error: e.message });
     } finally { client.release(); }
+  }
+  if (out.created + out.updated > 0) {
+    try {
+      await pool.query(
+        "INSERT INTO pharmacy_imports (id, hospital_id, invoice_no, supplier, created_count, updated_count, skipped_count, created_by) VALUES ($1,$2,$3,$4,$5,$6,$7,$8)",
+        ["imp_" + randomBytes(5).toString("hex"), req.hid, invoiceNo, defSupplier, out.created, out.updated,
+          out.skipped.length + out.errors.length, req.user.pharmacyStaffId || req.user.id || null]);
+    } catch (e) { console.warn("[pharmacy_import] log:", e.message); }
   }
   try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
   res.json(out);

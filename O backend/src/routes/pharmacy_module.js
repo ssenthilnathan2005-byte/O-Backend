@@ -161,7 +161,7 @@ router.get("/inventory", guard, async (req, res) => {
     const t = await todayIST();
     const soon = addDays(t, 30);
     const { rows } = await pool.query(
-      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, schedule, gst_percent, " +
+      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, pack_unit, schedule, gst_percent, " +
       "to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, updated_at " +
       "FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC", [req.hid]);
     const bq = await pool.query(
@@ -184,7 +184,7 @@ router.get("/inventory", guard, async (req, res) => {
       else if (qty <= Number(r.min_quantity)) status = "low_stock";
       else if (exps.some(e => e <= soon)) status = "expiring_soon";
       return {
-        id: r.id, name: r.name, unit: r.unit, quantity: qty, packSize: pack,
+        id: r.id, name: r.name, unit: r.unit, quantity: qty, packSize: pack, packUnit: r.pack_unit || null,
         tabletsAvailable: total, reorderLevel: Number(r.min_quantity),
         purchasePrice: r.purchase_price, sellingPrice: r.selling_price, stripsPerBox: r.strips_per_box, tabletsPerBox: r.strips_per_box ? r.strips_per_box * pack : null, schedule: r.schedule || "none", gstPercent: r.gst_percent, breakdown: breakdownOf(qty * pack, pack, r.strips_per_box),
         supplier: r.supplier, location: r.location, batchNo: r.batch_no, medCategory: r.med_category || null,

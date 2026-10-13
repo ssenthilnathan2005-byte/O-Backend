@@ -3,6 +3,8 @@ const XLSX = require("xlsx");
 
 const STD_CATEGORIES = ["Tablet", "Capsule", "Syrup/Tonic", "Injection", "Oil", "Ointment/Cream", "Drops", "Powder", "Others"];
 
+// Order matters: the first pattern that matches a header wins, so the price patterns
+// must stay above quantityUnit, and quantityUnit above quantity.
 const FIELD_PATTERNS = [
   ["batchNo", /batch|lot\b/],
   ["expiryDate", /exp/],
@@ -12,6 +14,7 @@ const FIELD_PATTERNS = [
   ["tabletsPerStrip", /pack ?size|strip ?size|per strip|tabs? per|tablets per|^pack(ing)?$|^conv/],
   ["sellingPrice", /mrp|selling|sale|retail/],
   ["purchasePrice", /purchase|ptr|pts|cost|rate|price|landing|buy/],
+  ["quantityUnit", /^(qty|quantity|order(ed)?|supplied?|purchase(d)?|received) ?(unit|uom)$|^uom$|unit of measure|^sold in$|^supplied in$|^received in$/],
   ["quantity", /qty|quantity|qnty|^nos$|^units?$|^strips?$|^packs?$/],
   ["supplier", /supplier|vendor|distributor/],
   ["category", /categor|dosage form|^form$|^type$/],
@@ -31,6 +34,15 @@ function num(v) {
 function lastNumber(v) {
   const m = String(v == null ? "" : v).match(/\d+(\.\d+)?/g);
   return m ? Number(m[m.length - 1]) : null;
+}
+
+// Pack descriptions such as "10 tablets per strip", "100 ml per bottle", "10x10", "10's",
+// "One inhaler per unit" are packing info, not part of the medicine name. Real strengths
+// ("50 mg", "250 mg/5 ml", "1%") are kept.
+const PACK_DESC = /\b(per|\/)\s*(strip|bottle|tube|vial|sachet|pack|packet|unit|box|inhaler|piece|pc)s?\b|\b\d+\s*(x|\u00D7)\s*\d+\b|\b\d+'s\b|^(one|single|1)\b.*\b(strip|bottle|tube|vial|sachet|pack|unit|inhaler|piece)s?\b|\b(no|not)\b[^;]*\b(specified|available|given|mentioned)\b/i;
+function cleanStrength(raw) {
+  return String(raw == null ? "" : raw).split(/[;|]/).map(s => s.trim()).filter(Boolean)
+    .filter(p => !PACK_DESC.test(p)).join(" ").trim();
 }
 
 const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, oct: 10, nov: 11, dec: 12 };
@@ -108,7 +120,7 @@ function parseSpreadsheet(buf) {
     let name = str(get(r, "name")).replace(/\s+/g, " ");
     if (!name || /^(sub ?total|grand total|total|net|tax|gst|discount|round|igst|cgst|sgst)\b/i.test(name)) continue;
     const warnings = [];
-    let strength = str(get(r, "strength"));
+    let strength = cleanStrength(str(get(r, "strength")));
     if (strength && !name.toLowerCase().replace(/\s/g, "").includes(strength.toLowerCase().replace(/\s/g, ""))) name = name + " " + strength;
     if (!strength) {
       const sm = /(\d+(\.\d+)?\s?(mg|mcg|g|ml|iu|%)(\s?\/\s?\d+(\.\d+)?\s?(ml|mg|g))?)/i.exec(name);
@@ -125,6 +137,7 @@ function parseSpreadsheet(buf) {
       strength,
       medCategory: normalizeCategory(get(r, "category"), name),
       quantity: qty,
+      quantityUnit: str(get(r, "quantityUnit")) || null,
       tabletsPerStrip: pack && pack > 0 ? pack : null,
       stripsPerBox: lastNumber(get(r, "stripsPerBox")) > 0 ? Math.round(lastNumber(get(r, "stripsPerBox"))) : null,
       invoiceNo: str(get(r, "invoiceNo")) || null,
@@ -141,4 +154,4 @@ function parseSpreadsheet(buf) {
   return { sheet: sheetName, headerRow: bestIdx + 1, mapped: best.names, invoiceNo, rows };
 }
 
-module.exports = { parseSpreadsheet, parseExpiry, normalizeCategory, STD_CATEGORIES };
+module.exports = { parseSpreadsheet, parseExpiry, normalizeCategory, cleanStrength, STD_CATEGORIES };
