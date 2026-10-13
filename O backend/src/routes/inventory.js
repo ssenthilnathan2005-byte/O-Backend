@@ -51,7 +51,7 @@ router.get("/", requireAuth, adminOnly, async (req, res) => {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
     const { rows } = await pool.query(
-      `SELECT * FROM inventory_items WHERE hospital_id=$1 ORDER BY category, name ASC`,
+      `SELECT * FROM inventory_items WHERE hospital_id=$1 AND archived_at IS NULL ORDER BY category, name ASC`,
       [hospitalId]
     );
     res.json(rows);
@@ -146,7 +146,7 @@ router.get("/export", requireAuth, adminOnly, async (req, res) => {
 
     const { rows: items } = await pool.query(
       `SELECT name, category, unit, quantity, min_quantity, purchase_price, supplier, location, notes
-       FROM inventory_items WHERE hospital_id=$1 ORDER BY category, name ASC`,
+       FROM inventory_items WHERE hospital_id=$1 AND archived_at IS NULL ORDER BY category, name ASC`,
       [hospitalId]
     );
 
@@ -235,6 +235,9 @@ router.get("/:id/transactions", requireAuth, adminOnly, async (req, res) => {
 router.delete("/:id", requireAuth, adminOnly, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
+    const chk = await pool.query("SELECT category FROM inventory_items WHERE id=$1 AND hospital_id=$2", [req.params.id, hospitalId]);
+    if (chk.rows.length && chk.rows[0].category === "medicines")
+      return res.status(409).json({ error: "Medicines cannot be deleted here. Use Remove in Pharmacy Inventory." });
     await pool.query(`DELETE FROM inventory_items WHERE id=$1 AND hospital_id=$2`, [req.params.id, hospitalId]);
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }

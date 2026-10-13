@@ -742,7 +742,8 @@ router.post("/:id/reset-login", requireAdmin, async (req, res) => {
     const { newLoginId } = req.body;
     if (newLoginId) {
       const trimmed = String(newLoginId).trim();
-      const { rows: dup } = await pool.query("SELECT id FROM labs WHERE login_id=$1 AND id<>$2", [trimmed, lab.id]);
+      const { rows: dup } = await pool.query(
+        "SELECT 1 FROM (SELECT login_id AS c, id FROM labs UNION ALL SELECT login_id, NULL FROM hospitals UNION ALL SELECT code, NULL FROM doctors UNION ALL SELECT code, NULL FROM pharmacy_staff UNION ALL SELECT nurse_code, NULL FROM nurses UNION ALL SELECT code, NULL FROM front_office_staff UNION ALL SELECT code, NULL FROM hospital_lab_staff) t WHERE LOWER(c)=LOWER($1) AND (id IS NULL OR id<>$2) LIMIT 1", [trimmed, lab.id]);
       if (dup[0]) return res.status(409).json({ error: "Login ID already taken" });
       await pool.query("UPDATE labs SET login_id=$1 WHERE id=$2", [trimmed, lab.id]);
     }

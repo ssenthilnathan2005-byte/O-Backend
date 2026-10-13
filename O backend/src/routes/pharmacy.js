@@ -6,6 +6,7 @@ const { broadcast } = require("../services/ws");
 const { requireAuth, requireAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
 
 const { randomBytes } = require("crypto");
+const { issueCode } = require("../services/loginCodes");
 const bcrypt = require("bcrypt");
 
 pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS dispensed_items TEXT")
@@ -45,9 +46,19 @@ async function billNoMigration() {
 const billReady = billNoMigration();
 billReady.catch(err => console.warn("[pharmacy] bill number migration:", err.message));
 
+// Anything that is not a tablet is dispensed as 1 pack (bottle / vial / tube / inhaler), never multiplied by dose x days.
+function isPackagedItem(item) {
+  const f = String(item.form || "").toLowerCase();
+  if (f) return f !== "tablet" && f !== "other";
+  const t = " " + String(item.name || "").toLowerCase() + " ";
+  if (/\b(syrup|syp|tonic|suspension|solution|linctus|mixture|liquid|elixir|drops?|ointment|cream|gel|lotion|spray|inhaler|injection|inj|vial|ampoule|insulin)\b/.test(t)) return true;
+  return /\d\s*mls?\b/i.test(item.dosage || "") && !/tablet|capsule/i.test(item.dosage || "");
+}
+
 // tablets needed = tablets per dose x doses per day x days
 function suggestQty(item) {
   if (Number(item.quantity) > 0) return Math.round(Number(item.quantity)); // doctor's dispensing quantity wins
+  if (isPackagedItem(item)) return 1; // liquids, drops, creams, injections, sprays: 1 pack
   const dm = /([\d.]+)\s*(tablet|capsule)/i.exec(item.dosage || "");
   const perDose = dm ? parseFloat(dm[1]) : 1;
   const times = ["Morning", "Afternoon", "Evening"].filter(t => (item.instructions || "").includes(t)).length || 1;
@@ -181,7 +192,7 @@ router.get("/stock", requirePharmacyOrAdmin, async (req, res) => {
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
     const { rows } = await pool.query(
       `SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price
-         FROM inventory_items WHERE hospital_id=$1 AND category='medicines' ORDER BY name ASC`,
+         FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC`,
       [hospitalId]
     );
     res.json(rows);
@@ -239,6 +250,8 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
         const reduced = qty < suggested;
         const reason = `Dispensed ${qty} to ${p.patient_name} (Rx ${p.id})` +
           (reduced ? ` - reduced from ${suggested}${d.reason ? ": " + d.reason : ""}` : "");
+        const { takeFromBatches } = require("../services/batches");
+        const usedBatches = await takeFromBatches(client, row.id, qty);
         await client.query("UPDATE inventory_items SET quantity=quantity-$1, updated_at=now() WHERE id=$2", [units, row.id]);
         await client.query(
           `INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by)
@@ -246,7 +259,7 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
           [`invtx_${randomBytes(5).toString("hex")}`, p.hospital_id, row.id, units, reason, req.user.pharmacyStaffId || req.user.id || null]
         );
         lines.push({ index: idx, name: item.name, inventoryItemId: row.id, inventoryName: row.name,
-                     tablets: qty, suggested, reduced, reason: d.reason || null, units,
+                     tablets: qty, suggested, reduced, reason: d.reason || null, units, batches: usedBatches,
                      unitPrice: (d.unitPrice != null && d.unitPrice !== "" && Number(d.unitPrice) >= 0)
                        ? Math.round(Number(d.unitPrice) * 10000) / 10000
                        : undefined });
@@ -288,6 +301,8 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
         const packSize = Number(row.pack_size) || 1;
         const back = line.tablets - given;
         const units = Math.round((back / packSize) * 1000) / 1000;
+        const { returnToBatches } = require("../services/batches");
+        await returnToBatches(client, row.id, back, line.batches);
         await client.query("UPDATE inventory_items SET quantity=quantity+$1, updated_at=now() WHERE id=$2", [units, row.id]);
         const why = d.reason ? ": " + d.reason : "";
         await client.query(
@@ -383,7 +398,7 @@ router.get("/staff", requireAdminOrHospitalAdmin, async (req, res) => {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
     const { rows } = await pool.query(
-      "SELECT id, name, phone, code, is_active, created_at FROM pharmacy_staff WHERE hospital_id=$1 ORDER BY created_at DESC",
+      "SELECT id, name, phone, code, is_active, created_at FROM pharmacy_staff WHERE hospital_id=$1 AND code NOT LIKE '%~%' ORDER BY created_at DESC",
       [hospitalId]
     );
     res.json(rows);
@@ -397,6 +412,7 @@ router.post("/staff", requireAdminOrHospitalAdmin, async (req, res) => {
   try {
     
     const { name, phone, hospitalId, password } = req.body;
+    if (phone && !/^[0-9+\-\s]{7,15}$/.test(String(phone).trim())) return res.status(400).json({ error: "Enter a valid contact number" });
     if (!password || String(password).length < 6)
       return res.status(400).json({ error: "Password must be at least 6 characters" });
     const passwordHash = await bcrypt.hash(String(password), 10);
@@ -405,7 +421,7 @@ router.post("/staff", requireAdminOrHospitalAdmin, async (req, res) => {
     if (req.user.role === "hospital_admin" && req.user.hospitalId !== hospitalId)
       return res.status(403).json({ error: "You can only add staff to your own hospital" });
 
-    const code = Math.random().toString(36).substring(2, 8).toUpperCase();
+    const code = await issueCode(hospitalId, "pharmacy");
     const id = "ps_" + uuidv4().replace(/-/g, "").substring(0, 16);
     const { rows } = await pool.query(
       "INSERT INTO pharmacy_staff (id, hospital_id, code, name, phone, password) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, name, phone, code, is_active, created_at",
@@ -423,13 +439,15 @@ router.delete("/staff/:id", requireAdminOrHospitalAdmin, async (req, res) => {
   try {
     if (req.user.role === "hospital_admin") {
       const { rows } = await pool.query(
-        "UPDATE pharmacy_staff SET is_active=0 WHERE id=$1 AND hospital_id=$2 RETURNING id",
+        "UPDATE pharmacy_staff SET is_active=0, code=CASE WHEN code LIKE '%~%' THEN code ELSE code || '~' || (SELECT count(*)+1 FROM pharmacy_staff x WHERE x.code LIKE pharmacy_staff.code || '~%') END WHERE id=$1 AND hospital_id=$2 RETURNING id",
         [req.params.id, req.user.hospitalId]
       );
       if (!rows.length) return res.status(404).json({ error: "Staff not found" });
+      await pool.query("UPDATE hospital_staff SET is_active=0, removed_at=now() WHERE login_type='pharmacy' AND login_id=$1", [req.params.id]);
       return res.json({ success: true });
     }
-    await pool.query("UPDATE pharmacy_staff SET is_active=0 WHERE id=$1", [req.params.id]);
+    await pool.query("UPDATE pharmacy_staff SET is_active=0, code=CASE WHEN code LIKE '%~%' THEN code ELSE code || '~' || (SELECT count(*)+1 FROM pharmacy_staff x WHERE x.code LIKE pharmacy_staff.code || '~%') END WHERE id=$1", [req.params.id]);
+    await pool.query("UPDATE hospital_staff SET is_active=0, removed_at=now() WHERE login_type='pharmacy' AND login_id=$1", [req.params.id]);
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

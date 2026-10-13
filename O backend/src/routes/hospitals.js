@@ -84,6 +84,7 @@ async function row2hospital(r, req, includePhoto = true) {
     photoUrl,
     isFree: r.is_free === 1,
     hasPharmacy: r.has_pharmacy === 1,
+    website: r.website || "",
     plan: r.plan || "premium",
     ratePerToken: r.rate_per_token != null ? Number(r.rate_per_token) : 15,
     doctorCount,
@@ -114,7 +115,7 @@ router.get("/", async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      "SELECT id, name, area, address, phone, rating, gradient, photo_url, " + PHOTO_COLS + ", is_free, has_pharmacy, plan, rate_per_token FROM hospitals ORDER BY name ASC"
+      "SELECT id, name, area, address, phone, rating, gradient, photo_url, " + PHOTO_COLS + ", is_free, has_pharmacy, plan, rate_per_token, website FROM hospitals ORDER BY name ASC"
     );
 
     // Batch doctor counts in ONE query instead of one query per hospital (fixes N+1)
@@ -144,6 +145,7 @@ router.get("/", async (req, res) => {
         photoUrl,
         isFree: r.is_free === 1,
         hasPharmacy: r.has_pharmacy === 1,
+        website: r.website || "",
         plan: r.plan || "premium",
         ratePerToken: r.rate_per_token != null ? Number(r.rate_per_token) : 15,
         doctorCount: countMap[r.id] || 0,
@@ -190,7 +192,7 @@ router.get("/:id/photo", async (req, res) => {
 
 router.get("/:id", async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT id, name, area, address, phone, rating, gradient, photo_url, " + PHOTO_COLS + ", is_free, has_pharmacy, plan, rate_per_token FROM hospitals WHERE id=$1", [req.params.id]);
+    const { rows } = await pool.query("SELECT id, name, area, address, phone, rating, gradient, photo_url, " + PHOTO_COLS + ", is_free, has_pharmacy, plan, rate_per_token, website FROM hospitals WHERE id=$1", [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: "Hospital not found" });
     res.json(await row2hospital(rows[0], req, true));
   } catch (err) {
@@ -204,6 +206,16 @@ router.post("/", requireAdmin, async (req, res) => {
     const { name, area, address = "", phone = "", gradient = "from-slate-400 to-slate-600", loginId, plan } = req.body;
     if (!name || !area) return res.status(400).json({ error: "name and area are required" });
 
+    if (loginId) {
+      const lid = String(loginId).trim();
+      if (!/^[A-Za-z0-9]{2,12}$/.test(lid)) return res.status(400).json({ error: "Login ID must be 2-12 letters or digits, no spaces or symbols" });
+      const { rows: taken } = await pool.query(
+        "SELECT 1 FROM (SELECT login_id AS c FROM hospitals UNION ALL SELECT code FROM doctors UNION ALL SELECT code FROM pharmacy_staff UNION ALL SELECT nurse_code FROM nurses UNION ALL SELECT code FROM front_office_staff UNION ALL SELECT code FROM hospital_lab_staff UNION ALL SELECT login_id FROM labs) t WHERE LOWER(c)=LOWER($1) OR LOWER(c) LIKE LOWER($1) || 'd%' LIMIT 1", [lid]);
+      if (taken[0]) {
+        const m = /^(.*?)(\d*)$/.exec(lid);
+        return res.status(409).json({ error: "Login ID '" + lid + "' is already in use. Try '" + m[1] + (Number(m[2] || 0) + 1) + "'." });
+      }
+    }
     const id = `h_${Date.now()}`;
     const planVal = plan === "basic" ? "basic" : "premium";
     const rateVal = planVal === "basic" ? 8 : 15;
@@ -228,7 +240,7 @@ router.post("/", requireAdmin, async (req, res) => {
       await pool.query("UPDATE hospitals SET login_id=$1, admin_user_id=$2 WHERE id=$3", [trimmedLoginId, adminUserId, id]);
     }
 
-    const { rows } = await pool.query("SELECT id, name, area, address, phone, rating, gradient, photo_url, login_id, " + PHOTO_COLS + ", is_free, has_pharmacy, plan, rate_per_token FROM hospitals WHERE id=$1", [id]);
+    const { rows } = await pool.query("SELECT id, name, area, address, phone, rating, gradient, photo_url, login_id, " + PHOTO_COLS + ", is_free, has_pharmacy, plan, rate_per_token, website FROM hospitals WHERE id=$1", [id]);
     invalidateHospitalCache();
     res.status(201).json({ ...(await row2hospital(rows[0], req, true)), loginId: rows[0].login_id || null });
   } catch (err) {
@@ -324,7 +336,7 @@ router.patch("/:id", requireAdmin, async (req, res) => {
       ]
     );
 
-    const { rows } = await pool.query("SELECT id, name, area, address, phone, rating, gradient, photo_url, login_id, " + PHOTO_COLS + ", is_free, has_pharmacy, plan, rate_per_token FROM hospitals WHERE id=$1", [req.params.id]);
+    const { rows } = await pool.query("SELECT id, name, area, address, phone, rating, gradient, photo_url, login_id, " + PHOTO_COLS + ", is_free, has_pharmacy, plan, rate_per_token, website FROM hospitals WHERE id=$1", [req.params.id]);
     cache.clear("plan:" + req.params.id);
     invalidateHospitalCache();
     res.json(await row2hospital(rows[0], req, true));
@@ -347,6 +359,30 @@ router.patch("/:id/pharmacy-toggle", requireAdminOrHospitalAdmin, async (req, re
     );
     invalidateHospitalCache();
     res.json({ success: true, hasPharmacy: !!hasPharmacy });
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// PATCH hospital website (hospital-admin can edit own hospital only)
+router.patch("/:id/website", requireAdminOrHospitalAdmin, async (req, res) => {
+  try {
+    if (req.user.role === "hospital_admin" && req.user.hospitalId !== req.params.id)
+      return res.status(403).json({ error: "You can only update your own hospital" });
+    let raw = typeof req.body.website === "string" ? req.body.website.trim() : "";
+    let website = null;
+    if (raw) {
+      if (!/^https?:\/\//i.test(raw)) raw = "https://" + raw;
+      let u;
+      try { u = new URL(raw); } catch { return res.status(400).json({ error: "Enter a valid website URL" }); }
+      if ((u.protocol !== "http:" && u.protocol !== "https:") || !u.hostname.includes(".") || raw.length > 300)
+        return res.status(400).json({ error: "Enter a valid website URL" });
+      website = u.toString();
+    }
+    const r = await pool.query("UPDATE hospitals SET website=$1 WHERE id=$2", [website, req.params.id]);
+    if (!r.rowCount) return res.status(404).json({ error: "Hospital not found" });
+    invalidateHospitalCache();
+    res.json({ success: true, website: website || "" });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

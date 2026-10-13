@@ -4,15 +4,41 @@ const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
 const { broadcast } = require("../services/ws");
 const { randomBytes } = require("crypto");
+const { ready: batchesReady, takeFromBatches, addBatch } = require("../services/batches");
 const router = express.Router();
 
 pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_no TEXT")
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS expiry_date DATE"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS selling_price REAL"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS med_category TEXT"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS archived_at TIMESTAMPTZ"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS strips_per_box INTEGER"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS schedule TEXT"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS gst_percent REAL"))
+  .then(() => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_med_categories (hospital_id TEXT NOT NULL, name TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (hospital_id, name))"))
   .then(() => pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS payment_mode TEXT"))
   .catch(e => console.warn("[pharmacy_module] migration:", e.message));
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+const MED_CATEGORIES = ["Tablet", "Capsule", "Syrup/Tonic", "Injection", "Oil", "Ointment/Cream", "Drops", "Powder", "Others"];
+
+// Returns { value } with the canonical category name (null when blank) or { error }.
+// A new custom name is saved per hospital so it appears in the dropdown next time.
+async function resolveCategory(db, hid, raw) {
+  if (raw === undefined || raw === null) return { value: null };
+  const name = String(raw).replace(/\s+/g, " ").trim();
+  if (!name) return { value: null };
+  if (name.length > 40) return { error: "Category name must be 40 characters or less" };
+  if (/[<>]/.test(name)) return { error: "Category name has invalid characters" };
+  const std = MED_CATEGORIES.find(c => c.toLowerCase() === name.toLowerCase());
+  if (std) return { value: std };
+  const ex = await db.query("SELECT name FROM pharmacy_med_categories WHERE hospital_id=$1 AND lower(name)=lower($2)", [hid, name]);
+  if (ex.rows.length) return { value: ex.rows[0].name };
+  const cnt = await db.query("SELECT COUNT(*)::int AS n FROM pharmacy_med_categories WHERE hospital_id=$1", [hid]);
+  if (cnt.rows[0].n >= 100) return { error: "Custom category limit reached" };
+  await db.query("INSERT INTO pharmacy_med_categories (hospital_id, name) VALUES ($1,$2) ON CONFLICT DO NOTHING", [hid, name]);
+  return { value: name };
+}
 const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
 function addDays(s, n) {
   const d = new Date(s + "T00:00:00Z");
@@ -59,8 +85,14 @@ function parse(s) { try { return JSON.parse(s || "[]"); } catch (_) { return [];
 // otherwise shares the entered bill amount by tablets.
 function lineAmounts(rx, inv) {
   const lines = parse(rx.dispensed_items);
-  const totalTabs = lines.reduce((s, l) => s + (Number(l.tablets) || 0), 0);
+  const hasBill = rx.bill_amount != null && rx.bill_amount !== "";
   const bill = Number(rx.bill_amount) || 0;
+  const isPriced = l => l.unitPrice != null && l.unitPrice !== "" && Number.isFinite(Number(l.unitPrice));
+  const pricedSum = lines.reduce((s, l) => s + (isPriced(l) ? (Number(l.tablets) || 0) * Number(l.unitPrice) : 0), 0);
+  const unpriced = lines.filter(l => !isPriced(l));
+  const unpricedTabs = unpriced.reduce((s, l) => s + (Number(l.tablets) || 0), 0);
+  const remainder = Math.max(0, r2(bill - pricedSum));
+  let left = remainder, seen = 0;
   return lines.map(l => {
     const tabs = Number(l.tablets) || 0;
     const it = inv[l.inventoryItemId];
@@ -68,9 +100,18 @@ function lineAmounts(rx, inv) {
     const sp = Number(it && it.selling_price) || 0;
     const cp = Number(it && it.purchase_price) || 0;
     let unitPrice, amount, priceSource;
-    if (l.unitPrice != null && l.unitPrice !== "" && Number.isFinite(Number(l.unitPrice))) { unitPrice = Number(l.unitPrice); amount = tabs * unitPrice; priceSource = "billed"; }
-    else if (sp > 0) { unitPrice = sp / pack; amount = tabs * unitPrice; priceSource = "inventory"; }
-    else { amount = totalTabs ? (tabs / totalTabs) * bill : 0; unitPrice = tabs ? amount / tabs : 0; priceSource = "bill-share"; }
+    if (isPriced(l)) {
+      unitPrice = Number(l.unitPrice); amount = tabs * unitPrice; priceSource = "billed";
+    } else if (hasBill) {
+      seen++;
+      amount = (seen === unpriced.length || !unpricedTabs) ? left : r2(remainder * tabs / unpricedTabs);
+      left = r2(left - amount);
+      unitPrice = tabs ? amount / tabs : 0; priceSource = "bill-share";
+    } else if (sp > 0) {
+      unitPrice = sp / pack; amount = tabs * unitPrice; priceSource = "inventory";
+    } else {
+      unitPrice = 0; amount = 0; priceSource = "none";
+    }
     return {
       name: l.inventoryName || l.name, tablets: tabs,
       unitPrice: r2(unitPrice), amount: r2(amount), priceSource,
@@ -116,25 +157,38 @@ router.get("/revenue", guard, async (req, res) => {
 // ── Inventory (medicines) ────────────────────────────────────────────────────
 router.get("/inventory", guard, async (req, res) => {
   try {
+    await batchesReady;
     const t = await todayIST();
     const soon = addDays(t, 30);
     const { rows } = await pool.query(
-      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, " +
+      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, pack_unit, schedule, gst_percent, " +
       "to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, updated_at " +
-      "FROM inventory_items WHERE hospital_id=$1 AND category='medicines' ORDER BY name ASC", [req.hid]);
+      "FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC", [req.hid]);
+    const bq = await pool.query(
+      "SELECT item_id, batch_no, to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, tablets, supplier FROM inventory_batches " +
+      "WHERE hospital_id=$1 AND tablets>0 ORDER BY expiry_date ASC NULLS LAST, received_at ASC", [req.hid]);
+    const byItem = {};
+    for (const b of bq.rows) (byItem[b.item_id] = byItem[b.item_id] || []).push({ batchNo: b.batch_no, expiryDate: b.expiry_date, tablets: Number(b.tablets), supplier: b.supplier });
     res.set("Cache-Control", "no-store");
     res.json(rows.map(r => {
       const qty = Number(r.quantity) || 0, pack = Number(r.pack_size) || 1;
+      const total = Math.round(qty * pack);
+      const batches = byItem[r.id] || [];
+      const sum = batches.reduce((s, b) => s + b.tablets, 0);
+      if (total > sum) batches.push({ batchNo: null, expiryDate: null, tablets: total - sum, supplier: null });
+      const dated = batches.filter(b => b.expiryDate);
+      const exps = dated.length ? dated.map(b => b.expiryDate) : (r.expiry_date ? [r.expiry_date] : []);
       let status = "ok";
-      if (r.expiry_date && r.expiry_date < t) status = "expired";
+      if (exps.some(e => e < t)) status = "expired";
       else if (qty <= 0) status = "out_of_stock";
       else if (qty <= Number(r.min_quantity)) status = "low_stock";
-      else if (r.expiry_date && r.expiry_date <= soon) status = "expiring_soon";
+      else if (exps.some(e => e <= soon)) status = "expiring_soon";
       return {
-        id: r.id, name: r.name, unit: r.unit, quantity: qty, packSize: pack,
-        tabletsAvailable: Math.floor(qty * pack), reorderLevel: Number(r.min_quantity),
-        purchasePrice: r.purchase_price, sellingPrice: r.selling_price,
-        supplier: r.supplier, location: r.location, batchNo: r.batch_no, expiryDate: r.expiry_date, status,
+        id: r.id, name: r.name, unit: r.unit, quantity: qty, packSize: pack, packUnit: r.pack_unit || null,
+        tabletsAvailable: total, reorderLevel: Number(r.min_quantity),
+        purchasePrice: r.purchase_price, sellingPrice: r.selling_price, stripsPerBox: r.strips_per_box, tabletsPerBox: r.strips_per_box ? r.strips_per_box * pack : null, schedule: r.schedule || "none", gstPercent: r.gst_percent, breakdown: breakdownOf(qty * pack, pack, r.strips_per_box),
+        supplier: r.supplier, location: r.location, batchNo: r.batch_no, medCategory: r.med_category || null,
+        expiryDate: dated.length ? dated[0].expiryDate : r.expiry_date, batches, status,
         updatedAt: r.updated_at,
       };
     }));
@@ -161,14 +215,17 @@ router.post("/inventory", guard, async (req, res) => {
     if (b.expiryDate && !DATE_RE.test(b.expiryDate)) return res.status(400).json({ error: "expiryDate must be YYYY-MM-DD" });
     await client.query("BEGIN");
     const dup = await client.query(
-      "SELECT 1 FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND lower(name)=lower($2)", [req.hid, name]);
+      "SELECT 1 FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL AND lower(name)=lower($2)", [req.hid, name]);
     if (dup.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "A medicine with this name already exists" }); }
+    const cr = await resolveCategory(client, req.hid, b.medCategory);
+    if (cr.error) { await client.query("ROLLBACK"); return res.status(400).json({ error: cr.error }); }
+    const medCat = cr.value;
     const id = "inv_" + randomBytes(5).toString("hex");
     const qty = Math.round((openTabs / pack) * 1000) / 1000;
     await client.query(
-      "INSERT INTO inventory_items (id, hospital_id, name, category, unit, quantity, min_quantity, purchase_price, supplier, location, pack_size, batch_no, expiry_date, selling_price) " +
-      "VALUES ($1,$2,$3,'medicines','tablets',$4,$5,$6,$7,$8,$9,$10,$11::date,$12)",
-      [id, req.hid, name, qty, reorder, pp, b.supplier || null, b.location || null, pack, b.batchNo || null, b.expiryDate || null, sp]);
+      "INSERT INTO inventory_items (id, hospital_id, name, category, unit, quantity, min_quantity, purchase_price, supplier, location, pack_size, batch_no, expiry_date, selling_price, med_category) " +
+      "VALUES ($1,$2,$3,'medicines','tablets',$4,$5,$6,$7,$8,$9,$10,$11::date,$12,$13)",
+      [id, req.hid, name, qty, reorder, pp, b.supplier || null, b.location || null, pack, b.batchNo || null, b.expiryDate || null, sp, medCat]);
     if (qty > 0) {
       await client.query(
         "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
@@ -184,19 +241,86 @@ router.post("/inventory", guard, async (req, res) => {
   } finally { client.release(); }
 });
 
-router.patch("/inventory/:id/meta", guard, async (req, res) => {
+// Remove a medicine: archived, not deleted, so old bills keep their cost data.
+router.delete("/inventory/:id", guard, async (req, res) => {
+  const client = await pool.connect();
   try {
-    const { batchNo, expiryDate, sellingPrice, supplier, location } = req.body || {};
+    const why = String((req.body && req.body.reason) || "").trim();
+    await client.query("BEGIN");
+    const cur = await client.query(
+      "SELECT id, quantity, pack_size FROM inventory_items WHERE id=$1 AND hospital_id=$2 AND category='medicines' AND archived_at IS NULL FOR UPDATE",
+      [req.params.id, req.hid]);
+    if (!cur.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Medicine not found" }); }
+    const row = cur.rows[0];
+    const qty = Number(row.quantity) || 0;
+    const pack = Number(row.pack_size) || 1;
+    const tabs = Math.round(qty * pack);
+    await client.query("UPDATE inventory_items SET quantity=0, archived_at=now(), updated_at=now() WHERE id=$1", [row.id]);
+    await client.query("UPDATE inventory_batches SET tablets=0 WHERE item_id=$1", [row.id]);
+    if (qty > 0) {
+      await client.query(
+        "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'out',$4,$5,$6)",
+        ["invtx_" + randomBytes(5).toString("hex"), req.hid, row.id, qty,
+         "Removed from inventory: " + tabs + " tablets written off" + (why ? " - " + why : ""),
+         req.user.pharmacyStaffId || req.user.id || null]);
+    }
+    await client.query("COMMIT");
+    try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
+    res.json({ ok: true, removedTablets: tabs });
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    res.status(500).json({ error: e.message });
+  } finally { client.release(); }
+});
+
+router.get("/inventory-categories", guard, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT name FROM pharmacy_med_categories WHERE hospital_id=$1 ORDER BY lower(name)", [req.hid]);
+    res.set("Cache-Control", "no-store");
+    res.json([...MED_CATEGORIES, ...rows.map(r => r.name)]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.patch("/inventory/:id/meta", guard, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const { batchNo, expiryDate, sellingPrice, supplier, location, packSize, medCategory } = req.body || {};
     if (expiryDate && !DATE_RE.test(expiryDate)) return res.status(400).json({ error: "expiryDate must be YYYY-MM-DD" });
     if (sellingPrice != null && !(Number(sellingPrice) >= 0)) return res.status(400).json({ error: "Invalid sellingPrice" });
-    const { rows } = await pool.query(
+    let newPack = null;
+    if (packSize !== undefined && packSize !== null && packSize !== "") {
+      newPack = Number(packSize);
+      if (!Number.isInteger(newPack) || newPack < 1 || newPack > 100000)
+        return res.status(400).json({ error: "Tablets per pack must be a whole number of 1 or more" });
+    }
+    await client.query("BEGIN");
+    const cur = await client.query(
+      "SELECT quantity, pack_size FROM inventory_items WHERE id=$1 AND hospital_id=$2 FOR UPDATE", [req.params.id, req.hid]);
+    if (!cur.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Item not found" }); }
+    const cr = await resolveCategory(client, req.hid, medCategory);
+    if (cr.error) { await client.query("ROLLBACK"); return res.status(400).json({ error: cr.error }); }
+    const newCat = cr.value;
+    const oldPack = Number(cur.rows[0].pack_size) || 1;
+    let newQty = null;
+    if (newPack !== null && newPack !== oldPack) {
+      // keep the total tablet count the same when the pack size changes
+      const tablets = Number(cur.rows[0].quantity) * oldPack;
+      newQty = Math.round((tablets / newPack) * 1000000) / 1000000;
+    }
+    await client.query(
       "UPDATE inventory_items SET batch_no=COALESCE($1,batch_no), expiry_date=COALESCE($2::date,expiry_date), " +
-      "selling_price=COALESCE($3,selling_price), supplier=COALESCE($4,supplier), location=COALESCE($7,location), updated_at=now() " +
-      "WHERE id=$5 AND hospital_id=$6 RETURNING id",
-      [batchNo ?? null, expiryDate ?? null, sellingPrice ?? null, supplier ?? null, req.params.id, req.hid, location ?? null]);
-    if (!rows.length) return res.status(404).json({ error: "Item not found" });
+      "selling_price=COALESCE($3,selling_price), supplier=COALESCE($4,supplier), location=COALESCE($7,location), " +
+      "pack_size=COALESCE($8,pack_size), quantity=COALESCE($9,quantity), med_category=COALESCE($10,med_category), updated_at=now() " +
+      "WHERE id=$5 AND hospital_id=$6",
+      [batchNo ?? null, expiryDate ?? null, sellingPrice ?? null, supplier ?? null, req.params.id, req.hid, location ?? null, newPack, newQty, newCat]);
+    await client.query("COMMIT");
+    try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
     res.json({ ok: true });
-  } catch (e) { res.status(500).json({ error: e.message }); }
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    res.status(500).json({ error: e.message });
+  } finally { client.release(); }
 });
 
 // ── Medicine Buying by Patient (dispensing log) ──────────────────────────────
@@ -224,6 +348,7 @@ router.post("/inventory/:id/stock", guard, async (req, res) => {
     if (delta === 0) { await client.query("ROLLBACK"); return res.status(400).json({ error: "No change in stock" }); }
     const why = String(reason || "").trim();
     if (delta < 0 && !why) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Reason is required when reducing stock" }); }
+    if (delta < 0) await takeFromBatches(client, row.id, Math.round(-delta * pack), { untrackedFirst: true });
     await client.query("UPDATE inventory_items SET quantity=$1, updated_at=now() WHERE id=$2", [finalQty, row.id]);
     const label = mode === "add"
       ? "Stock received: +" + n + " tablets"
@@ -235,6 +360,124 @@ router.post("/inventory/:id/stock", guard, async (req, res) => {
     await client.query("COMMIT");
     try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
     res.json({ ok: true, quantity: finalQty, tabletsAvailable: Math.round(finalQty * pack) });
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    res.status(500).json({ error: e.message });
+  } finally { client.release(); }
+});
+
+const SCHEDULES = ["none", "H", "H1", "X"];
+function breakdownOf(tablets, pack, spb) {
+  const t = Math.max(0, Math.round(Number(tablets) || 0));
+  const per = Number(pack) >= 1 ? Number(pack) : 1;
+  const perBox = spb ? per * Number(spb) : 0;
+  if (!perBox) return { boxes: 0, strips: Math.floor(t / per), tablets: t % per };
+  return { boxes: Math.floor(t / perBox), strips: Math.floor((t % perBox) / per), tablets: t % per };
+}
+
+// ── Set how a medicine is packed and priced (strip = one pack) ──
+router.post("/inventory/:id/packing", guard, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    const b = req.body || {};
+    const has = v => !(v === undefined || v === null || v === "");
+    const tps = Number(b.tabletsPerStrip), spb = Number(b.stripsPerBox), mrp = Number(b.mrpStrip);
+    if (!Number.isInteger(tps) || tps < 1 || tps > 100000) return res.status(400).json({ error: "Tablets per strip must be a whole number of 1 or more" });
+    if (!Number.isInteger(spb) || spb < 1 || spb > 100000) return res.status(400).json({ error: "Strips per box must be a whole number of 1 or more" });
+    if (!has(b.mrpStrip) || !(mrp >= 0)) return res.status(400).json({ error: "MRP per strip is required" });
+    let pp = null;
+    if (has(b.purchaseBox)) {
+      const pb = Number(b.purchaseBox);
+      if (!(pb >= 0)) return res.status(400).json({ error: "Invalid purchase price per box" });
+      pp = pb / spb;
+    }
+    let sched = null;
+    if (has(b.schedule)) {
+      sched = SCHEDULES.find(x => x.toLowerCase() === String(b.schedule).trim().toLowerCase());
+      if (!sched) return res.status(400).json({ error: "Schedule must be none, H, H1 or X" });
+    }
+    let reorder = null;
+    if (has(b.reorderLevel)) {
+      reorder = Number(b.reorderLevel);
+      if (!(reorder >= 0 && reorder <= 10000000)) return res.status(400).json({ error: "Reorder level must be 0 or more" });
+    }
+    let gst = null;
+    if (has(b.gstPercent)) {
+      gst = Number(b.gstPercent);
+      if (!(gst >= 0 && gst <= 40)) return res.status(400).json({ error: "GST percent must be between 0 and 40" });
+    }
+    await client.query("BEGIN");
+    const cur = await client.query(
+      "SELECT quantity, pack_size FROM inventory_items WHERE id=$1 AND hospital_id=$2 AND category='medicines' FOR UPDATE",
+      [req.params.id, req.hid]);
+    if (!cur.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Medicine not found" }); }
+    const oldPack = Number(cur.rows[0].pack_size) || 1;
+    const tablets = Math.round(Number(cur.rows[0].quantity) * oldPack);
+    const newQty = Math.round((tablets / tps) * 1000000) / 1000000;
+    await client.query(
+      "UPDATE inventory_items SET pack_size=$1, strips_per_box=$2, quantity=$3, selling_price=$4, " +
+      "purchase_price=COALESCE($5,purchase_price), schedule=COALESCE($6,schedule), gst_percent=COALESCE($7,gst_percent), min_quantity=COALESCE($8,min_quantity), updated_at=now() " +
+      "WHERE id=$9 AND hospital_id=$10",
+      [tps, spb, newQty, mrp, pp, sched, gst, reorder, req.params.id, req.hid]);
+    await client.query("COMMIT");
+    try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
+    res.json({ ok: true, tabletsAvailable: tablets, breakdown: breakdownOf(tablets, tps, spb) });
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    res.status(500).json({ error: e.message });
+  } finally { client.release(); }
+});
+
+// ── Receive stock as boxes / strips / loose tablets, with batch and expiry ──
+router.post("/inventory/:id/receive", guard, async (req, res) => {
+  const client = await pool.connect();
+  try {
+    await batchesReady;
+    const b = req.body || {};
+    const n = v => (v === undefined || v === null || v === "") ? 0 : Number(v);
+    const boxes = n(b.boxes), strips = n(b.strips), loose = n(b.tablets);
+    if (![boxes, strips, loose].every(x => Number.isInteger(x) && x >= 0 && x <= 10000000))
+      return res.status(400).json({ error: "Boxes, strips and tablets must be whole numbers" });
+    const batchNo = String(b.batchNo || "").trim();
+    if (!batchNo) return res.status(400).json({ error: "Batch number is required" });
+    const expiry = String(b.expiryDate || "");
+    if (!DATE_RE.test(expiry)) return res.status(400).json({ error: "Expiry date is required (YYYY-MM-DD)" });
+    if (expiry <= await todayIST()) return res.status(400).json({ error: "This batch is already expired" });
+    const has = v => !(v === undefined || v === null || v === "");
+    const mrp = has(b.mrpStrip) ? Number(b.mrpStrip) : null;
+    if (mrp !== null && !(mrp >= 0)) return res.status(400).json({ error: "Invalid MRP" });
+    const pbox = has(b.purchaseBox) ? Number(b.purchaseBox) : null;
+    if (pbox !== null && !(pbox >= 0)) return res.status(400).json({ error: "Invalid purchase price per box" });
+
+    await client.query("BEGIN");
+    const cur = await client.query(
+      "SELECT * FROM inventory_items WHERE id=$1 AND hospital_id=$2 AND category='medicines' FOR UPDATE",
+      [req.params.id, req.hid]);
+    if (!cur.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Medicine not found" }); }
+    const row = cur.rows[0];
+    const pack = Number(row.pack_size) || 1;
+    const spb = Number(row.strips_per_box) || 0;
+    if (!spb) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Set tablets per strip and strips per box first" }); }
+    const total = boxes * spb * pack + strips * pack + loose;
+    if (total <= 0) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Enter how many boxes, strips or tablets were received" }); }
+    const onHand = Math.round(Number(row.quantity) * pack);
+    const newQty = Math.round(((onHand + total) / pack) * 1000000) / 1000000;
+    const pp = pbox === null ? null : pbox / spb;
+    const sup = b.supplier ? String(b.supplier).trim() : null;
+    await client.query(
+      "UPDATE inventory_items SET quantity=$1, batch_no=$2, expiry_date=$3::date, selling_price=COALESCE($4,selling_price), " +
+      "purchase_price=COALESCE($5,purchase_price), supplier=COALESCE($6,supplier), updated_at=now() WHERE id=$7 AND hospital_id=$8",
+      [newQty, batchNo, expiry, mrp, pp, sup, row.id, req.hid]);
+    await addBatch(client, row.id, req.hid, batchNo, expiry, total, sup);
+    const note = "Stock received: +" + total + " tablets (" + boxes + " box, " + strips + " strip, " + loose + " tablet) batch " + batchNo +
+      " exp " + expiry + (b.invoiceNo ? " invoice " + String(b.invoiceNo).trim() : "") + (sup ? " from " + sup : "");
+    await client.query(
+      "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
+      ["invtx_" + randomBytes(5).toString("hex"), req.hid, row.id, Math.round((total / pack) * 1000) / 1000, note,
+       req.user.pharmacyStaffId || req.user.id || null]);
+    await client.query("COMMIT");
+    try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
+    res.json({ ok: true, added: total, tabletsAvailable: onHand + total, breakdown: breakdownOf(onHand + total, pack, spb) });
   } catch (e) {
     try { await client.query("ROLLBACK"); } catch (_) {}
     res.status(500).json({ error: e.message });
@@ -390,6 +633,7 @@ router.post("/stock-deduct", guard, async (req, res) => {
     }
 
     const why = String(reason || "").trim();
+    const usedBatches = await takeFromBatches(client, row.id, qty);
     await client.query("UPDATE inventory_items SET quantity=quantity-$1, updated_at=now() WHERE id=$2", [units, row.id]);
     await client.query(
       "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'out',$4,$5,$6)",
@@ -398,7 +642,7 @@ router.post("/stock-deduct", guard, async (req, res) => {
        req.user.pharmacyStaffId || req.user.id || null]);
 
     lines.push({ index: idx, name: item.name, inventoryItemId: row.id, inventoryName: row.name,
-                 tablets: qty, suggested: qty, reduced: false, reason: why || null, units, lateDeduct: true });
+                 tablets: qty, suggested: qty, reduced: false, reason: why || null, units, lateDeduct: true, batches: usedBatches });
     await client.query(
       "UPDATE prescriptions SET dispensed_items=$1, tablets_sold=COALESCE(tablets_sold,0)+$2 WHERE id=$3",
       [JSON.stringify(lines), qty, p.id]);
@@ -411,6 +655,20 @@ router.post("/stock-deduct", guard, async (req, res) => {
   } finally { client.release(); }
 });
 
+// Makes invoice lines add up to the saved bill total by adding one adjustment line.
+function withAdjustment(lines, billAmount) {
+  if (billAmount == null || billAmount === "") return lines;
+  const total = Number(billAmount);
+  if (!Number.isFinite(total)) return lines;
+  const sum = lines.reduce((s, l) => s + (Number(l.amount) || 0), 0);
+  const diff = r2(total - sum);
+  if (Math.abs(diff) < 0.01) return lines;
+  return lines.concat([{
+    name: diff > 0 ? "Other / manual charges" : "Discount / adjustment",
+    tablets: 1, unitPrice: diff, amount: diff, priceSource: "adjustment",
+  }]);
+}
+
 router.get("/invoice/:id", guard, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM prescriptions WHERE id=$1 AND hospital_id=$2", [req.params.id, req.hid]);
@@ -422,7 +680,7 @@ router.get("/invoice/:id", guard, async (req, res) => {
       invoiceNo: rx.bill_no == null ? "Bill pending" : "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
       patientId: rx.patient_id, patientName: rx.patient_name, doctorName: rx.doctor_name,
       issuedAt: rx.handed_over_at, paymentMode: rx.payment_mode || null,
-      lines: lines.map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
+      lines: withAdjustment(lines, rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
       total: rx.bill_amount == null ? null : Number(rx.bill_amount),
       status: rx.status === "handed_over" ? "Billed" : "Pending",
     });

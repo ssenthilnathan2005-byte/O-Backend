@@ -44,6 +44,7 @@ function clean(body) {
       dosage: str(i && i.dosage, 40),
       duration: str(i && i.duration, 40),
       instructions: str(i && i.instructions, 200),
+      form: ["tablet","syrup","drops","injection","ointment","spray","other"].includes(i && i.form) ? i.form : undefined,
     }))
     .filter(i => i.name).slice(0, 20);
   const age = v => (v === null || v === undefined || v === "" || isNaN(Number(v))) ? null : Math.max(0, Math.min(130, Math.round(Number(v))));
