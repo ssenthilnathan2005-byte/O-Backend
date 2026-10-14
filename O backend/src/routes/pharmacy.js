@@ -67,6 +67,12 @@ function suggestQty(item) {
   return Math.max(1, Math.ceil(perDose * times * days));
 }
 
+// Tablets and capsules are counted one by one. Every other medicine (syrup, drops, ointment, injection ...) is sold in whole packs.
+function isWholePack(row) {
+  const c = String((row && row.med_category) || '').trim();
+  return !!c && c !== 'Tablet' && c !== 'Capsule';
+}
+
 function requirePharmacyOrAdmin(req, res, next) {
   requireAuth(req, res, () => {
     if (req.user.role !== "pharmacy" && req.user.role !== "admin")
@@ -190,7 +196,7 @@ router.get("/stock", requirePharmacyOrAdmin, async (req, res) => {
     const hospitalId = req.user.role === "pharmacy" ? req.user.hospitalId : req.query.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
     const { rows } = await pool.query(
-      `SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price
+      `SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, med_category, pack_unit
          FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC`,
       [hospitalId]
     );
@@ -241,6 +247,10 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
         const row = inv.rows[0];
         const packSize = Number(row.pack_size) || 1;
         const units = Math.round((qty / packSize) * 1000) / 1000;
+        if (isWholePack(row) && qty % packSize !== 0) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: row.name + ' is dispensed in whole ' + (row.pack_unit || 'bottle') + 's only. Enter a whole number of ' + (row.pack_unit || 'bottle') + 's.' });
+        }
         if (Number(row.quantity) + 1e-6 < units) {
           await client.query("ROLLBACK");
           return res.status(409).json({ error: `Not enough stock for ${row.name}: available ${Math.floor(Number(row.quantity) * packSize)}, needed ${qty}` });
@@ -299,6 +309,10 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
         const row = inv.rows[0];
         const packSize = Number(row.pack_size) || 1;
         const back = line.tablets - given;
+        if (isWholePack(row) && back % packSize !== 0) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: row.name + ': return whole ' + (row.pack_unit || 'bottle') + 's only.' });
+        }
         const units = Math.round((back / packSize) * 1000) / 1000;
         const { returnToBatches } = require("../services/batches");
         await returnToBatches(client, row.id, back, line.batches);

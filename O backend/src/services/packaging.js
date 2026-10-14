@@ -15,7 +15,9 @@ const LOOSE_WORDS = new Set(["tablet", "tablets", "tab", "tabs", "capsule", "cap
 const PACK_WORDS = {
   strip: "strip", strips: "strip", sheet: "strip", sheets: "strip", blister: "strip", blisters: "strip",
   bottle: "bottle", bottles: "bottle", btl: "bottle", btls: "bottle",
-  vial: "vial", vials: "vial", ampoule: "vial", ampoules: "vial", amp: "vial",
+  vial: "vial", vials: "vial", ampoule: "ampoule", ampoules: "ampoule", amp: "ampoule",
+  cartridge: "cartridge", cartridges: "cartridge", spray: "spray", sprays: "spray",
+  pen: "pen", pens: "pen", syringe: "syringe", syringes: "syringe",
   tube: "tube", tubes: "tube",
   sachet: "sachet", sachets: "sachet",
   inhaler: "inhaler", inhalers: "inhaler",
@@ -27,10 +29,30 @@ const PACK_WORDS = {
 function normalizeUnit(raw) {
   const w = String(raw == null ? "" : raw).toLowerCase().replace(/[^a-z]/g, " ").trim().split(/\s+/)[0] || "";
   if (!w) return { kind: null, label: null };
-  if (BOX_WORDS.has(w)) return { kind: "box", label: null };
+  if (BOX_WORDS.has(w)) {
+    // "box of ampoules": the words after the box word say what is inside the box
+    const rest = String(raw).toLowerCase().replace(/[^a-z]/g, " ").trim().split(/\s+/).slice(1);
+    const inner = rest.find(t => PACK_WORDS[t] && !["no", "nos", "unit", "units"].includes(t));
+    return { kind: "box", label: null, packHint: inner ? PACK_WORDS[inner] : null };
+  }
   if (LOOSE_WORDS.has(w)) return { kind: "loose", label: null };
   if (PACK_WORDS[w]) return { kind: "pack", label: PACK_WORDS[w] };
   return { kind: "unknown", label: null, raw: String(raw).trim() };
+}
+
+// Pack word found in text such as "10 ampoules/box" or "Nasal Spray". First text with a match wins.
+const PACK_PATTERNS = [
+  ["ampoule", /\b(ampoules?|amps?)\b/], ["cartridge", /\bcartridges?\b/], ["vial", /\bvials?\b/],
+  ["inhaler", /\binhalers?\b/], ["spray", /\bsprays?\b/], ["sachet", /\bsachets?\b/],
+  ["syringe", /\bsyringes?\b/], ["pen", /\bpens?\b/], ["tube", /\btubes?\b/],
+  ["bottle", /\b(bottles?|btl)\b/], ["strip", /\b(strips?|blisters?)\b/],
+];
+function inferPackWord() {
+  for (const t of arguments) {
+    const x = String(t == null ? "" : t).toLowerCase();
+    for (const [w, re] of PACK_PATTERNS) if (re.test(x)) return w;
+  }
+  return null;
 }
 
 // Same words the Pharmacy Inventory screen uses for each category.
@@ -120,7 +142,7 @@ function evaluateRow(row, existing, today, opts) {
   }
 
   const labels = categoryLabels(cat);
-  const packWord = unit.label || (existing && existing.pack_unit) || labels.pack;
+  const packWord = unit.label || (existing && existing.pack_unit) || unit.packHint || inferPackWord(row.name) || labels.pack;
 
   // A new tablet/capsule medicine must say how many tablets are in a strip, otherwise
   // setting it later would rescale live stock.
@@ -199,4 +221,4 @@ function evaluateRow(row, existing, today, opts) {
   };
 }
 
-module.exports = { normalizeUnit, categoryLabels, convertReceipt, pricePerPack, evaluateRow, exactKey, looseKey };
+module.exports = { inferPackWord, normalizeUnit, categoryLabels, convertReceipt, pricePerPack, evaluateRow, exactKey, looseKey };

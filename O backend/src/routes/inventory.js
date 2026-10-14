@@ -65,6 +65,7 @@ router.post("/", requireAuth, adminOnly, async (req, res) => {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { name, category, unit, quantity, minQuantity, purchasePrice, supplier, location, notes, packSize } = req.body;
     if (!name) return res.status(400).json({ error: "name required" });
+    if (String(category || "").toLowerCase() === "medicines") return res.status(409).json({ error: "Medicine stock is managed in Pharmacy Inventory. Add medicines there." });
     const id = `inv_${nanoid(10)}`;
     const { rows } = await pool.query(
       `INSERT INTO inventory_items
@@ -86,6 +87,12 @@ router.post("/", requireAuth, adminOnly, async (req, res) => {
 // sets pack_size (tablets per unit) before the main PATCH handler runs
 router.patch("/:id", requireAuth, adminOnly, async (req, res, next) => {
   try {
+    {
+      const hid0 = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
+      const cur0 = await pool.query("SELECT category FROM inventory_items WHERE id=$1 AND hospital_id=$2", [req.params.id, hid0]);
+      if ((cur0.rows.length && cur0.rows[0].category === "medicines") || String(req.body.category || "").toLowerCase() === "medicines")
+        return res.status(409).json({ error: "Medicine stock is managed in Pharmacy Inventory." });
+    }
     if (req.body.packSize !== undefined) {
       const hid = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
       await pool.query("UPDATE inventory_items SET pack_size=$1 WHERE id=$2 AND hospital_id=$3",
@@ -120,6 +127,9 @@ router.post("/:id/transaction", requireAuth, adminOnly, async (req, res) => {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { type, quantity, reason } = req.body;
     if (!type || !quantity) return res.status(400).json({ error: "type and quantity required" });
+    const chk0 = await pool.query("SELECT category FROM inventory_items WHERE id=$1 AND hospital_id=$2", [req.params.id, hospitalId]);
+    if (chk0.rows.length && chk0.rows[0].category === "medicines")
+      return res.status(409).json({ error: "Medicine stock is managed in Pharmacy Inventory. Use Receive stock or Correct count there." });
     const delta = type === "in" ? Math.abs(quantity) : -Math.abs(quantity);
     const { rows } = await pool.query(
       `UPDATE inventory_items SET quantity=quantity+$1, updated_at=now()

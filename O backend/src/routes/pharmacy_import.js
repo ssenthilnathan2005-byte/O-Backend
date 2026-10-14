@@ -6,7 +6,8 @@ const { requireAuth } = require("../middleware/auth");
 const { broadcast } = require("../services/ws");
 const { randomBytes } = require("crypto");
 const { ready: batchesReady, addBatch } = require("../services/batches");
-const { parseSpreadsheet, STD_CATEGORIES } = require("../services/importParser");
+const { STD_CATEGORIES } = require("../services/importParser");
+const { parseImport } = require("../services/universalImport");
 const { evaluateRow, categoryLabels, exactKey, looseKey } = require("../services/packaging");
 const router = express.Router();
 
@@ -41,7 +42,7 @@ router.post("/parse", guard, (req, res) => {
     const fname = String(req.file.originalname || "").toLowerCase();
     try {
       if (/\.(xlsx|xls|csv)$/.test(fname)) {
-        const out = parseSpreadsheet(req.file.buffer);
+        const out = parseImport(req.file.buffer, req.file.originalname);
         if (!out.rows.length) return res.status(422).json({ error: "No medicine rows were found in the file" });
         return res.json({ fileName: req.file.originalname, ...out });
       }
