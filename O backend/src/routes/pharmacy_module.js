@@ -567,13 +567,24 @@ router.get("/stock-pending", guard, async (req, res) => {
       [req.hid, day, day]);
     const agg = {};
     const pending = [];
+    const invRows = (await pool.query("SELECT name, pack_size, med_category FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL", [req.hid])).rows;
+    const matchPackItem = nm => {
+      const n = String(nm || '').toLowerCase().replace(/\s+/g, ' ').trim();
+      const base = n.replace(/\s*\d+(\.\d+)?\s*(mg|ml|g|mcg)\b.*$/, '').trim();
+      return invRows.find(i => String(i.name).toLowerCase().trim() === n) || invRows.find(i => { const m = String(i.name).toLowerCase().trim(); return base.length > 2 && (m.includes(base) || base.includes(m)); }) || null;
+    };
     for (const r of rows) {
       const dispensed = parse(r.dispensed_items);
       const doneIdx = new Set(dispensed.filter(l => l.index !== undefined && l.index !== null).map(l => Number(l.index)));
       const doneNames = new Set(dispensed.map(l => String(l.name || "").toLowerCase()));
       parse(r.items).forEach((it, idx) => {
         const name = it.name || "Unknown";
-        const tablets = suggestQtyLocal(it);
+        let tablets = suggestQtyLocal(it);
+        const mi = matchPackItem(name);
+        if (mi && mi.med_category && mi.med_category !== 'Tablet' && mi.med_category !== 'Capsule') {
+          const packsQty = Number(it.quantity) > 0 ? Math.max(1, Math.round(Number(it.quantity))) : 1;
+          tablets = packsQty * (Number(mi.pack_size) || 1);
+        }
         const done = doneIdx.has(idx) || doneNames.has(name.toLowerCase());
         const a = agg[name] || (agg[name] = { name, soldTablets: 0, deductedTablets: 0, pendingTablets: 0, pendingLines: 0 });
         a.soldTablets += tablets;
@@ -628,6 +639,11 @@ router.post("/stock-deduct", guard, async (req, res) => {
     const row = inv.rows[0];
     const pack = Number(row.pack_size) || 1;
     const units = Math.round((qty / pack) * 1000) / 1000;
+    const mcat = String(row.med_category || '').trim();
+    if (mcat && mcat !== 'Tablet' && mcat !== 'Capsule' && qty % pack !== 0) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: row.name + ' is sold in whole ' + (row.pack_unit || 'bottle') + 's only.' });
+    }
     if (Number(row.quantity) + 1e-6 < units) {
       await client.query("ROLLBACK");
       return res.status(409).json({ error: "Not enough stock for " + row.name + ": available " + Math.floor(Number(row.quantity) * pack) + ", needed " + qty });
