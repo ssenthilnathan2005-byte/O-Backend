@@ -1,4 +1,4 @@
-﻿"use strict";
+"use strict";
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
@@ -29,21 +29,26 @@ pool.query(`
 
 async function hospitalOf(user) {
   if (user.hospitalId) return user.hospitalId;
-  if (user.role === "doctor") {
-    const { rows } = await pool.query("SELECT hospital_id FROM doctors WHERE id=$1", [user.id]);
+  if (user.role === "doctor" && user.doctorId) {
+    const { rows } = await pool.query("SELECT hospital_id FROM doctors WHERE id=$1", [user.doctorId]);
     return rows[0] ? rows[0].hospital_id : null;
   }
   return null;
 }
 
+const _permCache = new Map();
 async function loadRole(hospitalId, role) {
+  const key = hospitalId + ":" + role;
+  const hit = _permCache.get(key);
+  if (hit && Date.now() - hit.t < 15000) return hit.mods;
   const { rows } = await pool.query(
     "SELECT modules FROM hospital_role_permissions WHERE hospital_id=$1 AND role=$2",
     [hospitalId, role]);
-  return rows[0] ? rows[0].modules : (DEFAULTS[role] || []);
+  const mods = rows[0] ? rows[0].modules : (DEFAULTS[role] || []);
+  _permCache.set(key, { mods, t: Date.now() });
+  return mods;
 }
 
-// Admin: all roles for own hospital
 router.get("/", requireAuth, async (req, res) => {
   try {
     if (req.user.role !== "hospital_admin" && req.user.role !== "admin")
@@ -56,7 +61,6 @@ router.get("/", requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Admin: save one role
 router.put("/:role", requireAuth, async (req, res) => {
   try {
     if (req.user.role !== "hospital_admin" && req.user.role !== "admin")
@@ -71,11 +75,11 @@ router.put("/:role", requireAuth, async (req, res) => {
        VALUES ($1,$2,$3,now())
        ON CONFLICT (hospital_id, role) DO UPDATE SET modules=$3, updated_at=now()`,
       [hospitalId, role, JSON.stringify(mods)]);
+    _permCache.delete(hospitalId + ":" + role);
     res.json({ role, modules: mods });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Any staff login: my own permissions
 router.get("/me", requireAuth, async (req, res) => {
   try {
     const role = req.user.role;
@@ -88,19 +92,37 @@ router.get("/me", requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// Reusable guard for sensitive routes: router.get("/x", requirePerm("revenue"), ...)
-function requirePerm(key) {
+function requireAnyPerm(...keys) {
   return async (req, res, next) => {
     try {
       const role = req.user && req.user.role;
       if (role === "hospital_admin" || role === "admin") return next();
+      if (!ROLES.includes(role)) return res.status(403).json({ error: "Forbidden" });
       const hospitalId = await hospitalOf(req.user);
-      const mods = hospitalId ? await loadRole(hospitalId, role) : (DEFAULTS[role] || []);
-      if (mods.includes(key)) return next();
+      if (!hospitalId) return res.status(403).json({ error: "Forbidden" });
+      if (!req.user.hospitalId) req.user.hospitalId = hospitalId;
+      const mods = await loadRole(hospitalId, role);
+      if (keys.some(k => mods.includes(k))) return next();
       return res.status(403).json({ error: "Not allowed by your hospital admin" });
     } catch (e) { return res.status(500).json({ error: e.message }); }
   };
 }
+function requirePerm(key) { return requireAnyPerm(key); }
+
+async function hasAnyPerm(req, keys) {
+  try {
+    const role = req.user && req.user.role;
+    if (role === "hospital_admin" || role === "admin") return true;
+    if (!ROLES.includes(role)) return false;
+    const hospitalId = await hospitalOf(req.user);
+    if (!hospitalId) return false;
+    if (!req.user.hospitalId) req.user.hospitalId = hospitalId;
+    const mods = await loadRole(hospitalId, role);
+    return keys.some(k => mods.includes(k));
+  } catch (e) { return false; }
+}
 
 module.exports = router;
 module.exports.requirePerm = requirePerm;
+module.exports.requireAnyPerm = requireAnyPerm;
+module.exports.hasAnyPerm = hasAnyPerm;

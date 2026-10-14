@@ -2,6 +2,7 @@
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
+const { requirePerm, requireAnyPerm } = require("./permissions");
 const { randomBytes } = require("crypto");
 function nanoid(n=10) { return randomBytes(n).toString("hex").slice(0,n); }
 const router = express.Router();
@@ -121,7 +122,7 @@ function cleanOcrScan(o) {
   };
 }
 
-router.get("/vitals", requireAuth, staffOrAdmin, async (req, res) => {
+router.get("/vitals", requireAuth, requireAnyPerm("vitals", "beds_wards"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     const { patientName, patientId } = req.query;
@@ -158,7 +159,7 @@ function checkVitalRanges(b) {
   return null;
 }
 
-router.post("/vitals", requireAuth, staffOrAdmin, async (req, res) => {
+router.post("/vitals", requireAuth, requireAnyPerm("vitals", "beds_wards"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { patientName, patientId, bedId, wardId, temperature, pulse, bpSystolic, bpDiastolic, spo2, respRate, weight, bloodGlucose, recordedBy } = req.body;
@@ -207,7 +208,7 @@ router.delete("/vitals/:id", requireAuth, adminOnly, async (req, res) => {
 });
 
 // ── Notes ─────────────────────────────────────────────────────────────────────
-router.get("/notes", requireAuth, staffOrAdmin, async (req, res) => {
+router.get("/notes", requireAuth, requireAnyPerm("vitals", "beds_wards"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     const { patientName, patientId } = req.query;
@@ -221,7 +222,7 @@ router.get("/notes", requireAuth, staffOrAdmin, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post("/notes", requireAuth, staffOrAdmin, async (req, res) => {
+router.post("/notes", requireAuth, requireAnyPerm("vitals", "beds_wards"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { patientName, patientId, bedId, wardId, note, shift, recordedBy } = req.body;

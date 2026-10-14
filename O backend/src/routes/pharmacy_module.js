@@ -2,6 +2,7 @@
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
+const { hasAnyPerm } = require("./permissions");
 const { broadcast } = require("../services/ws");
 const { randomBytes } = require("crypto");
 const { ready: batchesReady, takeFromBatches, addBatch } = require("../services/batches");
@@ -57,9 +58,9 @@ async function getRange(req) {
   return [from, to];
 }
 
-function scope(req, res, next) {
+async function scope(req, res, next) {
   const role = req.user.role;
-  if (role !== "pharmacy" && role !== "hospital_admin" && role !== "admin")
+  if (role !== "pharmacy" && role !== "hospital_admin" && role !== "admin" && !(await hasAnyPerm(req, ["pharmacy"])))
     return res.status(403).json({ error: "Forbidden" });
   const hid = role === "admin" ? req.query.hospitalId : req.user.hospitalId;
   if (!hid) return res.status(400).json({ error: "hospitalId required" });

@@ -5,12 +5,13 @@ const path    = require("path");
 const fs      = require("fs");
 const XLSX    = require("xlsx");
 const { pool } = require("../db/init");
-const { requireAdminOrHospitalAdmin } = require("../middleware/auth");
+const { requireAdminOrHospitalAdmin, requireAuth } = require("../middleware/auth");
+const { requireAnyPerm } = require("./permissions");
 
 const router = express.Router();
 
 function resolveHospitalId(req) {
-  if (req.user.role === "hospital_admin") return req.user.hospitalId;
+  if (req.user.role !== "admin") return req.user.hospitalId;
   return req.query.hospitalId || req.body.hospitalId || null;
 }
 
@@ -26,7 +27,7 @@ function row2booking(r) {
   };
 }
 
-router.get("/patients", requireAdminOrHospitalAdmin, async (req, res) => {
+router.get("/patients", requireAuth, requireAnyPerm("all_patients", "live_patients", "billing"), async (req, res) => {
   try {
     const hospitalId = resolveHospitalId(req);
     if (!hospitalId) return res.status(400).json({ error: "hospitalId is required" });
@@ -45,7 +46,7 @@ router.get("/patients", requireAdminOrHospitalAdmin, async (req, res) => {
   }
 });
 
-router.get("/bookings", requireAdminOrHospitalAdmin, async (req, res) => {
+router.get("/bookings", requireAuth, requireAnyPerm("all_patients", "live_patients", "billing"), async (req, res) => {
   try {
     const hospitalId = resolveHospitalId(req);
     if (!hospitalId) return res.status(400).json({ error: "hospitalId is required" });

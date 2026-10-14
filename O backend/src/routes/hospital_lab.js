@@ -2,6 +2,7 @@
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
+const { requirePerm, requireAnyPerm } = require("./permissions");
 const { randomBytes } = require("crypto");
 function nanoid(n=10) { return randomBytes(n).toString("hex").slice(0,n); }
 const router = express.Router();
@@ -49,7 +50,7 @@ pool.query(`
 `).catch(e => console.warn("[hospital_lab] migration:", e.message));
 
 // ── Tests CRUD ────────────────────────────────────────────────────────────────
-router.get("/tests", requireAuth, adminOnly, async (req, res) => {
+router.get("/tests", requireAuth, requireAnyPerm("lab", "billing"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     const { rows } = await pool.query(
@@ -81,7 +82,7 @@ router.delete("/tests/:id", requireAuth, adminOnly, async (req, res) => {
 });
 
 // ── Orders ────────────────────────────────────────────────────────────────────
-router.get("/orders", requireAuth, adminOnly, async (req, res) => {
+router.get("/orders", requireAuth, requireAnyPerm("lab", "billing"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     const { status } = req.query;
@@ -93,7 +94,7 @@ router.get("/orders", requireAuth, adminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post("/orders", requireAuth, adminOnly, async (req, res) => {
+router.post("/orders", requireAuth, requirePerm("lab"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { patientName, patientId, doctorId, doctorName, bookingId, testId, testName, priority, notes } = req.body;

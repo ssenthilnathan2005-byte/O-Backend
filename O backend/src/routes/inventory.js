@@ -2,6 +2,7 @@
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
+const { requirePerm, requireAnyPerm } = require("./permissions");
 const { randomBytes } = require("crypto");
 const ExcelJS = require("exceljs");
 function nanoid(n=10) { return randomBytes(n).toString("hex").slice(0,n); }
@@ -46,7 +47,7 @@ pool.query(`
 .catch(e => console.warn("[inventory] migration:", e.message));
 
 // GET /inventory
-router.get("/", requireAuth, adminOnly, async (req, res) => {
+router.get("/", requireAuth, requirePerm("inventory"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
@@ -216,7 +217,7 @@ router.get("/export", requireAuth, adminOnly, async (req, res) => {
 });
 
 // GET /inventory/:id/transactions — stock history for one item
-router.get("/:id/transactions", requireAuth, adminOnly, async (req, res) => {
+router.get("/:id/transactions", requireAuth, requirePerm("inventory"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });

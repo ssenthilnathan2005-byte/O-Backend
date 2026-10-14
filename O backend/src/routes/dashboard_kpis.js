@@ -2,6 +2,7 @@
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
+const { requirePerm, requireAnyPerm } = require("./permissions");
 const router = express.Router();
 
 function adminOnly(req, res, next) {
@@ -51,7 +52,7 @@ const LAB_TAT_SQL =
   "WHERE hospital_id = $1 AND status = 'report_ready' " +
   "AND (ordered_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $2::date AND $3::date";
 
-router.get("/kpis", requireAuth, adminOnly, async (req, res) => {
+router.get("/kpis", requireAuth, requirePerm("revenue"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });

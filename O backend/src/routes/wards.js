@@ -2,6 +2,7 @@
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
+const { requirePerm, requireAnyPerm } = require("./permissions");
 const { randomBytes } = require("crypto");
 function nanoid(n=10) { return randomBytes(n).toString("hex").slice(0,n); }
 const router = express.Router();
@@ -136,7 +137,7 @@ router.put("/cleaning-settings", requireAuth, adminOnly, async (req, res) => {
 });
 
 // GET /wards — list wards with bed counts
-router.get("/", requireAuth, staffOrAdmin, async (req, res) => {
+router.get("/", requireAuth, requirePerm("beds_wards"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
@@ -201,7 +202,7 @@ router.patch("/:wardId/cleaning-time", requireAuth, adminOnly, async (req, res) 
 });
 
 // GET /wards/:wardId/beds
-router.get("/:wardId/beds", requireAuth, staffOrAdmin, async (req, res) => {
+router.get("/:wardId/beds", requireAuth, requirePerm("beds_wards"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     await releaseExpired(pool, hospitalId);
@@ -234,7 +235,7 @@ router.get("/:wardId/beds", requireAuth, staffOrAdmin, async (req, res) => {
 
 // PATCH /wards/:wardId/beds/:bedId/cleaning-time — individual bed override { minutes } (null = follow ward/hospital default)
 // Applies from the next discharge; it does not change a cleaning timer that is already running.
-router.patch("/:wardId/beds/:bedId/cleaning-time", requireAuth, staffOrAdmin, async (req, res) => {
+router.patch("/:wardId/beds/:bedId/cleaning-time", requireAuth, requirePerm("beds_wards"), async (req, res) => {
   try {
     const hospitalId = hospitalIdOf(req);
     let minutes = null;
@@ -253,7 +254,7 @@ router.patch("/:wardId/beds/:bedId/cleaning-time", requireAuth, staffOrAdmin, as
 });
 
 // POST /wards/:wardId/beds/:bedId/occupy — admit a patient into this bed
-router.post("/:wardId/beds/:bedId/occupy", requireAuth, staffOrAdmin, async (req, res) => {
+router.post("/:wardId/beds/:bedId/occupy", requireAuth, requirePerm("beds_wards"), async (req, res) => {
   const client = await pool.connect();
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
@@ -309,7 +310,7 @@ router.post("/:wardId/beds/:bedId/occupy", requireAuth, staffOrAdmin, async (req
 });
 
 // PATCH /wards/:wardId/beds/:bedId/vacate — discharge patient, bed goes Occupied -> Cleaning and the timer starts
-router.patch("/:wardId/beds/:bedId/vacate", requireAuth, staffOrAdmin, async (req, res) => {
+router.patch("/:wardId/beds/:bedId/vacate", requireAuth, requirePerm("beds_wards"), async (req, res) => {
   const client = await pool.connect();
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
@@ -352,7 +353,7 @@ router.patch("/:wardId/beds/:bedId/vacate", requireAuth, staffOrAdmin, async (re
 });
 
 // PATCH /wards/:wardId/beds/:bedId/ready — cleaning completed early: Cleaning -> Available, timer stops
-router.patch("/:wardId/beds/:bedId/ready", requireAuth, staffOrAdmin, async (req, res) => {
+router.patch("/:wardId/beds/:bedId/ready", requireAuth, requirePerm("beds_wards"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { rows } = await pool.query(
@@ -368,7 +369,7 @@ router.patch("/:wardId/beds/:bedId/ready", requireAuth, staffOrAdmin, async (req
 });
 
 // PATCH /wards/:wardId/beds/:bedId/extend — add more cleaning time { minutes }; bed stays in Cleaning
-router.patch("/:wardId/beds/:bedId/extend", requireAuth, staffOrAdmin, async (req, res) => {
+router.patch("/:wardId/beds/:bedId/extend", requireAuth, requirePerm("beds_wards"), async (req, res) => {
   try {
     const hospitalId = hospitalIdOf(req);
     const minutes = parseMinutes(req.body.minutes);
@@ -472,7 +473,7 @@ router.patch("/:wardId", requireAuth, adminOnly, async (req, res) => {
 });
 
 // POST /wards/:wardId/beds — add a bed { bedNumber? } (auto-numbered when omitted)
-router.post("/:wardId/beds", requireAuth, staffOrAdmin, async (req, res) => {
+router.post("/:wardId/beds", requireAuth, requirePerm("beds_wards"), async (req, res) => {
   const client = await pool.connect();
   try {
     const hospitalId = hospitalIdOf(req);
@@ -531,7 +532,7 @@ router.post("/:wardId/beds", requireAuth, staffOrAdmin, async (req, res) => {
 });
 
 // PATCH /wards/:wardId/beds/:bedId — edit bed { bedNumber }
-router.patch("/:wardId/beds/:bedId", requireAuth, staffOrAdmin, async (req, res) => {
+router.patch("/:wardId/beds/:bedId", requireAuth, requirePerm("beds_wards"), async (req, res) => {
   const client = await pool.connect();
   try {
     const hospitalId = hospitalIdOf(req);
@@ -579,7 +580,7 @@ router.patch("/:wardId/beds/:bedId", requireAuth, staffOrAdmin, async (req, res)
 });
 
 // DELETE /wards/:wardId/beds/:bedId — remove a bed (blocked while occupied)
-router.delete("/:wardId/beds/:bedId", requireAuth, staffOrAdmin, async (req, res) => {
+router.delete("/:wardId/beds/:bedId", requireAuth, requirePerm("beds_wards"), async (req, res) => {
   const client = await pool.connect();
   try {
     const hospitalId = hospitalIdOf(req);
