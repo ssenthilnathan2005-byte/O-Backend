@@ -127,8 +127,7 @@ router.get("/my", requireAuth, async (req, res) => {
   try {
     const patientId = req.user.id;
     const { rows } = await pool.query(
-      `SELECT * FROM prescriptions WHERE patient_id=$1 
-       AND created_at > NOW() - INTERVAL '6 days'
+      `SELECT * FROM prescriptions WHERE patient_id=$1
        ORDER BY created_at DESC`,
       [patientId]
     );

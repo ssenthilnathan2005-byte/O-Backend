@@ -97,7 +97,7 @@ router.get("/", requireAuth, async (req, res) => {
       ));
     } else {
       ({ rows } = await pool.query(
-        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE patient_id=$1 AND archived = FALSE ORDER BY created_at DESC",
+        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE patient_id=$1 ORDER BY created_at DESC",
         [req.user.id]
       ));
     }
