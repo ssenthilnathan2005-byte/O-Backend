@@ -3,6 +3,7 @@
 // so packaging.evaluateRow and the review screen need no changes. Falls back to the old parser.
 const XLSX = require("xlsx");
 const legacy = require("./importParser");
+const packaging = require("./packaging");
 
 const str = v => (v == null ? "" : String(v).trim());
 const norm = h => str(h).toLowerCase().replace(/[^a-z0-9% ]+/g, " ").replace(/\s+/g, " ").trim();
@@ -114,6 +115,23 @@ const FIELDS = [
 const IGNORE = /amount|amt|discount|disc\b|value|code|hsn|sr ?no|s ?no|sl ?no|serial|mfg|manufactur|mfr|company|\bfree\b|bonus|scheme/;
 const CONTAINER_STRENGTH = /^\d+(\.\d+)?\s*(ml|g|gm|l)\s*(ampoule|sachet|cartridge|tube|bottle|vial|spray|inhaler)s?$|^\d+\s*(actuations?|doses?|puffs?)$/i;
 const SIZE_CATS = ["Syrup/Tonic", "Ointment/Cream", "Drops", "Oil"];
+// Vendor categories we don't know ("Spray/Inhaler", "Other") are folded into the nearest standard one.
+function stdCategory(cat, name) {
+  if (!cat) return cat;
+  if (legacy.STD_CATEGORIES.includes(cat)) return cat;
+  const pick = t => {
+    if (/inhal|spray|nebul|device|kit/.test(t)) return "Others";
+    if (/ampoule|cartridge|vial|syringe|\bpen\b|inject/.test(t)) return "Injection";
+    if (/powder|granule/.test(t)) return "Powder";
+    if (/cream|ointment|gel|lotion|paste/.test(t)) return "Ointment/Cream";
+    if (/drop/.test(t)) return "Drops";
+    if (/syrup|suspension|solution|liquid|tonic/.test(t)) return "Syrup/Tonic";
+    if (/capsule/.test(t)) return "Capsule";
+    if (/tablet|lozenge/.test(t)) return "Tablet";
+    return null;
+  };
+  return pick(cat.toLowerCase()) || pick(String(name).toLowerCase()) || "Others";
+}
 const TOTAL_RE = /^(sub ?total|grand total|total|net|tax|gst|discount|round|igst|cgst|sgst)\b/i;
 
 function mapHeader(cells) {
@@ -200,7 +218,8 @@ function parseSheet(aoa, sheetName) {
     if (!name || TOTAL_RE.test(name)) continue;
     const warnings = [];
 
-    let strength = legacy.cleanStrength(str(g("strength")));
+    const strengthRaw = str(g("strength"));
+    let strength = legacy.cleanStrength(strengthRaw);
     // "2 ml ampoule", "200 doses" describe the pack, not the drug strength: keep them out of the name
     if (CONTAINER_STRENGTH.test(strength)) strength = "";
     if (strength && !name.toLowerCase().replace(/\s/g, "").includes(strength.toLowerCase().replace(/\s/g, ""))) name += " " + strength;
@@ -216,8 +235,7 @@ function parseSheet(aoa, sheetName) {
     const q = splitQty(g("quantity"));
     const unit = canonUnit(g("quantityUnit")) || q.unit || hintUnit || null;
 
-    let medCategory = legacy.normalizeCategory(g("category"), name);
-    if (medCategory === "Other") medCategory = "Others";
+    const medCategory = stdCategory(legacy.normalizeCategory(g("category"), name), name);
     const measureOK = SIZE_CATS.includes(medCategory);
 
     // pack info: explicit columns > pack column text > name text
@@ -227,6 +245,11 @@ function parseSheet(aoa, sheetName) {
     let spb = lastNumber(g("stripsPerBox")) || fromCol.spb || fromName.spb || null;
     tps = tps && tps > 0 ? tps : null;
     spb = spb && spb > 0 ? Math.round(spb) : null;
+
+    // What is inside the box ("10 ampoules/box", "Insulin Cartridges"): sent as "box of ampoules" so the
+    // review screen and the server keep it without any extra field.
+    const packWord = packaging.inferPackWord(g("packSize"), name, strengthRaw);
+    const outUnit = unit === "box" && packWord ? "box of " + packWord + "s" : unit;
 
     const conv = (field, unitField) => {
       const v = num(g(field));
@@ -242,7 +265,7 @@ function parseSheet(aoa, sheetName) {
       name, strength,
       medCategory,
       quantity: q.qty,
-      quantityUnit: unit,
+      quantityUnit: outUnit,
       tabletsPerStrip: tps,
       stripsPerBox: spb,
       invoiceNo: str(g("invoiceNo")) || null,
