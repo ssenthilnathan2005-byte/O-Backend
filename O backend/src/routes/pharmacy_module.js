@@ -367,6 +367,19 @@ router.post("/inventory/:id/stock", guard, async (req, res) => {
   } finally { client.release(); }
 });
 
+// Stock history for one medicine (read-only)
+router.get("/inventory/:id/history", guard, async (req, res) => {
+  try {
+    const own = await pool.query(
+      "SELECT id FROM inventory_items WHERE id=$1 AND hospital_id=$2 AND category='medicines'",
+      [req.params.id, req.hid]);
+    if (!own.rows.length) return res.status(404).json({ error: "Item not found" });
+    const { rows } = await pool.query(
+      "SELECT id, type, quantity, reason, created_by, created_at FROM inventory_transactions WHERE item_id=$1 AND hospital_id=$2 ORDER BY created_at DESC LIMIT 200",
+      [req.params.id, req.hid]);
+    res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 const SCHEDULES = ["none", "H", "H1", "X"];
 function breakdownOf(tablets, pack, spb) {
   const t = Math.max(0, Math.round(Number(tablets) || 0));
