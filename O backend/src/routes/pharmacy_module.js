@@ -721,6 +721,7 @@ router.get("/invoice/:id", guard, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+<<<<<<< HEAD
 // GET /pharmacy-module/my-invoice/:id - the patient's own pharmacy bill (read only).
 // Only for the patient's own prescription, and only once the pharmacy has marked it given and billed it.
 const { requireAuth: __patientAuth } = require("../middleware/auth");
@@ -847,4 +848,6 @@ router.get("/gst-report", guard, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+=======
+>>>>>>> parent of 3536344 (Pharmacy: GST report route and GST profile for GST Invoice)
 module.exports = router;
