@@ -8,6 +8,7 @@ const { randomBytes } = require("crypto");
 const { ready: batchesReady, addBatch } = require("../services/batches");
 const { STD_CATEGORIES } = require("../services/importParser");
 const { parseImport } = require("../services/universalImport");
+const { parsePdfImport } = require("../services/pdfImport");
 const { evaluateRow, categoryLabels, exactKey, looseKey } = require("../services/packaging");
 const router = express.Router();
 
@@ -46,7 +47,12 @@ router.post("/parse", guard, (req, res) => {
         if (!out.rows.length) return res.status(422).json({ error: "No medicine rows were found in the file" });
         return res.json({ fileName: req.file.originalname, ...out });
       }
-      if (/\.(pdf|jpg|jpeg|png)$/.test(fname)) return res.status(501).json({ error: "PDF and image import is coming in the next update. Please upload Excel or CSV for now." });
+      if (/\.pdf$/.test(fname)) {
+        const out = await parsePdfImport(req.file.buffer);
+        if (!out.rows.length) return res.status(422).json({ error: "No medicine rows were found in the PDF" });
+        return res.json({ fileName: req.file.originalname, ...out });
+      }
+      if (/\.(jpg|jpeg|png)$/.test(fname)) return res.status(501).json({ error: "Photo (JPG/PNG) import needs OCR and is not available yet. Please upload the PDF, Excel or CSV version." });
       return res.status(415).json({ error: "Upload a PDF, JPG, PNG, Excel or CSV file" });
     } catch (e) {
       res.status(422).json({ error: e.message });
