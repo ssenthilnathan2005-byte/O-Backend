@@ -16,6 +16,7 @@ const MODES = ["cash", "upi", "card", "bank", "insurance", "other"];
 pool.query(`
   ALTER TABLE inward_patients ADD COLUMN IF NOT EXISTS bed_rate NUMERIC(10,2);
   ALTER TABLE inward_patients ADD COLUMN IF NOT EXISTS bill_discount NUMERIC(10,2) NOT NULL DEFAULT 0;
+  ALTER TABLE inward_patients ADD COLUMN IF NOT EXISTS invoice_no TEXT;
   CREATE TABLE IF NOT EXISTS ipd_bill_items (
     id          TEXT PRIMARY KEY,
     inward_id   TEXT NOT NULL,
@@ -67,6 +68,18 @@ async function buildBill(db, stay) {
     if (rate > 0) await db.query("UPDATE inward_patients SET bed_rate=$1 WHERE id=$2", [rate, stay.id]);
   }
   rate = num(rate);
+  let invoiceNo = stay.invoice_no || null;
+  if (!invoiceNo && stay.status === "discharged") {
+    const d = new Date(stay.discharged_at || Date.now()).toLocaleDateString("en-CA", { timeZone: "Asia/Kolkata" }).replace(/-/g, "");
+    invoiceNo = "IPD-" + d + "-" + randomBytes(2).toString("hex").toUpperCase();
+    const up = await db.query(
+      "UPDATE inward_patients SET invoice_no=$1 WHERE id=$2 AND invoice_no IS NULL RETURNING invoice_no", [invoiceNo, stay.id]);
+    if (!up.rows.length) {
+      const cur = await db.query("SELECT invoice_no FROM inward_patients WHERE id=$1", [stay.id]);
+      invoiceNo = cur.rows[0] && cur.rows[0].invoice_no;
+    }
+  }
+  const { rows: hosp } = await db.query("SELECT name, address, phone FROM hospitals WHERE id=$1", [stay.hospital_id]);
   const { rows: items } = await db.query(
     "SELECT * FROM ipd_bill_items WHERE inward_id=$1 ORDER BY created_at ASC", [stay.id]);
   const { rows: pays } = await db.query(
@@ -80,6 +93,7 @@ async function buildBill(db, stay) {
   return {
     inwardId: stay.id, hospitalId: stay.hospital_id, patientName: stay.patient_name, phone: stay.phone,
     ward: stay.ward, bedNumber: stay.bed_number, doctor: stay.admitting_doctor_name,
+    invoiceNo, hospitalName: hosp[0]?.name || null, hospitalAddress: hosp[0]?.address || null, hospitalPhone: hosp[0]?.phone || null,
     status: stay.status, admittedAt: stay.admitted_at, dischargedAt: stay.discharged_at,
     days: stay.days, bedRate: rate, bedCharge,
     items: items.map((i) => ({ ...i, qty: num(i.qty), unit_price: num(i.unit_price), amount: num(i.amount) })),
@@ -87,6 +101,24 @@ async function buildBill(db, stay) {
     itemsTotal, subtotal, discount, total, paid, balance: money(total - paid),
   };
 }
+
+// GET /ipd-billing/my/:inwardId — the patient's own bill (read only)
+router.get("/my/:inwardId", requireAuth, async (req, res) => {
+  if (req.user.role !== "patient") return res.status(403).json({ error: "Forbidden" });
+  try {
+    const { rows: u } = await pool.query("SELECT phone FROM users WHERE id=$1", [req.user.id]);
+    const last10 = String((u[0] && u[0].phone) || req.user.phone || "").replace(/\D/g, "").slice(-10);
+    const { rows } = await pool.query(
+      `SELECT id, hospital_id FROM inward_patients
+        WHERE id=$1 AND (patient_user_id=$2
+           OR ($3::text <> '' AND right(regexp_replace(COALESCE(phone,''), '\\D', '', 'g'), 10) = $3))`,
+      [req.params.inwardId, req.user.id, last10]);
+    if (!rows.length) return res.status(404).json({ error: "Bill not found" });
+    const stay = await loadStay(pool, rows[0].id, rows[0].hospital_id);
+    res.set("Cache-Control", "no-store");
+    res.json(await buildBill(pool, stay));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 
 // GET /ipd-billing — admissions with running totals (current first)
 router.get("/", requireAuth, staff, async (req, res) => {
