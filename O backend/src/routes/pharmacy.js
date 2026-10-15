@@ -43,6 +43,8 @@ async function billNoMigration() {
     throw e;
   } finally { c.release(); }
 }
+pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS bill_subtotal NUMERIC, ADD COLUMN IF NOT EXISTS gst_enabled BOOLEAN, ADD COLUMN IF NOT EXISTS cgst_pct NUMERIC, ADD COLUMN IF NOT EXISTS sgst_pct NUMERIC, ADD COLUMN IF NOT EXISTS discount_pct NUMERIC, ADD COLUMN IF NOT EXISTS discount_amount NUMERIC, ADD COLUMN IF NOT EXISTS cgst_amount NUMERIC, ADD COLUMN IF NOT EXISTS sgst_amount NUMERIC")
+  .catch(err => console.warn("[pharmacy] gst/discount migration:", err.message));
 const billReady = billNoMigration();
 billReady.catch(err => console.warn("[pharmacy] bill number migration:", err.message));
 
@@ -354,7 +356,33 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
     }
     if (status === "handed_over" && dispensedJson) { vals.push(dispensedJson); setClause += `, dispensed_items=$${vals.length}`; }
     if (status === "handed_over") {
-      vals.push(billAmount); setClause += `, bill_amount=$${vals.length}`;
+      {
+  const r2c = n => Math.round(n * 100) / 100;
+  const pctOf = v => (v === undefined || v === null || String(v).trim() === "") ? 0 : Number(v);
+  const cgstPct = pctOf(req.body.cgstPct);
+  const sgstPct = pctOf(req.body.sgstPct);
+  const gstOn = cgstPct > 0 || sgstPct > 0;
+  const discPct = pctOf(req.body.discountPct);
+  if (![cgstPct, sgstPct, discPct].every(n => Number.isFinite(n) && n >= 0 && n <= 100)) {
+    await client.query("ROLLBACK");
+    return res.status(400).json({ error: "GST and discount percentages must be between 0 and 100" });
+  }
+  const subtotal = billAmount;
+  const discAmt = r2c(subtotal * discPct / 100);
+  const taxable = r2c(subtotal - discAmt);
+  const cgstAmt = r2c(taxable * cgstPct / 100);
+  const sgstAmt = r2c(taxable * sgstPct / 100);
+  const finalAmt = r2c(taxable + cgstAmt + sgstAmt);
+  vals.push(finalAmt); setClause += `, bill_amount=$${vals.length}`;
+  vals.push(subtotal); setClause += `, bill_subtotal=$${vals.length}`;
+  vals.push(gstOn); setClause += `, gst_enabled=$${vals.length}`;
+  vals.push(cgstPct); setClause += `, cgst_pct=$${vals.length}`;
+  vals.push(sgstPct); setClause += `, sgst_pct=$${vals.length}`;
+  vals.push(discPct); setClause += `, discount_pct=$${vals.length}`;
+  vals.push(discAmt); setClause += `, discount_amount=$${vals.length}`;
+  vals.push(cgstAmt); setClause += `, cgst_amount=$${vals.length}`;
+  vals.push(sgstAmt); setClause += `, sgst_amount=$${vals.length}`;
+}
       vals.push(tabletsSold); setClause += `, tablets_sold=$${vals.length}`;
       { const pm = String(req.body.paymentMode || "cash").toLowerCase();
         vals.push(["cash", "upi", "insurance"].includes(pm) ? pm : "cash"); setClause += `, payment_mode=$${vals.length}`; }
