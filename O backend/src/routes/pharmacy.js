@@ -391,14 +391,54 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
 // ── GET medicines catalog ─────────────────────────────────────────────────────
 router.get("/medicines", requireAuth, async (req, res) => {
   try {
-    
-    const { q } = req.query;
-    let query = "SELECT * FROM medicines";
-    const params = [];
-    if (q) { query += " WHERE LOWER(name) LIKE $1"; params.push(`%${q.toLowerCase()}%`); }
-    query += " ORDER BY name ASC LIMIT 50";
-    const { rows } = await pool.query(query, params);
-    res.json(rows);
+    const q = String(req.query.q || "").trim().toLowerCase();
+
+    // hospital: from the token, else from the doctor's record (doctor tokens carry no hospitalId)
+    let hospitalId = (req.user && req.user.hospitalId) || null;
+    if (!hospitalId && req.user && req.user.doctorId) {
+      const d = await pool.query("SELECT hospital_id FROM doctors WHERE id=$1", [req.user.doctorId]);
+      if (d.rows.length) hospitalId = d.rows[0].hospital_id;
+    }
+    if (!hospitalId && req.user && req.user.role === "admin") hospitalId = req.query.hospitalId || null;
+
+    // 1) global catalog
+    const cParams = [];
+    let cWhere = "";
+    if (q) { cParams.push(`%${q}%`); cWhere = " WHERE LOWER(name) LIKE $1"; }
+    const cat = await pool.query(`SELECT * FROM medicines${cWhere} ORDER BY name ASC LIMIT 50`, cParams);
+
+    // 2) this hospital's pharmacy inventory
+    let stock = [];
+    if (hospitalId) {
+      const sParams = [hospitalId];
+      let sWhere = "";
+      if (q) { sParams.push(`%${q}%`); sWhere = " AND LOWER(name) LIKE $2"; }
+      const inv = await pool.query(
+        `SELECT id, name, quantity, med_category FROM inventory_items
+          WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL${sWhere}
+          ORDER BY name ASC LIMIT 50`, sParams);
+      stock = inv.rows;
+    }
+
+    // 3) merge: inventory first, then catalog entries not already listed
+    const out = [];
+    const seen = new Set();
+    for (const s of stock) {
+      const key = String(s.name).toLowerCase().trim();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const cat0 = String(s.med_category || "").trim();
+      const isTablet = !cat0 || cat0 === "Tablet" || cat0 === "Capsule";
+      const qty = Number(s.quantity) || 0;
+      out.push({ id: s.id, name: s.name, in_inventory: true, is_tablet: isTablet, quantity: qty, in_stock: qty > 0 });
+    }
+    for (const m of cat.rows) {
+      const key = String(m.name).toLowerCase().trim();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ ...m, in_inventory: false, is_tablet: false, in_stock: false });
+    }
+    res.json(out.slice(0, 100));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
