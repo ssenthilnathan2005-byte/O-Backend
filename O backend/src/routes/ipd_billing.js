@@ -102,6 +102,44 @@ async function buildBill(db, stay) {
   };
 }
 
+// GET /ipd-billing/summary — collections and outstanding balances for the hospital
+router.get("/summary", requireAuth, staff, async (req, res) => {
+  try {
+    const hid = hospitalOf(req);
+    if (!hid) return res.status(400).json({ error: "hospitalId required" });
+    const net = "CASE WHEN kind='refund' THEN -amount ELSE amount END";
+    const { rows: c } = await pool.query(
+      `SELECT
+         COALESCE(SUM(${net}) FILTER (WHERE (created_at AT TIME ZONE 'Asia/Kolkata')::date = (now() AT TIME ZONE 'Asia/Kolkata')::date), 0) AS today,
+         COALESCE(SUM(${net}) FILTER (WHERE date_trunc('month', created_at AT TIME ZONE 'Asia/Kolkata') = date_trunc('month', now() AT TIME ZONE 'Asia/Kolkata')), 0) AS month
+         FROM ipd_payments WHERE hospital_id=$1`, [hid]);
+    const { rows: st } = await pool.query(
+      `WITH s AS (
+         SELECT ip.id, ip.patient_name, ip.phone, ip.ward, ip.bed_number, ip.status, ip.discharged_at, ip.bill_discount,
+                COALESCE(ip.bed_rate, (SELECT w.daily_rate FROM wards w WHERE w.hospital_id=ip.hospital_id AND w.name=ip.ward LIMIT 1), 0)
+                * (((COALESCE(ip.discharged_at, now()) AT TIME ZONE 'Asia/Kolkata')::date - (ip.admitted_at AT TIME ZONE 'Asia/Kolkata')::date) + 1) AS bed,
+                COALESCE((SELECT SUM(amount) FROM ipd_bill_items i WHERE i.inward_id=ip.id), 0) AS items,
+                COALESCE((SELECT SUM(CASE WHEN p.kind='refund' THEN -p.amount ELSE p.amount END) FROM ipd_payments p WHERE p.inward_id=ip.id), 0) AS paid
+           FROM inward_patients ip WHERE ip.hospital_id=$1)
+       SELECT id, patient_name, phone, ward, bed_number, status, discharged_at,
+              (bed + items - LEAST(bill_discount, bed + items)) AS total,
+              paid,
+              (bed + items - LEAST(bill_discount, bed + items)) - paid AS balance
+         FROM s
+        WHERE (bed + items - LEAST(bill_discount, bed + items)) - paid > 0
+        ORDER BY (status='discharged') DESC, 10 DESC LIMIT 50`, [hid]);
+    res.set("Cache-Control", "no-store");
+    res.json({
+      collectedToday: money(c[0].today), collectedMonth: money(c[0].month),
+      outstandingTotal: money(st.reduce((a, r) => a + num(r.balance), 0)),
+      outstanding: st.map((r) => ({
+        inwardId: r.id, patientName: r.patient_name, phone: r.phone, ward: r.ward, bedNumber: r.bed_number,
+        status: r.status, dischargedAt: r.discharged_at, total: money(r.total), paid: money(r.paid), balance: money(r.balance),
+      })),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // GET /ipd-billing/my/:inwardId — the patient's own bill (read only)
 router.get("/my/:inwardId", requireAuth, async (req, res) => {
   if (req.user.role !== "patient") return res.status(403).json({ error: "Forbidden" });
