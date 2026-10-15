@@ -154,6 +154,29 @@ router.get("/mine", requireAuth, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET /bed-bookings/my-stays — the patient's own admissions (current + past) with bed allocation.
+// Matches admissions made from an online booking (patient_user_id) and walk-in admissions
+// recorded with the patient's registered mobile number.
+router.get("/my-stays", requireAuth, async (req, res) => {
+  if (req.user.role !== "patient") return res.status(403).json({ error: "Forbidden" });
+  try {
+    const { rows: u } = await pool.query("SELECT phone FROM users WHERE id=$1", [req.user.id]);
+    const last10 = String((u[0] && u[0].phone) || req.user.phone || "").replace(/\D/g, "").slice(-10);
+    const { rows } = await pool.query(
+      `SELECT ip.id, ip.hospital_id, h.name AS hospital_name, ip.patient_name, ip.ward, ip.bed_number,
+              ip.admitting_doctor_name, ip.diagnosis, ip.status, ip.admitted_at, ip.discharged_at, ip.bed_booking_id,
+              COALESCE((SELECT w.daily_rate FROM wards w WHERE w.hospital_id=ip.hospital_id AND w.name=ip.ward LIMIT 1), 0) AS daily_rate
+         FROM inward_patients ip
+         LEFT JOIN hospitals h ON h.id = ip.hospital_id
+        WHERE ip.patient_user_id = $1
+           OR ($2::text <> '' AND right(regexp_replace(COALESCE(ip.phone,''), '\\D', '', 'g'), 10) = $2)
+        ORDER BY ip.admitted_at DESC LIMIT 50`,
+      [req.user.id, last10]);
+    res.set("Cache-Control", "no-store");
+    res.json(rows.map((r) => ({ ...r, daily_rate: Number(r.daily_rate) })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // PATCH /bed-bookings/:id/cancel — patient cancels own request
 router.patch("/:id/cancel", requireAuth, async (req, res) => {
   if (req.user.role !== "patient") return next404(res);
