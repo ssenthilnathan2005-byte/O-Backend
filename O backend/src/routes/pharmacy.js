@@ -430,7 +430,7 @@ router.get("/medicines", requireAuth, async (req, res) => {
       const cat0 = String(s.med_category || "").trim();
       const isTablet = !cat0 || cat0 === "Tablet" || cat0 === "Capsule";
       const qty = Number(s.quantity) || 0;
-      out.push({ id: s.id, name: s.name, in_inventory: true, is_tablet: isTablet, quantity: qty, in_stock: isTablet && qty > 0 });
+      out.push({ id: s.id, name: s.name, in_inventory: true, is_tablet: isTablet, quantity: qty, in_stock: qty > 0 });
     }
     for (const m of cat.rows) {
       const key = String(m.name).toLowerCase().trim();
