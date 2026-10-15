@@ -795,7 +795,10 @@ router.get("/gst-report", guard, async (req, res) => {
       "AND (handed_over_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $2::date AND $3::date ORDER BY handed_over_at ASC LIMIT 5000",
       [req.hid, rg[0], rg[1]]);
     const items = await pool.query(
-      "SELECT id, name, selling_price, pack_size, med_category, pack_unit FROM inventory_items WHERE hospital_id=$1", [req.hid]);
+      "SELECT id, name, selling_price, purchase_price, supplier, pack_size, med_category, pack_unit FROM inventory_items WHERE hospital_id=$1", [req.hid]);
+    const gbq = await pool.query("SELECT item_id, batch_no, supplier, to_char(received_at,'YYYY-MM-DD') AS received FROM inventory_batches WHERE hospital_id=$1 ORDER BY received_at ASC", [req.hid]);
+    const bInfo = {};
+    for (const x of gbq.rows) bInfo[x.item_id + "|" + x.batch_no] = x;
     const inv = {};
     for (const r of items.rows) inv[r.id] = r;
     const groups = new Map();
@@ -826,7 +829,8 @@ router.get("/gst-report", guard, async (req, res) => {
           const amt = last ? leftA : r2(a.amount * Number(b.tablets) / psum);
           leftT = r2(leftT - t); leftA = r2(leftA - amt);
           const key = [l.inventoryItemId || a.name, b.batchNo || "", b.expiry || ""].join("|");
-          const g = groups.get(key) || { name: a.name, batchNo: b.batchNo || null, expiryDate: b.expiry || null, unit, qty: 0, billed: 0, billDisc: 0, mrpValue: 0 };
+          const g = groups.get(key) || { name: a.name, batchNo: b.batchNo || null, expiryDate: b.expiry || null, unit, qty: 0, billed: 0, billDisc: 0, mrpValue: 0, bills: new Set(), purchUnit: (Number(it.purchase_price) > 0 ? (Number(it.purchase_price) / pack) * div : 0), info: bInfo[(l.inventoryItemId || "") + "|" + (b.batchNo || "")] || {} };
+          if (rx.bill_no != null) g.bills.add(Number(rx.bill_no));
           const q = t / div;
           g.qty += q; g.billed += amt; g.billDisc += r2(amt * dPct / 100);
           g.mrpValue += mrpUnit > 0 ? Math.max(r2(mrpUnit * q), amt) : amt;
@@ -839,7 +843,7 @@ router.get("/gst-report", guard, async (req, res) => {
       const gross = r2(g.mrpValue);
       return { name: g.name, batchNo: g.batchNo, expiryDate: g.expiryDate, unit: g.unit,
                qty: Math.round(g.qty * 1000) / 1000, mrp: g.qty > 0 ? r2(gross / g.qty) : 0,
-               gross, discount: r2(gross - taxable), taxable };
+               gross, discount: r2(gross - taxable), taxable, billNos: Array.from(g.bills).sort((x, y) => x - y), supplier: g.info.supplier || null, purchasedOn: g.info.received || null, purchaseRate: r2(g.purchUnit) };
     }).sort((x, y) => x.name.localeCompare(y.name) || String(x.expiryDate || "").localeCompare(String(y.expiryDate || "")));
     res.set("Cache-Control", "no-store");
     res.json({ from: rg[0], to: rg[1], bills: rows.length,
