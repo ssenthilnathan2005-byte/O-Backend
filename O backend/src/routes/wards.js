@@ -280,6 +280,7 @@ router.post("/:wardId/beds/:bedId/occupy", requireAuth, requirePerm("beds_wards"
     if (bed.status === "occupied") { await client.query("ROLLBACK"); return res.status(409).json({ error: "Bed already occupied" }); }
     // Only Available beds can be assigned; a bed in Cleaning cannot
     if (bed.status !== "available") { await client.query("ROLLBACK"); return res.status(409).json({ error: "Bed is being cleaned and is not available yet" }); }
+    if (bed.reserved_booking_id && new Date(bed.reserved_until) > new Date()) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Bed is reserved for an online bed booking" }); }
 
     const { randomBytes } = require("crypto");
     const inwardId = `inward_${randomBytes(10).toString("hex").slice(0,10)}`;
