@@ -751,12 +751,13 @@ router.get("/my-invoice/:id", __patientAuth, async (req, res) => {
 });
 
 // ── GST Invoice: sales grouped by medicine + batch for a date range ──
-const gstProfileReady = pool.query(
+const ensureGstTable = () => pool.query(
   "CREATE TABLE IF NOT EXISTS pharmacy_gst_profile (hospital_id TEXT PRIMARY KEY, gstin TEXT, address TEXT, drug_licence TEXT, default_hsn TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"
-).catch(err => console.warn("[pharmacy] gst profile table:", err.message));
+);
+ensureGstTable().catch(err => console.warn("[pharmacy] gst profile table:", err.message));
 
 async function gstProfileFor(hid) {
-  await gstProfileReady;
+  await ensureGstTable();
   const h = await pool.query("SELECT name, address, phone FROM hospitals WHERE id=$1", [hid]);
   const p = await pool.query("SELECT gstin, address, drug_licence, default_hsn FROM pharmacy_gst_profile WHERE hospital_id=$1", [hid]);
   const hr = h.rows[0] || {}, pr = p.rows[0] || {};
@@ -770,7 +771,7 @@ router.get("/gst-profile", guard, async (req, res) => {
 
 router.put("/gst-profile", guard, async (req, res) => {
   try {
-    await gstProfileReady;
+    await ensureGstTable();
     const b = req.body || {};
     const gstin = String(b.gstin || "").trim().toUpperCase();
     const hsn = String(b.defaultHsn || "").trim();
