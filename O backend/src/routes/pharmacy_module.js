@@ -711,7 +711,6 @@ router.get("/invoice/:id", guard, async (req, res) => {
       patientId: rx.patient_id, patientName: rx.patient_name, doctorName: rx.doctor_name,
       issuedAt: rx.handed_over_at, paymentMode: rx.payment_mode || null,
       lines: withAdjustment(lines, rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
-<<<<<<< HEAD
       total: rx.bill_amount == null ? null : Number(rx.bill_amount),
       status: rx.status === "handed_over" ? "Billed" : "Pending",
     });
@@ -740,10 +739,6 @@ router.get("/my-invoice/:id", __patientAuth, async (req, res) => {
       total: rx.bill_amount == null ? null : Number(rx.bill_amount),
       subtotal: rx.bill_subtotal == null ? null : Number(rx.bill_subtotal),
       status: "Billed",
-=======
-      total: rx.bill_amount == null ? null : Number(rx.bill_amount),
-      status: rx.status === "handed_over" ? "Billed" : "Pending",
->>>>>>> parent of 2af8f04 (Pharmacy invoice: optional CGST, SGST and discount (default 0%))
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
