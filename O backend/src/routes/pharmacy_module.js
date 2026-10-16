@@ -710,12 +710,9 @@ router.get("/invoice/:id", guard, async (req, res) => {
       invoiceNo: rx.bill_no == null ? "Bill pending" : "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
       patientId: rx.patient_id, patientName: rx.patient_name, doctorName: rx.doctor_name,
       issuedAt: rx.handed_over_at, paymentMode: rx.payment_mode || null,
-      lines: withAdjustment(lines, rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
+      lines: withAdjustment(lines, rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
+<<<<<<< HEAD
       total: rx.bill_amount == null ? null : Number(rx.bill_amount),
-      subtotal: rx.bill_subtotal == null ? null : Number(rx.bill_subtotal),
-      discountPct: Number(rx.discount_pct) || 0, discountAmount: Number(rx.discount_amount) || 0,
-      gstEnabled: !!rx.gst_enabled, cgstPct: Number(rx.cgst_pct) || 0, sgstPct: Number(rx.sgst_pct) || 0,
-      cgstAmount: Number(rx.cgst_amount) || 0, sgstAmount: Number(rx.sgst_amount) || 0,
       status: rx.status === "handed_over" ? "Billed" : "Pending",
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -742,10 +739,11 @@ router.get("/my-invoice/:id", __patientAuth, async (req, res) => {
       lines: withAdjustment(lines, rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
       total: rx.bill_amount == null ? null : Number(rx.bill_amount),
       subtotal: rx.bill_subtotal == null ? null : Number(rx.bill_subtotal),
-      discountPct: Number(rx.discount_pct) || 0, discountAmount: Number(rx.discount_amount) || 0,
-      gstEnabled: !!rx.gst_enabled, cgstPct: Number(rx.cgst_pct) || 0, sgstPct: Number(rx.sgst_pct) || 0,
-      cgstAmount: Number(rx.cgst_amount) || 0, sgstAmount: Number(rx.sgst_amount) || 0,
       status: "Billed",
+=======
+      total: rx.bill_amount == null ? null : Number(rx.bill_amount),
+      status: rx.status === "handed_over" ? "Billed" : "Pending",
+>>>>>>> parent of 2af8f04 (Pharmacy invoice: optional CGST, SGST and discount (default 0%))
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
