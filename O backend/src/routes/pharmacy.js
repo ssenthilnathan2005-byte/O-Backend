@@ -43,6 +43,8 @@ async function billNoMigration() {
     throw e;
   } finally { c.release(); }
 }
+pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS bill_subtotal NUMERIC, ADD COLUMN IF NOT EXISTS gst_enabled BOOLEAN, ADD COLUMN IF NOT EXISTS cgst_pct NUMERIC, ADD COLUMN IF NOT EXISTS sgst_pct NUMERIC, ADD COLUMN IF NOT EXISTS discount_pct NUMERIC, ADD COLUMN IF NOT EXISTS discount_amount NUMERIC, ADD COLUMN IF NOT EXISTS cgst_amount NUMERIC, ADD COLUMN IF NOT EXISTS sgst_amount NUMERIC")
+  .catch(err => console.warn("[pharmacy] gst/discount migration:", err.message));
 const billReady = billNoMigration();
 billReady.catch(err => console.warn("[pharmacy] bill number migration:", err.message));
 
@@ -65,6 +67,12 @@ function suggestQty(item) {
   const du = /([\d.]+)\s*(day|week)/i.exec(item.duration || "");
   const days = du ? Math.ceil(parseFloat(du[1]) * (du[2].toLowerCase() === "week" ? 7 : 1)) : 1;
   return Math.max(1, Math.ceil(perDose * times * days));
+}
+
+// Tablets and capsules are counted one by one. Every other medicine (syrup, drops, ointment, injection ...) is sold in whole packs.
+function isWholePack(row) {
+  const c = String((row && row.med_category) || '').trim();
+  return !!c && c !== 'Tablet' && c !== 'Capsule';
 }
 
 function requirePharmacyOrAdmin(req, res, next) {
@@ -191,7 +199,7 @@ router.get("/stock", requirePharmacyOrAdmin, async (req, res) => {
     const hospitalId = req.user.role === "pharmacy" ? req.user.hospitalId : req.query.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
     const { rows } = await pool.query(
-      `SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price
+      `SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, med_category, pack_unit
          FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC`,
       [hospitalId]
     );
@@ -242,6 +250,10 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
         const row = inv.rows[0];
         const packSize = Number(row.pack_size) || 1;
         const units = Math.round((qty / packSize) * 1000) / 1000;
+        if (isWholePack(row) && qty % packSize !== 0) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: row.name + ' is dispensed in whole ' + (row.pack_unit || 'bottle') + 's only. Enter a whole number of ' + (row.pack_unit || 'bottle') + 's.' });
+        }
         if (Number(row.quantity) + 1e-6 < units) {
           await client.query("ROLLBACK");
           return res.status(409).json({ error: `Not enough stock for ${row.name}: available ${Math.floor(Number(row.quantity) * packSize)}, needed ${qty}` });
@@ -300,6 +312,10 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
         const row = inv.rows[0];
         const packSize = Number(row.pack_size) || 1;
         const back = line.tablets - given;
+        if (isWholePack(row) && back % packSize !== 0) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: row.name + ': return whole ' + (row.pack_unit || 'bottle') + 's only.' });
+        }
         const units = Math.round((back / packSize) * 1000) / 1000;
         const { returnToBatches } = require("../services/batches");
         await returnToBatches(client, row.id, back, line.batches);
@@ -341,7 +357,33 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
     }
     if (status === "handed_over" && dispensedJson) { vals.push(dispensedJson); setClause += `, dispensed_items=$${vals.length}`; }
     if (status === "handed_over") {
-      vals.push(billAmount); setClause += `, bill_amount=$${vals.length}`;
+      {
+  const r2c = n => Math.round(n * 100) / 100;
+  const pctOf = v => (v === undefined || v === null || String(v).trim() === "") ? 0 : Number(v);
+  const cgstPct = pctOf(req.body.cgstPct);
+  const sgstPct = pctOf(req.body.sgstPct);
+  const gstOn = cgstPct > 0 || sgstPct > 0;
+  const discPct = pctOf(req.body.discountPct);
+  if (![cgstPct, sgstPct, discPct].every(n => Number.isFinite(n) && n >= 0 && n <= 100)) {
+    await client.query("ROLLBACK");
+    return res.status(400).json({ error: "GST and discount percentages must be between 0 and 100" });
+  }
+  const subtotal = billAmount;
+  const discAmt = r2c(subtotal * discPct / 100);
+  const taxable = r2c(subtotal - discAmt);
+  const cgstAmt = r2c(taxable * cgstPct / 100);
+  const sgstAmt = r2c(taxable * sgstPct / 100);
+  const finalAmt = r2c(taxable + cgstAmt + sgstAmt);
+  vals.push(finalAmt); setClause += `, bill_amount=$${vals.length}`;
+  vals.push(subtotal); setClause += `, bill_subtotal=$${vals.length}`;
+  vals.push(gstOn); setClause += `, gst_enabled=$${vals.length}`;
+  vals.push(cgstPct); setClause += `, cgst_pct=$${vals.length}`;
+  vals.push(sgstPct); setClause += `, sgst_pct=$${vals.length}`;
+  vals.push(discPct); setClause += `, discount_pct=$${vals.length}`;
+  vals.push(discAmt); setClause += `, discount_amount=$${vals.length}`;
+  vals.push(cgstAmt); setClause += `, cgst_amount=$${vals.length}`;
+  vals.push(sgstAmt); setClause += `, sgst_amount=$${vals.length}`;
+}
       vals.push(tabletsSold); setClause += `, tablets_sold=$${vals.length}`;
       { const pm = String(req.body.paymentMode || "cash").toLowerCase();
         vals.push(["cash", "upi", "insurance"].includes(pm) ? pm : "cash"); setClause += `, payment_mode=$${vals.length}`; }
@@ -378,14 +420,54 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
 // ── GET medicines catalog ─────────────────────────────────────────────────────
 router.get("/medicines", requireAuth, async (req, res) => {
   try {
-    
-    const { q } = req.query;
-    let query = "SELECT * FROM medicines";
-    const params = [];
-    if (q) { query += " WHERE LOWER(name) LIKE $1"; params.push(`%${q.toLowerCase()}%`); }
-    query += " ORDER BY name ASC LIMIT 50";
-    const { rows } = await pool.query(query, params);
-    res.json(rows);
+    const q = String(req.query.q || "").trim().toLowerCase();
+
+    // hospital: from the token, else from the doctor's record (doctor tokens carry no hospitalId)
+    let hospitalId = (req.user && req.user.hospitalId) || null;
+    if (!hospitalId && req.user && req.user.doctorId) {
+      const d = await pool.query("SELECT hospital_id FROM doctors WHERE id=$1", [req.user.doctorId]);
+      if (d.rows.length) hospitalId = d.rows[0].hospital_id;
+    }
+    if (!hospitalId && req.user && req.user.role === "admin") hospitalId = req.query.hospitalId || null;
+
+    // 1) global catalog
+    const cParams = [];
+    let cWhere = "";
+    if (q) { cParams.push(`%${q}%`); cWhere = " WHERE LOWER(name) LIKE $1"; }
+    const cat = await pool.query(`SELECT * FROM medicines${cWhere} ORDER BY name ASC LIMIT 50`, cParams);
+
+    // 2) this hospital's pharmacy inventory
+    let stock = [];
+    if (hospitalId) {
+      const sParams = [hospitalId];
+      let sWhere = "";
+      if (q) { sParams.push(`%${q}%`); sWhere = " AND LOWER(name) LIKE $2"; }
+      const inv = await pool.query(
+        `SELECT id, name, quantity, med_category FROM inventory_items
+          WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL${sWhere}
+          ORDER BY name ASC LIMIT 50`, sParams);
+      stock = inv.rows;
+    }
+
+    // 3) merge: inventory first, then catalog entries not already listed
+    const out = [];
+    const seen = new Set();
+    for (const s of stock) {
+      const key = String(s.name).toLowerCase().trim();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const cat0 = String(s.med_category || "").trim();
+      const isTablet = !cat0 || cat0 === "Tablet" || cat0 === "Capsule";
+      const qty = Number(s.quantity) || 0;
+      out.push({ id: s.id, name: s.name, in_inventory: true, is_tablet: isTablet, quantity: qty, in_stock: qty > 0 });
+    }
+    for (const m of cat.rows) {
+      const key = String(m.name).toLowerCase().trim();
+      if (seen.has(key)) continue;
+      seen.add(key);
+      out.push({ ...m, in_inventory: false, is_tablet: false, in_stock: false });
+    }
+    res.json(out.slice(0, 100));
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

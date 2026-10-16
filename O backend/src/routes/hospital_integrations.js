@@ -3,6 +3,7 @@ const express = require("express");
 const crypto = require("crypto");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
+const { requireAnyPerm } = require("./permissions");
 const router = express.Router();
 
 const TYPES = ["fingerprint", "id_card", "face", "other"];
@@ -110,7 +111,7 @@ router.post("/ingest", async (req, res) => {
 });
 
 // ---- Attendance view (matches staff via hospital_staff.employee_id) ----
-router.get("/attendance", requireAuth, adminOrHospitalAdmin, async (req, res) => {
+router.get("/attendance", requireAuth, requireAnyPerm("attendance"), async (req, res) => {
   try {
     const hospitalId = scopeHospital(req);
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
@@ -132,7 +133,7 @@ router.get("/attendance", requireAuth, adminOrHospitalAdmin, async (req, res) =>
 });
 
 // ---- Today's first/last punch per device user (for HR page) ----
-router.get("/today", requireAuth, adminOrHospitalAdmin, async (req, res) => {
+router.get("/today", requireAuth, requireAnyPerm("attendance", "hr"), async (req, res) => {
   try {
     const hospitalId = scopeHospital(req);
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });

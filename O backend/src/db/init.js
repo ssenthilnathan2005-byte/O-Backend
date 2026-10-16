@@ -451,3 +451,27 @@ const otpCleanupInterval = setInterval(async () => {
 otpCleanupInterval.unref();
 
 module.exports = { pool, init };
+
+// --- TEMP egress measurement: remove after a day ---
+const _stats = new Map();
+const _origQuery = pool.query.bind(pool);
+pool.query = function (...args) {
+  const p = _origQuery(...args);
+  if (!p || typeof p.then !== "function") return p;
+  const text = String(typeof args[0] === "string" ? args[0] : (args[0] && args[0].text) || "")
+    .replace(/\s+/g, " ").slice(0, 100);
+  return p.then((res) => {
+    try {
+      const bytes = res && res.rows ? Buffer.byteLength(JSON.stringify(res.rows)) : 0;
+      const s = _stats.get(text) || { calls: 0, bytes: 0 };
+      s.calls++; s.bytes += bytes; _stats.set(text, s);
+    } catch (e) {}
+    return res;
+  });
+};
+setInterval(() => {
+  const top = [..._stats].sort((a, b) => b[1].bytes - a[1].bytes).slice(0, 15)
+    .map(([q, s]) => ({ q, calls: s.calls, MB: +(s.bytes / 1e6).toFixed(1) }));
+  console.log("DBBYTES", JSON.stringify(top));
+}, 3600000).unref();
+// --- end temp ---

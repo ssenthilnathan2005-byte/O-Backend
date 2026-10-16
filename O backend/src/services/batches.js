@@ -4,7 +4,7 @@ const { randomBytes } = require("crypto");
 
 const ready = pool.query(
   "CREATE TABLE IF NOT EXISTS inventory_batches (id TEXT PRIMARY KEY, item_id TEXT NOT NULL, hospital_id TEXT NOT NULL, batch_no TEXT, expiry_date DATE, tablets INTEGER NOT NULL DEFAULT 0, supplier TEXT, received_at TIMESTAMPTZ NOT NULL DEFAULT now())")
-  .then(() => pool.query("CREATE INDEX IF NOT EXISTS idx_batches_item ON inventory_batches(item_id)"))
+  .then(() => pool.query("CREATE INDEX IF NOT EXISTS idx_batches_item ON inventory_batches(item_id)")).then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS pack_unit TEXT"))
   .then(() => pool.query(
     "INSERT INTO inventory_batches (id, item_id, hospital_id, batch_no, expiry_date, tablets) " +
     "SELECT 'bat_' || substr(md5(random()::text || i.id), 1, 10), i.id, i.hospital_id, NULLIF(i.batch_no, ''), i.expiry_date, ROUND(i.quantity * COALESCE(i.pack_size, 1))::int " +

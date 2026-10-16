@@ -2,6 +2,7 @@
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
+const { requirePerm, requireAnyPerm } = require("./permissions");
 const { randomBytes } = require("crypto");
 const ExcelJS = require("exceljs");
 function nanoid(n=10) { return randomBytes(n).toString("hex").slice(0,n); }
@@ -13,7 +14,7 @@ function adminOnly(req, res, next) {
   next();
 }
 
-router.get("/", requireAuth, adminOnly, async (req, res) => {
+router.get("/", requireAuth, requirePerm("ipd"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
@@ -25,7 +26,7 @@ router.get("/", requireAuth, adminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post("/", requireAuth, adminOnly, async (req, res) => {
+router.post("/", requireAuth, requirePerm("ipd"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { patientName, phone, age, gender, ward, bedNumber,
@@ -47,7 +48,7 @@ router.post("/", requireAuth, adminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.patch("/:id", requireAuth, adminOnly, async (req, res) => {
+router.patch("/:id", requireAuth, requirePerm("ipd"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { ward, bedNumber, diagnosis, notes, admittingDoctorId, admittingDoctorName, admittedAt } = req.body;
@@ -66,7 +67,7 @@ router.patch("/:id", requireAuth, adminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.patch("/:id/discharge", requireAuth, adminOnly, async (req, res) => {
+router.patch("/:id/discharge", requireAuth, requirePerm("ipd"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { rows } = await pool.query(

@@ -2,6 +2,7 @@
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
+const { hasAnyPerm } = require("./permissions");
 const router = express.Router();
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -17,7 +18,7 @@ function dayCount(from, to) {
 router.get("/", requireAuth, async (req, res) => {
   try {
     const role = req.user.role;
-    if (role !== "pharmacy" && role !== "hospital_admin" && role !== "admin")
+    if (role !== "pharmacy" && role !== "hospital_admin" && role !== "admin" && !(await hasAnyPerm(req, ["pharmacy", "billing", "revenue"])))
       return res.status(403).json({ error: "Forbidden" });
     const hospitalId = role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });

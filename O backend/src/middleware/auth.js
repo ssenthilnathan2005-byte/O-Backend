@@ -115,7 +115,15 @@ function requireAdminOrHospitalAdmin(req, res, next) {
     return res.status(403).json({ error: "Admin or Hospital Admin access required" });
   });
 }
+function requireCto(req, res, next) {
+  requireAuth(req, res, () => {
+    if (req.user.role !== "cto")
+      return res.status(403).json({ error: "CTO access required" });
+    next();
+  });
+}
 module.exports = {
+  requireCto,
   requireAuth, requireAdmin, requireDoctor, requireDoctorOrAdmin, requireAdminOrHospitalAdmin,
   requirePharmacy, requirePharmacyOrAdmin,
 };

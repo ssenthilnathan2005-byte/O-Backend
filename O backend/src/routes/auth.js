@@ -634,6 +634,28 @@ router.post(
   }
 );
 
+// ── CTO login ────────────────────────────────────────────────────────────────
+router.post(
+  "/cto/login",
+  [body("email").trim().notEmpty(), body("password").notEmpty()],
+  async (req, res) => {
+    if (!validate(req, res)) return;
+    try {
+      const { email, password } = req.body;
+      const E = String(process.env.CTO_EMAIL || "").trim().toLowerCase();
+      const H = process.env.CTO_PASSWORD_HASH || "";
+      if (!E || !H || String(email).trim().toLowerCase() !== E || !(await bcrypt.compare(String(password), H))) {
+        return res.status(401).json({ error: "Invalid CTO credentials" });
+      }
+      const payload = { id: "cto_1", role: "cto" };
+      return res.json({ token: sign(payload), user: payload });
+    } catch (err) {
+      console.error("[auth cto/login]", err.message);
+      return res.status(500).json({ error: "Login failed" });
+    }
+  }
+);
+
 // ── Verify token ─────────────────────────────────────────────────────────────
 router.get("/me", (req, res) => {
   const header = req.headers.authorization || "";

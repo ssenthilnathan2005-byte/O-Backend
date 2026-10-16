@@ -180,7 +180,7 @@ router.get("/doctors", fo, async (req, res) => {
 router.get("/beds", fo, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      "SELECT b.id AS bed_id, b.bed_number, w.id AS ward_id, w.name AS ward_name FROM beds b JOIN wards w ON w.id=b.ward_id WHERE b.hospital_id=$1 AND b.status='available' ORDER BY w.name, length(b.bed_number), b.bed_number",
+      "SELECT b.id AS bed_id, b.bed_number, w.id AS ward_id, w.name AS ward_name FROM beds b JOIN wards w ON w.id=b.ward_id WHERE b.hospital_id=$1 AND b.status='available' AND b.reserved_booking_id IS NULL ORDER BY w.name, length(b.bed_number), b.bed_number",
       [req.user.hospitalId]);
     res.set("Cache-Control", "no-store");
     res.json(rows);
@@ -211,7 +211,7 @@ router.post("/admit", fo, async (req, res) => {
     const bedR = await client.query("SELECT b.*, w.name AS ward_name FROM beds b JOIN wards w ON w.id=b.ward_id WHERE b.id=$1 AND b.ward_id=$2 AND b.hospital_id=$3 FOR UPDATE OF b", [b.bedId, b.wardId, hid]);
     if (!bedR.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Bed not found" }); }
     const bed = bedR.rows[0];
-    if (bed.status !== "available") { await client.query("ROLLBACK"); return res.status(409).json({ error: "That bed is not available now. Choose another bed." }); }
+    if (bed.status !== "available" || bed.reserved_booking_id) { await client.query("ROLLBACK"); return res.status(409).json({ error: "That bed is not available now. Choose another bed." }); }
     if (phone) {
       const dup = await client.query("SELECT 1 FROM inward_patients WHERE hospital_id=$1 AND status='admitted' AND phone=$2 AND lower(patient_name)=lower($3) LIMIT 1", [hid, phone, name]);
       if (dup.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "This patient is already admitted." }); }

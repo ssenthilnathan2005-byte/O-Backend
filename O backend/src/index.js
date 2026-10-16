@@ -173,6 +173,8 @@ app.use("/api/pharmacy-owner", pharmacyOwnerRoutes);
 app.use("/api/pharmacies", pharmaciesPublicRoutes);
 app.use("/api/inward", inwardRoutes);
 app.use("/api/wards", wardsRoutes);
+app.use("/api/bed-bookings", require("./routes/bed_bookings"));
+app.use("/api/ipd-billing", require("./routes/ipd_billing"));
 app.use("/api/hr", hrRoutes);
 app.use("/api/inventory", inventoryRoutes);
 app.use("/api/hospital-lab", hospitalLabRoutes);
@@ -190,6 +192,8 @@ app.use("/api/pharmacy-module", require("./routes/pharmacy_module"));
 app.use("/api/pharmacy-import", require("./routes/pharmacy_import"));
 app.use("/api/voice", require("./routes/voice"));
 app.use("/api/front-office", require("./routes/front_office"));
+app.use("/api/permissions", require("./routes/permissions"));
+app.use("/api/cto", require("./routes/cto"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
