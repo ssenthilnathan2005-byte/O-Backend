@@ -172,6 +172,7 @@ app.use("/api/pharmacy", pharmacyRoutes);
 app.use("/api/pharmacy-owner", pharmacyOwnerRoutes);
 app.use("/api/pharmacies", pharmaciesPublicRoutes);
 app.use("/api/inward", inwardRoutes);
+app.use("/api/maternity", require("./routes/maternity"));
 app.use("/api/wards", wardsRoutes);
 app.use("/api/bed-bookings", require("./routes/bed_bookings"));
 app.use("/api/ipd-billing", require("./routes/ipd_billing"));
