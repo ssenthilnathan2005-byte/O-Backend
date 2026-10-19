@@ -59,6 +59,56 @@ pool.query(`
   CREATE INDEX IF NOT EXISTS idx_ipdaudit_inward ON ipd_bill_audit(inward_id);
 `).catch((e) => console.warn("[ipd_billing] audit migration:", e.message));
 
+pool.query(`
+  CREATE TABLE IF NOT EXISTS ipd_transfers (
+    id             TEXT PRIMARY KEY,
+    inward_id      TEXT NOT NULL,
+    hospital_id    TEXT NOT NULL,
+    from_ward      TEXT,
+    from_bed       TEXT,
+    to_ward        TEXT NOT NULL,
+    to_bed         TEXT NOT NULL,
+    to_rate        NUMERIC(10,2) NOT NULL DEFAULT 0,
+    reason         TEXT,
+    by_user        TEXT,
+    by_role        TEXT,
+    transferred_at TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_ipdtr_inward ON ipd_transfers(inward_id);
+  CREATE OR REPLACE FUNCTION ipd_bed_segments(p_id TEXT)
+  RETURNS TABLE(seg_no INT, seg_ward TEXT, seg_rate NUMERIC, seg_start DATE, seg_days INT)
+  LANGUAGE sql STABLE AS $fn$
+    WITH ip AS (
+      SELECT i.hospital_id, i.ward AS cur_ward, i.bed_rate,
+             (i.admitted_at AT TIME ZONE 'Asia/Kolkata')::date AS a,
+             (COALESCE(i.discharged_at, now()) AT TIME ZONE 'Asia/Kolkata')::date AS e
+        FROM inward_patients i WHERE i.id = p_id
+    ),
+    tr AS (
+      SELECT t.to_ward, t.to_rate, t.from_ward,
+             (t.transferred_at AT TIME ZONE 'Asia/Kolkata')::date AS d,
+             (row_number() OVER (ORDER BY t.transferred_at, t.id))::int AS n
+        FROM ipd_transfers t WHERE t.inward_id = p_id
+    ),
+    seg AS (
+      SELECT 0 AS sn,
+             COALESCE((SELECT x.from_ward FROM tr x WHERE x.n = 1), ip.cur_ward) AS sw,
+             COALESCE(ip.bed_rate,
+                      (SELECT w.daily_rate FROM wards w WHERE w.hospital_id = ip.hospital_id AND w.name = ip.cur_ward LIMIT 1),
+                      0)::numeric AS sr,
+             ip.a AS sd,
+             COALESCE((SELECT x.d FROM tr x WHERE x.n = 1), ip.e + 1) AS nd
+        FROM ip
+      UNION ALL
+      SELECT t.n, t.to_ward, t.to_rate::numeric, t.d,
+             COALESCE((SELECT x.d FROM tr x WHERE x.n = t.n + 1), (SELECT ip2.e + 1 FROM ip ip2))
+        FROM tr t
+    )
+    SELECT sn, sw, sr, sd, GREATEST(nd - sd, 0)::int FROM seg ORDER BY sn
+  $fn$;
+`).catch((e) => console.warn("[ipd_billing] transfer migration:", e.message));
+
+
 const num = (v) => Number(v) || 0;
 const money = (v) => Math.round(num(v) * 100) / 100;
 const hospitalOf = (req) =>
@@ -99,7 +149,15 @@ async function buildBill(db, stay) {
     "SELECT * FROM ipd_bill_items WHERE inward_id=$1 ORDER BY created_at ASC", [stay.id]);
   const { rows: pays } = await db.query(
     "SELECT * FROM ipd_payments WHERE inward_id=$1 ORDER BY created_at ASC", [stay.id]);
-  const bedCharge = money(rate * stay.days);
+  const { rows: segRows } = await db.query(
+    "SELECT seg_no, seg_ward, seg_rate, seg_start::text AS seg_start, seg_days FROM ipd_bed_segments($1) ORDER BY seg_no", [stay.id]);
+  const moved = segRows.length > 1;
+  const segments = moved ? segRows.filter((s) => Number(s.seg_days) > 0).map((s) => ({
+    ward: s.seg_ward, rate: num(s.seg_rate), days: Number(s.seg_days), from: s.seg_start,
+    amount: money(num(s.seg_rate) * Number(s.seg_days)),
+  })) : [];
+  if (moved) rate = num(segRows[segRows.length - 1].seg_rate);
+  const bedCharge = moved ? money(segments.reduce((s, x) => s + x.amount, 0)) : money(rate * stay.days);
   const itemsTotal = money(items.reduce((s, i) => s + num(i.amount), 0));
   const subtotal = money(bedCharge + itemsTotal);
   const discount = Math.min(money(stay.bill_discount), subtotal);
@@ -110,7 +168,7 @@ async function buildBill(db, stay) {
     ward: stay.ward, bedNumber: stay.bed_number, doctor: stay.admitting_doctor_name,
     invoiceNo, hospitalName: hosp[0]?.name || null, hospitalAddress: hosp[0]?.address || null, hospitalPhone: hosp[0]?.phone || null,
     status: stay.status, admittedAt: stay.admitted_at, dischargedAt: stay.discharged_at,
-    days: stay.days, bedRate: rate, bedCharge,
+    days: stay.days, bedRate: rate, bedCharge, segments,
     items: items.map((i) => ({ ...i, qty: num(i.qty), unit_price: num(i.unit_price), amount: num(i.amount) })),
     payments: pays.map((p) => ({ ...p, amount: num(p.amount) })),
     itemsTotal, subtotal, discount, total, paid, balance: money(total - paid),
@@ -153,8 +211,8 @@ router.get("/summary", requireAuth, staff, async (req, res) => {
     const { rows: st } = await pool.query(
       `WITH s AS (
          SELECT ip.id, ip.patient_name, ip.phone, ip.ward, ip.bed_number, ip.status, ip.discharged_at, ip.bill_discount,
-                COALESCE(ip.bed_rate, (SELECT w.daily_rate FROM wards w WHERE w.hospital_id=ip.hospital_id AND w.name=ip.ward LIMIT 1), 0)
-                * (((COALESCE(ip.discharged_at, now()) AT TIME ZONE 'Asia/Kolkata')::date - (ip.admitted_at AT TIME ZONE 'Asia/Kolkata')::date) + 1) AS bed,
+                CASE WHEN EXISTS (SELECT 1 FROM ipd_transfers tt WHERE tt.inward_id=ip.id) THEN COALESCE((SELECT SUM(g.seg_rate * g.seg_days) FROM ipd_bed_segments(ip.id) g), 0) ELSE COALESCE(ip.bed_rate, (SELECT w.daily_rate FROM wards w WHERE w.hospital_id=ip.hospital_id AND w.name=ip.ward LIMIT 1), 0)
+                * (((COALESCE(ip.discharged_at, now()) AT TIME ZONE 'Asia/Kolkata')::date - (ip.admitted_at AT TIME ZONE 'Asia/Kolkata')::date) + 1) END AS bed,
                 COALESCE((SELECT SUM(amount) FROM ipd_bill_items i WHERE i.inward_id=ip.id), 0) AS items,
                 COALESCE((SELECT SUM(CASE WHEN p.kind='refund' THEN -p.amount ELSE p.amount END) FROM ipd_payments p WHERE p.inward_id=ip.id), 0) AS paid
            FROM inward_patients ip WHERE ip.hospital_id=$1)
@@ -274,7 +332,10 @@ router.patch("/:inwardId/settings", requireAuth, staff, async (req, res) => {
     if (b.bedRate !== undefined) {
       const r = Number(b.bedRate);
       if (!(r >= 0)) return res.status(400).json({ error: "Enter a valid bed rate" });
-      await pool.query("UPDATE inward_patients SET bed_rate=$1 WHERE id=$2", [money(r), stay.id]);
+      const tr = await pool.query(
+        "UPDATE ipd_transfers SET to_rate=$1 WHERE id=(SELECT id FROM ipd_transfers WHERE inward_id=$2 ORDER BY transferred_at DESC, id DESC LIMIT 1) RETURNING id",
+        [money(r), stay.id]);
+      if (!tr.rows.length) await pool.query("UPDATE inward_patients SET bed_rate=$1 WHERE id=$2", [money(r), stay.id]);
     }
     if (b.discount !== undefined) {
       const d = Number(b.discount);
