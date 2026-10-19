@@ -140,6 +140,41 @@ router.get("/summary", requireAuth, staff, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// GET /ipd-billing/report?from=YYYY-MM-DD&to=YYYY-MM-DD — IPD money collected per day (net of refunds), for the Billing page
+router.get("/report", requireAuth, staff, async (req, res) => {
+  try {
+    const hid = hospitalOf(req);
+    if (!hid) return res.status(400).json({ error: "hospitalId required" });
+    const isYmd = (s) => typeof s === "string" && /^\d{4}-\d{2}-\d{2}$/.test(s);
+    const from = isYmd(req.query.from) ? req.query.from : null;
+    const to = isYmd(req.query.to) ? req.query.to : null;
+    const net = "CASE WHEN kind='refund' THEN -amount ELSE amount END";
+    const day = "(created_at AT TIME ZONE 'Asia/Kolkata')::date";
+    const { rows } = await pool.query(
+      `SELECT to_char(${day}, 'YYYY-MM-DD') AS day,
+              COALESCE(SUM(${net}), 0) AS amount,
+              COALESCE(SUM(amount) FILTER (WHERE kind='refund'), 0) AS refunds,
+              COUNT(DISTINCT inward_id) AS patients
+         FROM ipd_payments
+        WHERE hospital_id=$1
+          AND ($2::date IS NULL OR ${day} >= $2::date)
+          AND ($3::date IS NULL OR ${day} <= $3::date)
+        GROUP BY 1 ORDER BY 1`, [hid, from, to]);
+    const { rows: pt } = await pool.query(
+      `SELECT COUNT(DISTINCT inward_id) AS patients
+         FROM ipd_payments
+        WHERE hospital_id=$1
+          AND ($2::date IS NULL OR ${day} >= $2::date)
+          AND ($3::date IS NULL OR ${day} <= $3::date)`, [hid, from, to]);
+    res.set("Cache-Control", "no-store");
+    res.json({
+      collected: money(rows.reduce((a, r) => a + num(r.amount), 0)),
+      refunds: money(rows.reduce((a, r) => a + num(r.refunds), 0)),
+      patients: Number(pt[0].patients) || 0,
+      perDay: rows.map((r) => ({ date: r.day, amount: money(r.amount), patients: Number(r.patients) || 0 })),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 // GET /ipd-billing/my/:inwardId — the patient's own bill (read only)
 router.get("/my/:inwardId", requireAuth, async (req, res) => {
   if (req.user.role !== "patient") return res.status(403).json({ error: "Forbidden" });
