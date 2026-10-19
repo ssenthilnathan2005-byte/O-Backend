@@ -27,46 +27,99 @@ router.get("/", requireAuth, requirePerm("ipd"), async (req, res) => {
 });
 
 router.post("/", requireAuth, requirePerm("ipd"), async (req, res) => {
+  const client = await pool.connect();
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
-    const { patientName, phone, age, gender, ward, bedNumber,
+    const { patientName, phone, age, gender, bedId,
             admittingDoctorId, admittingDoctorName, diagnosis, notes, admittedAt } = req.body;
-    if (!patientName || !hospitalId)
-      return res.status(400).json({ error: "patientName required" });
+    const name = String(patientName || "").trim();
+    if (!name || !hospitalId) return res.status(400).json({ error: "patientName required" });
+    if (!bedId) return res.status(400).json({ error: "Choose a bed from the list" });
+    const ageN = (age === undefined || age === null || age === "") ? null : Number(age);
+    if (ageN !== null && !(Number.isInteger(ageN) && ageN >= 0 && ageN <= 130))
+      return res.status(400).json({ error: "Enter a valid age" });
+
+    await client.query("BEGIN");
+    const { rows: bedRows } = await client.query(
+      `SELECT b.*, w.name AS ward_name FROM beds b JOIN wards w ON w.id = b.ward_id
+        WHERE b.id=$1 AND b.hospital_id=$2 FOR UPDATE OF b`, [bedId, hospitalId]);
+    if (!bedRows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Bed not found" }); }
+    const bed = bedRows[0];
+    const held = bed.reserved_booking_id && bed.reserved_until && new Date(bed.reserved_until) > new Date();
+    if (bed.status !== "available" || held) {
+      await client.query("ROLLBACK");
+      return res.status(409).json({ error: "That bed is not available now. Choose another bed." });
+    }
+    if (phone) {
+      const dup = await client.query(
+        "SELECT 1 FROM inward_patients WHERE hospital_id=$1 AND status='admitted' AND phone=$2 AND lower(patient_name)=lower($3) LIMIT 1",
+        [hospitalId, phone, name]);
+      if (dup.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "This patient is already admitted." }); }
+    }
+    let docId = null, docName = admittingDoctorName || null;
+    if (admittingDoctorId) {
+      const d = await client.query("SELECT id, name FROM doctors WHERE id=$1 AND hospital_id=$2", [admittingDoctorId, hospitalId]);
+      if (!d.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Doctor not found" }); }
+      docId = d.rows[0].id; docName = d.rows[0].name;
+    }
     const id = `inward_${nanoid(10)}`;
-    const { rows } = await pool.query(
+    const { rows } = await client.query(
       `INSERT INTO inward_patients
          (id, hospital_id, patient_name, phone, age, gender, ward, bed_number,
           admitting_doctor_id, admitting_doctor_name, diagnosis, notes, admitted_at)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,COALESCE($13::timestamptz, now())) RETURNING *`,
-      [id, hospitalId, patientName, phone || null, age || null, gender || null,
-       ward || null, bedNumber || null, admittingDoctorId || null,
-       admittingDoctorName || null, diagnosis || null, notes || null,
-       admittedAt || null]
-    );
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,
+         CASE WHEN $13::timestamptz IS NULL
+                OR ($13::timestamptz AT TIME ZONE 'Asia/Kolkata')::date >= (now() AT TIME ZONE 'Asia/Kolkata')::date
+              THEN now() ELSE $13::timestamptz END)
+       RETURNING *`,
+      [id, hospitalId, name, phone || null, ageN, gender || null, bed.ward_name, bed.bed_number,
+       docId, docName, diagnosis || null, notes || null, admittedAt || null]);
+    await client.query(
+      `UPDATE beds SET status='occupied', patient_name=$1, inward_id=$2,
+              cleaning_started_at=NULL, cleaning_ends_at=NULL, cleaning_duration_minutes=NULL, updated_at=now()
+        WHERE id=$3`, [name, id, bed.id]);
+    await client.query("COMMIT");
     res.status(201).json(rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
 });
-
 router.patch("/:id", requireAuth, requirePerm("ipd"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
-    const { ward, bedNumber, diagnosis, notes, admittingDoctorId, admittingDoctorName, admittedAt } = req.body;
+    const b = req.body || {};
+    const has = (k) => Object.prototype.hasOwnProperty.call(b, k);
+    const isAdmin = req.user.role === "hospital_admin" || req.user.role === "admin";
+    const { rows: cur } = await pool.query("SELECT * FROM inward_patients WHERE id=$1 AND hospital_id=$2", [req.params.id, hospitalId]);
+    if (!cur.length) return res.status(404).json({ error: "Not found" });
+    const p = cur[0];
+    const same = (a, c) => String(a || "").trim().toLowerCase() === String(c || "").trim().toLowerCase();
+    if ((has("ward") && !same(b.ward, p.ward)) || (has("bedNumber") && !same(b.bedNumber, p.bed_number)))
+      return res.status(400).json({ error: "The ward or bed cannot be changed from this form, because the bed list would go out of step." });
+
+    const sets = [], vals = [];
+    const add = (col, val) => { vals.push(val); sets.push(col + "=$" + vals.length); };
+    if (has("diagnosis")) add("diagnosis", b.diagnosis || null);
+    if (has("notes")) add("notes", b.notes || null);
+    if (has("admittingDoctorId")) add("admitting_doctor_id", b.admittingDoctorId || null);
+    if (has("admittingDoctorName")) add("admitting_doctor_name", b.admittingDoctorName || null);
+    if (has("admittedAt") && b.admittedAt && p.status === "admitted") {
+      const d = new Date(b.admittedAt);
+      const unchanged = isNaN(d.getTime()) || d.toISOString().slice(0, 10) === new Date(p.admitted_at).toISOString().slice(0, 10);
+      if (!unchanged) {
+        if (!isAdmin) return res.status(403).json({ error: "Only the hospital admin can change the admission date." });
+        if (d.getTime() > Date.now()) return res.status(400).json({ error: "The admission date cannot be in the future." });
+        add("admitted_at", d.toISOString());
+      }
+    }
+    if (!sets.length) return res.json(p);
+    vals.push(p.id);
     const { rows } = await pool.query(
-      `UPDATE inward_patients SET
-         ward=$1, bed_number=$2, diagnosis=$3, notes=$4,
-         admitting_doctor_id=$5, admitting_doctor_name=$6,
-         admitted_at=COALESCE($9::timestamptz, admitted_at)
-       WHERE id=$7 AND hospital_id=$8 RETURNING *`,
-      [ward || null, bedNumber || null, diagnosis || null, notes || null,
-       admittingDoctorId || null, admittingDoctorName || null,
-       req.params.id, hospitalId, admittedAt || null]
-    );
-    if (!rows.length) return res.status(404).json({ error: "Not found" });
+      "UPDATE inward_patients SET " + sets.join(", ") + " WHERE id=$" + vals.length + " RETURNING *", vals);
     res.json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
-
 router.patch("/:id/discharge", requireAuth, requirePerm("ipd"), async (req, res) => {
   const client = await pool.connect();
   try {
