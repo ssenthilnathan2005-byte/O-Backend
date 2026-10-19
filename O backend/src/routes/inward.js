@@ -68,18 +68,49 @@ router.patch("/:id", requireAuth, requirePerm("ipd"), async (req, res) => {
 });
 
 router.patch("/:id/discharge", requireAuth, requirePerm("ipd"), async (req, res) => {
+  const client = await pool.connect();
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
-    const { rows } = await pool.query(
-      `UPDATE inward_patients SET status='discharged', discharged_at=now()
-       WHERE id=$1 AND hospital_id=$2 RETURNING *`,
+    await client.query("BEGIN");
+    const { rows: cur } = await client.query(
+      "SELECT id, status FROM inward_patients WHERE id=$1 AND hospital_id=$2 FOR UPDATE",
       [req.params.id, hospitalId]
     );
-    if (!rows.length) return res.status(404).json({ error: "Not found" });
+    if (!cur.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Not found" }); }
+    if (cur[0].status !== "admitted") { await client.query("ROLLBACK"); return res.status(409).json({ error: "This patient is already discharged" }); }
+    const { rows } = await client.query(
+      `UPDATE inward_patients SET status='discharged', discharged_at=now()
+       WHERE id=$1 RETURNING *`,
+      [cur[0].id]
+    );
+    // Free the bed: occupied -> cleaning (same rules as the ward screen's vacate)
+    const { rows: bed } = await client.query(
+      "SELECT id, ward_id FROM beds WHERE inward_id=$1 AND hospital_id=$2 FOR UPDATE",
+      [cur[0].id, hospitalId]
+    );
+    if (bed.length) {
+      const { rows: m } = await client.query(
+        `SELECT COALESCE(b.cleaning_override_minutes, w.cleaning_minutes,
+                  (SELECT default_minutes FROM hospital_cleaning_settings WHERE hospital_id=$3), 30) AS minutes
+           FROM beds b JOIN wards w ON w.id=b.ward_id WHERE b.id=$1 AND b.ward_id=$2`,
+        [bed[0].id, bed[0].ward_id, hospitalId]
+      );
+      const minutes = m.length ? Number(m[0].minutes) : 30;
+      await client.query(
+        `UPDATE beds SET status='maintenance', patient_name=NULL, inward_id=NULL,
+                cleaning_started_at=now(), cleaning_duration_minutes=$2::int,
+                cleaning_ends_at=now() + make_interval(mins => $2::int), updated_at=now()
+          WHERE id=$1`,
+        [bed[0].id, minutes]
+      );
+    }
+    await client.query("COMMIT");
     res.json(rows[0]);
-  } catch (err) { res.status(500).json({ error: err.message }); }
+  } catch (err) {
+    await client.query("ROLLBACK").catch(() => {});
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
 });
-
 // GET /inward/export?from=YYYY-MM-DD&to=YYYY-MM-DD — download admitted + discharged patients as Excel
 router.get("/export", requireAuth, adminOnly, async (req, res) => {
   try {
