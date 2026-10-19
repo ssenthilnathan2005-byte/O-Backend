@@ -44,6 +44,21 @@ pool.query(`
   CREATE INDEX IF NOT EXISTS idx_ipdpay_inward ON ipd_payments(inward_id);
 `).catch((e) => console.warn("[ipd_billing] migration:", e.message));
 
+pool.query(`
+  CREATE TABLE IF NOT EXISTS ipd_bill_audit (
+    id          TEXT PRIMARY KEY,
+    inward_id   TEXT NOT NULL,
+    hospital_id TEXT NOT NULL,
+    action      TEXT NOT NULL,
+    detail      JSONB,
+    reason      TEXT,
+    by_user     TEXT,
+    by_role     TEXT,
+    created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+  );
+  CREATE INDEX IF NOT EXISTS idx_ipdaudit_inward ON ipd_bill_audit(inward_id);
+`).catch((e) => console.warn("[ipd_billing] audit migration:", e.message));
+
 const num = (v) => Number(v) || 0;
 const money = (v) => Math.round(num(v) * 100) / 100;
 const hospitalOf = (req) =>
@@ -100,6 +115,28 @@ async function buildBill(db, stay) {
     payments: pays.map((p) => ({ ...p, amount: num(p.amount) })),
     itemsTotal, subtotal, discount, total, paid, balance: money(total - paid),
   };
+}
+
+// Bill lock: once discharged, only the hospital admin may change a bill, and must say why.
+// opts.always = require a reason and log even before discharge (used for removing payments).
+async function guardEdit(req, res, stay, action, detail, opts) {
+  const o = opts || {};
+  const discharged = stay.status === "discharged";
+  if (!discharged && !o.always) return true;
+  const isAdmin = req.user.role === "hospital_admin" || req.user.role === "admin";
+  if (discharged && !isAdmin) {
+    res.status(403).json({ error: "This bill is closed. Only the hospital admin can change it after discharge." });
+    return false;
+  }
+  const reason = String((req.body && req.body.reason) || (req.query && req.query.reason) || "").trim().slice(0, 300);
+  if (reason.length < 3) {
+    res.status(400).json({ error: "Please give a reason for this change (at least 3 characters).", reasonRequired: true });
+    return false;
+  }
+  await pool.query(
+    "INSERT INTO ipd_bill_audit (id, inward_id, hospital_id, action, detail, reason, by_user, by_role) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8)",
+    [nid("iba_"), stay.id, stay.hospital_id, action, JSON.stringify(detail || {}), reason, req.user.id, req.user.role]);
+  return true;
 }
 
 // GET /ipd-billing/summary — collections and outstanding balances for the hospital
@@ -232,6 +269,7 @@ router.patch("/:inwardId/settings", requireAuth, staff, async (req, res) => {
   try {
     const stay = await loadStay(pool, req.params.inwardId, hospitalOf(req));
     if (!stay) return res.status(404).json({ error: "Admission not found" });
+    if (!(await guardEdit(req, res, stay, "settings", { bedRate: (req.body || {}).bedRate, discount: (req.body || {}).discount }))) return;
     const b = req.body || {};
     if (b.bedRate !== undefined) {
       const r = Number(b.bedRate);
@@ -252,6 +290,7 @@ router.post("/:inwardId/items", requireAuth, staff, async (req, res) => {
   try {
     const stay = await loadStay(pool, req.params.inwardId, hospitalOf(req));
     if (!stay) return res.status(404).json({ error: "Admission not found" });
+    if (!(await guardEdit(req, res, stay, "item_add", { description: (req.body || {}).description, qty: (req.body || {}).qty, unitPrice: (req.body || {}).unitPrice }))) return;
     const b = req.body || {};
     const desc = String(b.description || "").trim().slice(0, 200);
     const qty = b.qty === undefined || b.qty === "" ? 1 : Number(b.qty);
@@ -273,6 +312,7 @@ router.delete("/:inwardId/items/:itemId", requireAuth, staff, async (req, res) =
   try {
     const stay = await loadStay(pool, req.params.inwardId, hospitalOf(req));
     if (!stay) return res.status(404).json({ error: "Admission not found" });
+    if (!(await guardEdit(req, res, stay, "item_remove", { itemId: req.params.itemId }))) return;
     await pool.query("DELETE FROM ipd_bill_items WHERE id=$1 AND inward_id=$2", [req.params.itemId, stay.id]);
     res.json(await buildBill(pool, stay));
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -288,6 +328,12 @@ router.post("/:inwardId/payments", requireAuth, staff, async (req, res) => {
     if (!(amt > 0)) return res.status(400).json({ error: "Enter a valid amount" });
     const kind = ["advance", "payment", "refund"].includes(b.kind) ? b.kind : "payment";
     const mode = MODES.includes(b.mode) ? b.mode : "cash";
+    if (kind === "refund") {
+      const { rows: pr } = await pool.query(
+        "SELECT COALESCE(SUM(CASE WHEN kind='refund' THEN -amount ELSE amount END), 0) AS net FROM ipd_payments WHERE inward_id=$1", [stay.id]);
+      if (amt > num(pr[0].net)) return res.status(400).json({ error: "Refund is more than the patient has paid (net paid: Rs. " + num(pr[0].net) + ")." });
+      if (!(await guardEdit(req, res, stay, "refund", { amount: amt, mode }))) return;
+    }
     await pool.query(
       `INSERT INTO ipd_payments (id, inward_id, hospital_id, amount, kind, mode, note, received_by)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
@@ -304,6 +350,7 @@ router.delete("/:inwardId/payments/:paymentId", requireAuth, staff, async (req, 
       return res.status(403).json({ error: "Only the hospital admin can remove a payment" });
     const stay = await loadStay(pool, req.params.inwardId, hospitalOf(req));
     if (!stay) return res.status(404).json({ error: "Admission not found" });
+    if (!(await guardEdit(req, res, stay, "payment_remove", { paymentId: req.params.paymentId }, { always: true }))) return;
     await pool.query("DELETE FROM ipd_payments WHERE id=$1 AND inward_id=$2", [req.params.paymentId, stay.id]);
     res.json(await buildBill(pool, stay));
   } catch (e) { res.status(500).json({ error: e.message }); }
