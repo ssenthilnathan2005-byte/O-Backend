@@ -710,8 +710,12 @@ router.get("/invoice/:id", guard, async (req, res) => {
       invoiceNo: rx.bill_no == null ? "Bill pending" : "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
       patientId: rx.patient_id, patientName: rx.patient_name, doctorName: rx.doctor_name,
       issuedAt: rx.handed_over_at, paymentMode: rx.payment_mode || null,
-      lines: withAdjustment(lines, rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
+      lines: withAdjustment(lines, rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
       total: rx.bill_amount == null ? null : Number(rx.bill_amount),
+      subtotal: rx.bill_subtotal == null ? null : Number(rx.bill_subtotal),
+      discountPct: Number(rx.discount_pct) || 0, discountAmount: Number(rx.discount_amount) || 0,
+      gstEnabled: !!rx.gst_enabled, cgstPct: Number(rx.cgst_pct) || 0, sgstPct: Number(rx.sgst_pct) || 0,
+      cgstAmount: Number(rx.cgst_amount) || 0, sgstAmount: Number(rx.sgst_amount) || 0,
       status: rx.status === "handed_over" ? "Billed" : "Pending",
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -738,8 +742,113 @@ router.get("/my-invoice/:id", __patientAuth, async (req, res) => {
       lines: withAdjustment(lines, rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
       total: rx.bill_amount == null ? null : Number(rx.bill_amount),
       subtotal: rx.bill_subtotal == null ? null : Number(rx.bill_subtotal),
+      discountPct: Number(rx.discount_pct) || 0, discountAmount: Number(rx.discount_amount) || 0,
+      gstEnabled: !!rx.gst_enabled, cgstPct: Number(rx.cgst_pct) || 0, sgstPct: Number(rx.sgst_pct) || 0,
+      cgstAmount: Number(rx.cgst_amount) || 0, sgstAmount: Number(rx.sgst_amount) || 0,
       status: "Billed",
     });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// ── GST Invoice: sales grouped by medicine + batch for a date range ──
+const ensureGstTable = () => pool.query(
+  "CREATE TABLE IF NOT EXISTS pharmacy_gst_profile (hospital_id TEXT PRIMARY KEY, gstin TEXT, address TEXT, drug_licence TEXT, default_hsn TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+);
+ensureGstTable().catch(err => console.warn("[pharmacy] gst profile table:", err.message));
+
+async function gstProfileFor(hid) {
+  await ensureGstTable();
+  const h = await pool.query("SELECT name, address, phone FROM hospitals WHERE id=$1", [hid]);
+  const p = await pool.query("SELECT gstin, address, drug_licence, default_hsn FROM pharmacy_gst_profile WHERE hospital_id=$1", [hid]);
+  const hr = h.rows[0] || {}, pr = p.rows[0] || {};
+  return { name: hr.name || "", address: pr.address || hr.address || "", phone: hr.phone || "",
+           gstin: pr.gstin || "", drugLicence: pr.drug_licence || "", defaultHsn: pr.default_hsn || "3004" };
+}
+
+router.get("/gst-profile", guard, async (req, res) => {
+  try { res.json(await gstProfileFor(req.hid)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put("/gst-profile", guard, async (req, res) => {
+  try {
+    await ensureGstTable();
+    const b = req.body || {};
+    const gstin = String(b.gstin || "").trim().toUpperCase();
+    const hsn = String(b.defaultHsn || "").trim();
+    if (gstin && !/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(gstin))
+      return res.status(400).json({ error: "GSTIN must be 15 characters, like 29ABCDE1234F1Z5" });
+    if (hsn && !/^[0-9]{4,8}$/.test(hsn)) return res.status(400).json({ error: "HSN code must be 4 to 8 digits" });
+    await pool.query(
+      "INSERT INTO pharmacy_gst_profile (hospital_id, gstin, address, drug_licence, default_hsn, updated_at) VALUES ($1,$2,$3,$4,$5,now()) " +
+      "ON CONFLICT (hospital_id) DO UPDATE SET gstin=EXCLUDED.gstin, address=EXCLUDED.address, drug_licence=EXCLUDED.drug_licence, default_hsn=EXCLUDED.default_hsn, updated_at=now()",
+      [req.hid, gstin || null, String(b.address || "").trim() || null, String(b.drugLicence || "").trim() || null, hsn || null]);
+    res.json(await gstProfileFor(req.hid));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.get("/gst-report", guard, async (req, res) => {
+  try {
+    const rg = await getRange(req);
+    if (!rg) return res.status(400).json({ error: "Invalid from/to dates" });
+    const { rows } = await pool.query(
+      "SELECT * FROM prescriptions WHERE hospital_id=$1 AND status='handed_over' " +
+      "AND (handed_over_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $2::date AND $3::date ORDER BY handed_over_at ASC LIMIT 5000",
+      [req.hid, rg[0], rg[1]]);
+    const items = await pool.query(
+      "SELECT id, name, selling_price, purchase_price, supplier, pack_size, med_category, pack_unit FROM inventory_items WHERE hospital_id=$1", [req.hid]);
+    const gbq = await pool.query("SELECT item_id, batch_no, supplier, to_char(received_at,'YYYY-MM-DD') AS received FROM inventory_batches WHERE hospital_id=$1 ORDER BY received_at ASC", [req.hid]);
+    const bInfo = {};
+    for (const x of gbq.rows) bInfo[x.item_id + "|" + x.batch_no] = x;
+    const inv = {};
+    for (const r of items.rows) inv[r.id] = r;
+    const groups = new Map();
+    const billNos = [];
+    for (const rx of rows) {
+      if (rx.bill_no != null) billNos.push(Number(rx.bill_no));
+      const disp = parse(rx.dispensed_items);
+      const base = Object.assign({}, rx, { bill_amount: rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount });
+      const amts = lineAmounts(base, inv);
+      const dPct = Math.min(100, Math.max(0, Number(rx.discount_pct) || 0));
+      disp.forEach((l, i) => {
+        const a = amts[i];
+        if (!a || !(a.tablets > 0)) return;
+        const it = inv[l.inventoryItemId] || {};
+        const pack = Number(it.pack_size) || 1;
+        const cat = String(it.med_category || "");
+        const packaged = pack > 1 && cat !== "" && cat !== "Tablet" && cat !== "Capsule";
+        const div = packaged ? pack : 1;
+        const unit = packaged ? (it.pack_unit || "pack") : "tab";
+        const mrpUnit = Number(it.selling_price) > 0 ? (Number(it.selling_price) / pack) * div : 0;
+        const bs = (Array.isArray(l.batches) ? l.batches : []).filter(b => Number(b.tablets) > 0);
+        const parts = bs.length ? bs : [{ batchNo: null, expiry: null, tablets: a.tablets }];
+        const psum = parts.reduce((s, b) => s + Number(b.tablets), 0);
+        let leftT = a.tablets, leftA = a.amount;
+        parts.forEach((b, k) => {
+          const last = k === parts.length - 1;
+          const t = last ? leftT : r2(a.tablets * Number(b.tablets) / psum);
+          const amt = last ? leftA : r2(a.amount * Number(b.tablets) / psum);
+          leftT = r2(leftT - t); leftA = r2(leftA - amt);
+          const key = [l.inventoryItemId || a.name, b.batchNo || "", b.expiry || ""].join("|");
+          const g = groups.get(key) || { name: a.name, batchNo: b.batchNo || null, expiryDate: b.expiry || null, unit, qty: 0, billed: 0, billDisc: 0, mrpValue: 0, bills: new Set(), purchUnit: (Number(it.purchase_price) > 0 ? (Number(it.purchase_price) / pack) * div : 0), info: bInfo[(l.inventoryItemId || "") + "|" + (b.batchNo || "")] || {} };
+          if (rx.bill_no != null) g.bills.add(Number(rx.bill_no));
+          const q = t / div;
+          g.qty += q; g.billed += amt; g.billDisc += r2(amt * dPct / 100);
+          g.mrpValue += mrpUnit > 0 ? Math.max(r2(mrpUnit * q), amt) : amt;
+          groups.set(key, g);
+        });
+      });
+    }
+    const out = Array.from(groups.values()).map(g => {
+      const taxable = r2(g.billed - g.billDisc);
+      const gross = r2(g.mrpValue);
+      return { name: g.name, batchNo: g.batchNo, expiryDate: g.expiryDate, unit: g.unit,
+               qty: Math.round(g.qty * 1000) / 1000, mrp: g.qty > 0 ? r2(gross / g.qty) : 0,
+               gross, discount: r2(gross - taxable), taxable, billNos: Array.from(g.bills).sort((x, y) => x - y), supplier: g.info.supplier || null, purchasedOn: g.info.received || null, purchaseRate: r2(g.purchUnit) };
+    }).sort((x, y) => x.name.localeCompare(y.name) || String(x.expiryDate || "").localeCompare(String(y.expiryDate || "")));
+    res.set("Cache-Control", "no-store");
+    res.json({ from: rg[0], to: rg[1], bills: rows.length,
+      billNoFrom: billNos.length ? Math.min(...billNos) : null, billNoTo: billNos.length ? Math.max(...billNos) : null,
+      profile: await gstProfileFor(req.hid), rows: out });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
