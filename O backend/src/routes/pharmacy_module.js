@@ -760,21 +760,31 @@ router.get("/my-invoice/:id", __patientAuth, async (req, res) => {
 
 // ── GST Invoice: sales grouped by medicine + batch for a date range ──
 const ensureGstTable = () => pool.query(
-  "CREATE TABLE IF NOT EXISTS pharmacy_gst_profile (hospital_id TEXT PRIMARY KEY, gstin TEXT, address TEXT, drug_licence TEXT, default_hsn TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"
+  "CREATE TABLE IF NOT EXISTS pharmacy_gst_profile (hospital_id TEXT PRIMARY KEY, gstin TEXT, address TEXT, drug_licence TEXT, default_hsn TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now()); ALTER TABLE pharmacy_gst_profile ADD COLUMN IF NOT EXISTS gst_type TEXT"
 );
 ensureGstTable().catch(err => console.warn("[pharmacy] gst profile table:", err.message));
 
 async function gstProfileFor(hid) {
   await ensureGstTable();
   const h = await pool.query("SELECT name, address, phone FROM hospitals WHERE id=$1", [hid]);
-  const p = await pool.query("SELECT gstin, address, drug_licence, default_hsn FROM pharmacy_gst_profile WHERE hospital_id=$1", [hid]);
+  const p = await pool.query("SELECT gstin, address, drug_licence, default_hsn, gst_type FROM pharmacy_gst_profile WHERE hospital_id=$1", [hid]);
   const hr = h.rows[0] || {}, pr = p.rows[0] || {};
   return { name: hr.name || "", address: pr.address || hr.address || "", phone: hr.phone || "",
-           gstin: pr.gstin || "", drugLicence: pr.drug_licence || "", defaultHsn: pr.default_hsn || "3004" };
+           gstin: pr.gstin || "", drugLicence: pr.drug_licence || "", defaultHsn: pr.default_hsn || "3004", gstType: pr.gst_type || (pr.gstin ? "registered" : "") };
 }
 
 router.get("/gst-profile", guard, async (req, res) => {
   try { res.json(await gstProfileFor(req.hid)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put("/gst-type", guard, async (req, res) => {
+  try {
+    await ensureGstTable();
+    const t = String((req.body || {}).gstType || "");
+    if (t !== "registered" && t !== "none") return res.status(400).json({ error: "gstType must be registered or none" });
+    await pool.query("INSERT INTO pharmacy_gst_profile (hospital_id, gst_type, updated_at) VALUES ($1,$2,now()) ON CONFLICT (hospital_id) DO UPDATE SET gst_type=EXCLUDED.gst_type, updated_at=now()", [req.hid, t]);
+    res.json(await gstProfileFor(req.hid));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.put("/gst-profile", guard, async (req, res) => {
