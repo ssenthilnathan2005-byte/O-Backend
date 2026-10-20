@@ -16,6 +16,7 @@ pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_no TEXT")
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS strips_per_box INTEGER"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS schedule TEXT"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS gst_percent REAL"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS hsn_code TEXT"))
   .then(() => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_med_categories (hospital_id TEXT NOT NULL, name TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (hospital_id, name))"))
   .then(() => pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS payment_mode TEXT"))
   .catch(e => console.warn("[pharmacy_module] migration:", e.message));
@@ -162,7 +163,7 @@ router.get("/inventory", guard, async (req, res) => {
     const t = await todayIST();
     const soon = addDays(t, 30);
     const { rows } = await pool.query(
-      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, pack_unit, schedule, gst_percent, " +
+      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, pack_unit, schedule, gst_percent, hsn_code, " +
       "to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, updated_at " +
       "FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC", [req.hid]);
     const bq = await pool.query(
@@ -187,7 +188,7 @@ router.get("/inventory", guard, async (req, res) => {
       return {
         id: r.id, name: r.name, unit: r.unit, quantity: qty, packSize: pack, packUnit: r.pack_unit || null,
         tabletsAvailable: total, reorderLevel: Number(r.min_quantity),
-        purchasePrice: r.purchase_price, sellingPrice: r.selling_price, stripsPerBox: r.strips_per_box, tabletsPerBox: r.strips_per_box ? r.strips_per_box * pack : null, schedule: r.schedule || "none", gstPercent: r.gst_percent, breakdown: breakdownOf(qty * pack, pack, r.strips_per_box),
+        purchasePrice: r.purchase_price, sellingPrice: r.selling_price, stripsPerBox: r.strips_per_box, tabletsPerBox: r.strips_per_box ? r.strips_per_box * pack : null, schedule: r.schedule || "none", gstPercent: r.gst_percent, hsnCode: r.hsn_code || null, breakdown: breakdownOf(qty * pack, pack, r.strips_per_box),
         supplier: r.supplier, location: r.location, batchNo: r.batch_no, medCategory: r.med_category || null,
         expiryDate: dated.length ? dated[0].expiryDate : r.expiry_date, batches, status,
         updatedAt: r.updated_at,
@@ -415,6 +416,13 @@ router.post("/inventory/:id/packing", guard, async (req, res) => {
       reorder = Number(b.reorderLevel);
       if (!(reorder >= 0 && reorder <= 10000000)) return res.status(400).json({ error: "Reorder level must be 0 or more" });
     }
+    let hsnGiven = false, hsn = null;
+    if (b.hsnCode !== undefined) {
+      hsnGiven = true;
+      const h = String(b.hsnCode === null ? "" : b.hsnCode).replace(/[\s.]/g, "");
+      if (h !== "" && !/^[0-9]{4,8}$/.test(h)) return res.status(400).json({ error: "HSN code must be 4 to 8 digits" });
+      hsn = h === "" ? null : h;
+    }
     let gst = null;
     if (has(b.gstPercent)) {
       gst = Number(b.gstPercent);
@@ -430,9 +438,9 @@ router.post("/inventory/:id/packing", guard, async (req, res) => {
     const newQty = Math.round((tablets / tps) * 1000000) / 1000000;
     await client.query(
       "UPDATE inventory_items SET pack_size=$1, strips_per_box=$2, quantity=$3, selling_price=$4, " +
-      "purchase_price=COALESCE($5,purchase_price), schedule=COALESCE($6,schedule), gst_percent=COALESCE($7,gst_percent), min_quantity=COALESCE($8,min_quantity), updated_at=now() " +
+      "purchase_price=COALESCE($5,purchase_price), schedule=COALESCE($6,schedule), gst_percent=COALESCE($7,gst_percent), min_quantity=COALESCE($8,min_quantity), hsn_code=CASE WHEN $11::boolean THEN $12::text ELSE hsn_code END, updated_at=now() " +
       "WHERE id=$9 AND hospital_id=$10",
-      [tps, spb, newQty, mrp, pp, sched, gst, reorder, req.params.id, req.hid]);
+      [tps, spb, newQty, mrp, pp, sched, gst, reorder, req.params.id, req.hid, hsnGiven, hsn]);
     await client.query("COMMIT");
     try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
     res.json({ ok: true, tabletsAvailable: tablets, breakdown: breakdownOf(tablets, tps, spb) });
@@ -795,7 +803,7 @@ router.get("/gst-report", guard, async (req, res) => {
       "AND (handed_over_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $2::date AND $3::date ORDER BY handed_over_at ASC LIMIT 5000",
       [req.hid, rg[0], rg[1]]);
     const items = await pool.query(
-      "SELECT id, name, selling_price, purchase_price, supplier, pack_size, med_category, pack_unit FROM inventory_items WHERE hospital_id=$1", [req.hid]);
+      "SELECT id, name, selling_price, purchase_price, supplier, pack_size, med_category, pack_unit, hsn_code, gst_percent FROM inventory_items WHERE hospital_id=$1", [req.hid]);
     const gbq = await pool.query("SELECT item_id, batch_no, supplier, to_char(received_at,'YYYY-MM-DD') AS received FROM inventory_batches WHERE hospital_id=$1 ORDER BY received_at ASC", [req.hid]);
     const bInfo = {};
     for (const x of gbq.rows) bInfo[x.item_id + "|" + x.batch_no] = x;
@@ -829,7 +837,7 @@ router.get("/gst-report", guard, async (req, res) => {
           const amt = last ? leftA : r2(a.amount * Number(b.tablets) / psum);
           leftT = r2(leftT - t); leftA = r2(leftA - amt);
           const key = [l.inventoryItemId || a.name, b.batchNo || "", b.expiry || ""].join("|");
-          const g = groups.get(key) || { name: a.name, batchNo: b.batchNo || null, expiryDate: b.expiry || null, unit, qty: 0, billed: 0, billDisc: 0, mrpValue: 0, bills: new Set(), purchUnit: (Number(it.purchase_price) > 0 ? (Number(it.purchase_price) / pack) * div : 0), info: bInfo[(l.inventoryItemId || "") + "|" + (b.batchNo || "")] || {} };
+          const g = groups.get(key) || { name: a.name, hsn: it.hsn_code || null, gstPct: it.gst_percent == null ? null : Number(it.gst_percent), batchNo: b.batchNo || null, expiryDate: b.expiry || null, unit, qty: 0, billed: 0, billDisc: 0, mrpValue: 0, bills: new Set(), purchUnit: (Number(it.purchase_price) > 0 ? (Number(it.purchase_price) / pack) * div : 0), info: bInfo[(l.inventoryItemId || "") + "|" + (b.batchNo || "")] || {} };
           if (rx.bill_no != null) g.bills.add(Number(rx.bill_no));
           const q = t / div;
           g.qty += q; g.billed += amt; g.billDisc += r2(amt * dPct / 100);
@@ -841,7 +849,7 @@ router.get("/gst-report", guard, async (req, res) => {
     const out = Array.from(groups.values()).map(g => {
       const taxable = r2(g.billed - g.billDisc);
       const gross = r2(g.mrpValue);
-      return { name: g.name, batchNo: g.batchNo, expiryDate: g.expiryDate, unit: g.unit,
+      return { name: g.name, hsn: g.hsn, gstPercent: g.gstPct, batchNo: g.batchNo, expiryDate: g.expiryDate, unit: g.unit,
                qty: Math.round(g.qty * 1000) / 1000, mrp: g.qty > 0 ? r2(gross / g.qty) : 0,
                gross, discount: r2(gross - taxable), taxable, billNos: Array.from(g.bills).sort((x, y) => x - y), supplier: g.info.supplier || null, purchasedOn: g.info.received || null, purchaseRate: r2(g.purchUnit) };
     }).sort((x, y) => x.name.localeCompare(y.name) || String(x.expiryDate || "").localeCompare(String(y.expiryDate || "")));

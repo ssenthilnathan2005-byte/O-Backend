@@ -19,6 +19,7 @@ const ready = pool.query(
   "created_count INTEGER NOT NULL DEFAULT 0, updated_count INTEGER NOT NULL DEFAULT 0, skipped_count INTEGER NOT NULL DEFAULT 0, " +
   "created_by TEXT, created_at TIMESTAMPTZ NOT NULL DEFAULT now())")
   .then(() => pool.query("CREATE INDEX IF NOT EXISTS idx_pharm_imports_inv ON pharmacy_imports(hospital_id, invoice_no)"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS hsn_code TEXT"))
   .catch(e => console.warn("[pharmacy_import] migration:", e.message));
 
 const istToday = () => new Date(Date.now() + 330 * 60 * 1000).toISOString().slice(0, 10);
@@ -72,7 +73,7 @@ const numOrNull = v => (v === undefined || v === null || v === "") ? null : Numb
 // Existing medicines, used to match rows by name and to suggest "similar" names.
 async function loadContext(db, hid) {
   const { rows } = await db.query(
-    "SELECT id, name, pack_size, strips_per_box, selling_price, med_category, pack_unit FROM inventory_items " +
+    "SELECT id, name, pack_size, strips_per_box, selling_price, med_category, pack_unit, hsn_code FROM inventory_items " +
     "WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL", [hid]);
   const byKey = new Map(), similar = new Map();
   for (const r of rows) {
@@ -96,6 +97,19 @@ async function findDuplicate(db, hid, invoiceNo, supplier) {
   return r.rows[0] || null;
 }
 
+const cleanHsn = v => { const t = String(v == null ? "" : v).trim().replace(/\.0+$/, "").replace(/[\s.\-]/g, ""); return /^[0-9]{4,8}$/.test(t) ? t : null; };
+function hsnCheck(r, ex) {
+  const typed = String(r.hsn == null ? "" : r.hsn).trim();
+  const clean = cleanHsn(typed);
+  const saved = ex && ex.hsn_code ? String(ex.hsn_code) : "";
+  if (typed && !clean) return { state: "invalid", saved, issue: { level: "warn", code: "hsn_invalid", msg: "HSN must be 4 to 8 digits. It will not be saved." } };
+  if (!clean && !saved) return { state: "missing", saved, issue: { level: "warn", code: "hsn_missing", msg: "HSN code missing. Add it before this medicine is used on a GST invoice." } };
+  if (!clean) return { state: "keep", saved };
+  if (!saved) return { state: "new", saved };
+  if (clean === saved) return { state: "same", saved };
+  return { state: "conflict", saved, issue: { level: "warn", code: "hsn_conflict", msg: "HSN differs from the saved " + saved + ". The saved code is kept unless you tick Replace." } };
+}
+
 // Step 1b: dry run. Same checks as the save, nothing is written.
 router.post("/validate", guard, async (req, res) => {
   const body = req.body || {};
@@ -113,7 +127,8 @@ router.post("/validate", guard, async (req, res) => {
       r = r || {};
       const ex = ctx.byKey.get(exactKey(r.name)) || null;
       const ev = evaluateRow(r, ex, today, { allowNoBatchExpiry: r.allowNoBatchExpiry === true, similar: similarFor(ctx, r.name) });
-      return { status: ev.status, issues: ev.issues, preview: ev.preview, existing: !!ex };
+      const h = hsnCheck(r, ex);
+      return { status: h.issue && ev.status === "ready" ? "attention" : ev.status, issues: h.issue ? ev.issues.concat([h.issue]) : ev.issues, preview: ev.preview, existing: !!ex, hsn: h.state, savedHsn: h.saved || null };
     });
     res.json({ rows: out, duplicate: dup ? { importedAt: dup.created_at } : null });
   } catch (e) {
@@ -130,6 +145,8 @@ async function importRow(client, req, r, defSupplier, invoiceNo, today) {
   const by = req.user.pharmacyStaffId || req.user.id || null;
   const gstRaw = numOrNull(r.gstPercent);
   const gst = gstRaw !== null && gstRaw >= 0 && gstRaw <= 100 ? gstRaw : null;
+  const hsnNew = cleanHsn(r.hsn);
+  const hsnReplace = r.hsnReplace === true;
 
   await client.query("BEGIN");
   const cur = await client.query(
@@ -163,8 +180,8 @@ async function importRow(client, req, r, defSupplier, invoiceNo, today) {
       "UPDATE inventory_items SET quantity=$1, batch_no=COALESCE($2,batch_no), expiry_date=COALESCE($3::date,expiry_date), " +
       "selling_price=COALESCE($4,selling_price), purchase_price=COALESCE($5,purchase_price), supplier=COALESCE($6,supplier), " +
       "med_category=COALESCE($7,med_category), gst_percent=COALESCE($8,gst_percent), strips_per_box=COALESCE(strips_per_box,$9), " +
-      "pack_unit=COALESCE(pack_unit,$10), updated_at=now() WHERE id=$11 AND hospital_id=$12",
-      [newQty, batchNo, expiry, R.sellingPerPack, R.purchasePerPack, supplier, medCat, gst, R.packsPerBox, R.packWord, row.id, req.hid]);
+      "pack_unit=COALESCE(pack_unit,$10), hsn_code=CASE WHEN $13::text IS NULL THEN hsn_code WHEN hsn_code IS NULL OR hsn_code='' THEN $13::text WHEN $14::boolean THEN $13::text ELSE hsn_code END, updated_at=now() WHERE id=$11 AND hospital_id=$12",
+      [newQty, batchNo, expiry, R.sellingPerPack, R.purchasePerPack, supplier, medCat, gst, R.packsPerBox, R.packWord, row.id, req.hid, hsnNew, hsnReplace]);
     await addBatch(client, row.id, req.hid, batchNo, expiry, R.tablets, supplier);
     await client.query(
       "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
@@ -175,9 +192,9 @@ async function importRow(client, req, r, defSupplier, invoiceNo, today) {
 
   const id = "inv_" + randomBytes(5).toString("hex");
   await client.query(
-    "INSERT INTO inventory_items (id, hospital_id, name, category, unit, quantity, min_quantity, purchase_price, supplier, pack_size, batch_no, expiry_date, selling_price, med_category, gst_percent, strips_per_box, pack_unit) " +
-    "VALUES ($1,$2,$3,'medicines','tablets',$4,5,$5,$6,$7,$8,$9::date,$10,$11,$12,$13,$14)",
-    [id, req.hid, name, R.tablets / pack, R.purchasePerPack, supplier, pack, batchNo, expiry, R.sellingPerPack, medCat, gst, R.packsPerBox, R.packWord]);
+    "INSERT INTO inventory_items (id, hospital_id, name, category, unit, quantity, min_quantity, purchase_price, supplier, pack_size, batch_no, expiry_date, selling_price, med_category, gst_percent, strips_per_box, pack_unit, hsn_code) " +
+    "VALUES ($1,$2,$3,'medicines','tablets',$4,5,$5,$6,$7,$8,$9::date,$10,$11,$12,$13,$14,$15)",
+    [id, req.hid, name, R.tablets / pack, R.purchasePerPack, supplier, pack, batchNo, expiry, R.sellingPerPack, medCat, gst, R.packsPerBox, R.packWord, hsnNew]);
   await addBatch(client, id, req.hid, batchNo, expiry, R.tablets, supplier);
   await client.query(
     "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",

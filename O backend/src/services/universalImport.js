@@ -94,6 +94,7 @@ function toReceivedPrice(price, basis, unit, spb, tps) {
 
 // ---------- header detection ----------
 const FIELDS = [
+  ["hsn", /hsn|^sac$/],
   ["purchaseUnit", /^(cost|purchase|buy|net|net rate|rate|unit cost|ptr|pts|landing)( price| rate| cost)? (unit|uom|basis)$/],
   ["sellingUnit", /^(mrp|retail|retail mrp|selling|sale)( price| mrp)? (unit|uom|basis)$/],
   ["batchNo", /batch|\blot\b/],
@@ -112,7 +113,7 @@ const FIELDS = [
   ["strength", /strength|dosage|dose/],
   ["name", /name|item|product|medicine|drug|description|particulars|brand/],
 ];
-const IGNORE = /amount|amt|discount|disc\b|value|code|hsn|sr ?no|s ?no|sl ?no|serial|mfg|manufactur|mfr|company|\bfree\b|bonus|scheme/;
+const IGNORE = /^(?!.*hsn).*(?:amount|amt|discount|disc\b|value|code|sr ?no|s ?no|sl ?no|serial|mfg|manufactur|mfr|company|\bfree\b|bonus|scheme)/;
 const CONTAINER_STRENGTH = /^\d+(\.\d+)?\s*(ml|g|gm|l)\s*(ampoule|sachet|cartridge|tube|bottle|vial|spray|inhaler)s?$|^\d+\s*(actuations?|doses?|puffs?)$/i;
 const SIZE_CATS = ["Syrup/Tonic", "Ointment/Cream", "Drops", "Oil"];
 // Vendor categories we don't know ("Spray/Inhaler", "Other") are folded into the nearest standard one.
@@ -133,6 +134,7 @@ function stdCategory(cat, name) {
   return pick(cat.toLowerCase()) || pick(String(name).toLowerCase()) || "Others";
 }
 const TOTAL_RE = /^(sub ?total|grand total|total|net|tax|gst|discount|round|igst|cgst|sgst)\b/i;
+function cleanHsn(v) { const raw = typeof v === "number" ? String(Math.round(v)) : String(v == null ? "" : v).trim(); const t = raw.replace(/\.0+$/, "").replace(/[\s.\-]/g, ""); return /^[0-9]{4,8}$/.test(t) ? t : null; }
 
 function mapHeader(cells) {
   const map = {}, raw = {};
@@ -275,6 +277,7 @@ function parseSheet(aoa, sheetName) {
       sellingPrice: conv("sellingPrice", "sellingUnit"),
       supplier: str(g("supplier")) || headerSupplier || null,
       gstPercent: num(g("gstPercent")),
+      hsn: cleanHsn(g("hsn")),
       warnings,
     });
   }

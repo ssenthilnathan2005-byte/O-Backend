@@ -6,6 +6,7 @@ const STD_CATEGORIES = ["Tablet", "Capsule", "Syrup/Tonic", "Injection", "Oil", 
 // Order matters: the first pattern that matches a header wins, so the price patterns
 // must stay above quantityUnit, and quantityUnit above quantity.
 const FIELD_PATTERNS = [
+  ["hsn", /hsn|^sac$/],
   ["batchNo", /batch|lot\b/],
   ["expiryDate", /exp/],
   ["gstPercent", /gst|tax|vat/],
@@ -21,10 +22,11 @@ const FIELD_PATTERNS = [
   ["strength", /strength|dosage|dose/],
   ["name", /name|item|product|medicine|drug|description|particulars|brand/],
 ];
-const IGNORE_HEADER = /amount|amt|discount|disc\b|value|code|hsn|sr no|s no|sl no|serial/;
+const IGNORE_HEADER = /^(?!.*hsn).*(?:amount|amt|discount|disc\b|value|code|sr no|s no|sl no|serial)/;
 
 const norm = h => String(h == null ? "" : h).toLowerCase().replace(/[^a-z0-9% ]+/g, " ").replace(/\s+/g, " ").trim();
 const str = v => (v == null ? "" : String(v).trim());
+function cleanHsn(v) { const raw = typeof v === "number" ? String(Math.round(v)) : String(v == null ? "" : v).trim(); const t = raw.replace(/\.0+$/, "").replace(/[\s.\-]/g, ""); return /^[0-9]{4,8}$/.test(t) ? t : null; }
 function num(v) {
   if (v === null || v === undefined || v === "") return null;
   if (typeof v === "number") return Number.isFinite(v) ? v : null;
@@ -147,6 +149,7 @@ function parseSpreadsheet(buf) {
       sellingPrice: num(get(r, "sellingPrice")),
       supplier: str(get(r, "supplier")) || null,
       gstPercent: num(get(r, "gstPercent")),
+      hsn: cleanHsn(get(r, "hsn")),
       warnings,
     });
   }
