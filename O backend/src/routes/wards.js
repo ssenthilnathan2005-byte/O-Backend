@@ -5,6 +5,7 @@ const { requireAuth } = require("../middleware/auth");
 const { requirePerm, requireAnyPerm } = require("./permissions");
 const { randomBytes } = require("crypto");
 function nanoid(n=10) { return randomBytes(n).toString("hex").slice(0,n); }
+const ipdBilling = require("./ipd_billing");
 const router = express.Router();
 
 function staffOrAdmin(req, res, next) {
@@ -229,6 +230,16 @@ router.get("/:wardId/beds", requireAuth, requirePerm("beds_wards"), async (req, 
        ORDER BY regexp_replace(b.bed_number, '[0-9]+$', '') ASC, length(substring(b.bed_number from '[0-9]+$')) ASC, b.bed_number ASC`,
       [req.params.wardId, hospitalId]
     );
+    // Mark each occupied bed as bill paid / bill due so the nurse can see who can be discharged
+    for (const r of rows) {
+      r.bill_paid = null; r.bill_balance = null; r.bill_total = null;
+      if (r.status === "occupied" && r.inward_id) {
+        try {
+          const bs = await ipdBilling.billStatus(pool, r.inward_id, hospitalId);
+          if (bs) { r.bill_paid = bs.isPaid; r.bill_balance = bs.balance; r.bill_total = bs.total; }
+        } catch (_) {}
+      }
+    }
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -324,6 +335,11 @@ router.patch("/:wardId/beds/:bedId/vacate", requireAuth, requirePerm("beds_wards
     if (!bedRows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Bed not found" }); }
     const bed = bedRows[0];
     if (bed.status !== "occupied") { await client.query("ROLLBACK"); return res.status(409).json({ error: "Only an occupied bed can be discharged" }); }
+
+    if (bed.inward_id) {
+      const bs = await ipdBilling.billStatus(client, bed.inward_id, hospitalId);
+      if (bs && !bs.isPaid) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Bill not paid. Balance due: Rs. " + bs.balance + ". The front desk must collect the payment before this patient can be discharged.", code: "BILL_UNPAID", balance: bs.balance }); }
+    }
 
     if (bed.inward_id) {
       await client.query(

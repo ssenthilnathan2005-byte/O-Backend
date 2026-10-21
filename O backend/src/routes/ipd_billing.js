@@ -443,4 +443,12 @@ router.delete("/:inwardId/payments/:paymentId", requireAuth, staff, async (req, 
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Used by the discharge checks (inward.js, wards.js) and the Beds & Wards screens.
+router.billStatus = async (db, inwardId, hospitalId) => {
+  const stay = await loadStay(db, inwardId, hospitalId);
+  if (!stay) return null;
+  const b = await buildBill(db, stay);
+  return { total: b.total, paid: b.paid, balance: b.balance, isPaid: b.balance <= 0.009 };
+};
+
 module.exports = router;

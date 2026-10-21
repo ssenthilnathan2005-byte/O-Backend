@@ -5,6 +5,7 @@ const { requireAuth } = require("../middleware/auth");
 const { requirePerm, requireAnyPerm } = require("./permissions");
 const { randomBytes } = require("crypto");
 const ExcelJS = require("exceljs");
+const ipdBilling = require("./ipd_billing");
 function nanoid(n=10) { return randomBytes(n).toString("hex").slice(0,n); }
 const router = express.Router();
 
@@ -221,6 +222,8 @@ router.patch("/:id/discharge", requireAuth, requirePerm("ipd"), async (req, res)
     );
     if (!cur.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Not found" }); }
     if (cur[0].status !== "admitted") { await client.query("ROLLBACK"); return res.status(409).json({ error: "This patient is already discharged" }); }
+    const bs = await ipdBilling.billStatus(client, cur[0].id, hospitalId);
+    if (bs && !bs.isPaid) { await client.query("ROLLBACK"); return res.status(409).json({ error: "Bill not paid. Balance due: Rs. " + bs.balance + ". The front desk must collect the payment before this patient can be discharged.", code: "BILL_UNPAID", balance: bs.balance }); }
     const { rows } = await client.query(
       `UPDATE inward_patients SET status='discharged', discharged_at=now()
        WHERE id=$1 RETURNING *`,
