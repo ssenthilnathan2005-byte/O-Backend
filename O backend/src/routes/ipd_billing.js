@@ -16,6 +16,9 @@ const MODES = ["cash", "upi", "card", "bank", "insurance", "other"];
 pool.query(`
   ALTER TABLE inward_patients ADD COLUMN IF NOT EXISTS bed_rate NUMERIC(10,2);
   ALTER TABLE inward_patients ADD COLUMN IF NOT EXISTS bill_discount NUMERIC(10,2) NOT NULL DEFAULT 0;
+  ALTER TABLE inward_patients ADD COLUMN IF NOT EXISTS discount_type TEXT NOT NULL DEFAULT 'amount';
+  ALTER TABLE inward_patients ADD COLUMN IF NOT EXISTS cgst_rate NUMERIC(5,2) NOT NULL DEFAULT 0;
+  ALTER TABLE inward_patients ADD COLUMN IF NOT EXISTS sgst_rate NUMERIC(5,2) NOT NULL DEFAULT 0;
   ALTER TABLE inward_patients ADD COLUMN IF NOT EXISTS invoice_no TEXT;
   CREATE TABLE IF NOT EXISTS ipd_bill_items (
     id          TEXT PRIMARY KEY,
@@ -160,8 +163,17 @@ async function buildBill(db, stay) {
   const bedCharge = moved ? money(segments.reduce((s, x) => s + x.amount, 0)) : money(rate * stay.days);
   const itemsTotal = money(items.reduce((s, i) => s + num(i.amount), 0));
   const subtotal = money(bedCharge + itemsTotal);
-  const discount = Math.min(money(stay.bill_discount), subtotal);
-  const total = money(subtotal - discount);
+  const discountType = stay.discount_type === "percent" ? "percent" : "amount";
+  const discountValue = money(stay.bill_discount);
+  const discount = discountType === "percent"
+    ? money(Math.min(subtotal, (subtotal * Math.min(discountValue, 100)) / 100))
+    : Math.min(discountValue, subtotal);
+  const taxable = money(subtotal - discount);
+  const cgstRate = num(stay.cgst_rate);
+  const sgstRate = num(stay.sgst_rate);
+  const cgst = money((taxable * cgstRate) / 100);
+  const sgst = money((taxable * sgstRate) / 100);
+  const total = money(taxable + cgst + sgst);
   const paid = money(pays.reduce((s, p) => s + (p.kind === "refund" ? -num(p.amount) : num(p.amount)), 0));
   return {
     inwardId: stay.id, hospitalId: stay.hospital_id, patientName: stay.patient_name, phone: stay.phone,
@@ -171,7 +183,7 @@ async function buildBill(db, stay) {
     days: stay.days, bedRate: rate, bedCharge, segments,
     items: items.map((i) => ({ ...i, qty: num(i.qty), unit_price: num(i.unit_price), amount: num(i.amount) })),
     payments: pays.map((p) => ({ ...p, amount: num(p.amount) })),
-    itemsTotal, subtotal, discount, total, paid, balance: money(total - paid),
+    itemsTotal, subtotal, discount, discountType, discountValue, taxable, cgstRate, sgstRate, cgst, sgst, total, paid, balance: money(total - paid),
   };
 }
 
@@ -210,18 +222,21 @@ router.get("/summary", requireAuth, staff, async (req, res) => {
          FROM ipd_payments WHERE hospital_id=$1`, [hid]);
     const { rows: st } = await pool.query(
       `WITH s AS (
-         SELECT ip.id, ip.patient_name, ip.phone, ip.ward, ip.bed_number, ip.status, ip.discharged_at, ip.bill_discount,
+         SELECT ip.id, ip.patient_name, ip.phone, ip.ward, ip.bed_number, ip.status, ip.discharged_at, ip.bill_discount, ip.discount_type, ip.cgst_rate, ip.sgst_rate,
                 CASE WHEN EXISTS (SELECT 1 FROM ipd_transfers tt WHERE tt.inward_id=ip.id) THEN COALESCE((SELECT SUM(g.seg_rate * g.seg_days) FROM ipd_bed_segments(ip.id) g), 0) ELSE COALESCE(ip.bed_rate, (SELECT w.daily_rate FROM wards w WHERE w.hospital_id=ip.hospital_id AND w.name=ip.ward LIMIT 1), 0)
                 * (((COALESCE(ip.discharged_at, now()) AT TIME ZONE 'Asia/Kolkata')::date - (ip.admitted_at AT TIME ZONE 'Asia/Kolkata')::date) + 1) END AS bed,
                 COALESCE((SELECT SUM(amount) FROM ipd_bill_items i WHERE i.inward_id=ip.id), 0) AS items,
                 COALESCE((SELECT SUM(CASE WHEN p.kind='refund' THEN -p.amount ELSE p.amount END) FROM ipd_payments p WHERE p.inward_id=ip.id), 0) AS paid
-           FROM inward_patients ip WHERE ip.hospital_id=$1)
-       SELECT id, patient_name, phone, ward, bed_number, status, discharged_at,
-              (bed + items - LEAST(bill_discount, bed + items)) AS total,
-              paid,
-              (bed + items - LEAST(bill_discount, bed + items)) - paid AS balance
-         FROM s
-        WHERE (bed + items - LEAST(bill_discount, bed + items)) - paid > 0
+           FROM inward_patients ip WHERE ip.hospital_id=$1),
+       b AS (SELECT s.*, (bed + items) AS sub,
+                    CASE WHEN discount_type = 'percent'
+                         THEN ROUND(LEAST(bed + items, (bed + items) * LEAST(bill_discount, 100) / 100), 2)
+                         ELSE LEAST(bill_discount, bed + items) END AS disc
+               FROM s),
+       f AS (SELECT b.*, (sub - disc) + ROUND((sub - disc) * cgst_rate / 100, 2)
+                              + ROUND((sub - disc) * sgst_rate / 100, 2) AS tot
+               FROM b)
+       SELECT id, patient_name, phone, ward, bed_number, status, discharged_at, tot AS total, paid, tot - paid AS balance FROM f WHERE tot - paid > 0
         ORDER BY (status='discharged') DESC, 10 DESC LIMIT 50`, [hid]);
     res.set("Cache-Control", "no-store");
     res.json({
@@ -327,7 +342,7 @@ router.patch("/:inwardId/settings", requireAuth, staff, async (req, res) => {
   try {
     const stay = await loadStay(pool, req.params.inwardId, hospitalOf(req));
     if (!stay) return res.status(404).json({ error: "Admission not found" });
-    if (!(await guardEdit(req, res, stay, "settings", { bedRate: (req.body || {}).bedRate, discount: (req.body || {}).discount }))) return;
+    if (!(await guardEdit(req, res, stay, "settings", { bedRate: (req.body || {}).bedRate, discount: (req.body || {}).discount, discountType: (req.body || {}).discountType, cgstRate: (req.body || {}).cgstRate, sgstRate: (req.body || {}).sgstRate }))) return;
     const b = req.body || {};
     if (b.bedRate !== undefined) {
       const r = Number(b.bedRate);
@@ -337,10 +352,21 @@ router.patch("/:inwardId/settings", requireAuth, staff, async (req, res) => {
         [money(r), stay.id]);
       if (!tr.rows.length) await pool.query("UPDATE inward_patients SET bed_rate=$1 WHERE id=$2", [money(r), stay.id]);
     }
-    if (b.discount !== undefined) {
-      const d = Number(b.discount);
+    if (b.discount !== undefined || b.discountType !== undefined) {
+      const type = b.discountType === "percent" ? "percent"
+        : b.discountType === "amount" ? "amount"
+        : (stay.discount_type === "percent" ? "percent" : "amount");
+      const d = b.discount !== undefined ? Number(b.discount) : num(stay.bill_discount);
       if (!(d >= 0)) return res.status(400).json({ error: "Enter a valid discount" });
-      await pool.query("UPDATE inward_patients SET bill_discount=$1 WHERE id=$2", [money(d), stay.id]);
+      if (type === "percent" && d > 100) return res.status(400).json({ error: "Percentage discount cannot be more than 100" });
+      await pool.query("UPDATE inward_patients SET bill_discount=$1, discount_type=$2 WHERE id=$3", [money(d), type, stay.id]);
+    }
+    for (const [key, col] of [["cgstRate", "cgst_rate"], ["sgstRate", "sgst_rate"]]) {
+      if (b[key] !== undefined) {
+        const r = Number(b[key]);
+        if (!(r >= 0 && r <= 100)) return res.status(400).json({ error: "Enter a tax rate between 0 and 100" });
+        await pool.query("UPDATE inward_patients SET " + col + "=$1 WHERE id=$2", [money(r), stay.id]);
+      }
     }
     res.json(await buildBill(pool, await loadStay(pool, stay.id, stay.hospital_id)));
   } catch (e) { res.status(500).json({ error: e.message }); }
