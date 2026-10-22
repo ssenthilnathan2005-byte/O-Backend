@@ -136,4 +136,44 @@ router.get("/follow-up-status/:bookingId", requireDoctor, async (req, res) => {
     res.status(500).json({ error: err.message });
   }
 });
+
+// GET /api/doctor/follow-ups  -> patients asked to return (upcoming, due today, overdue)
+router.get("/follow-ups", requireDoctor, async (req, res) => {
+  try {
+    const today = new Date(Date.now() + 330 * 60000).toISOString().slice(0, 10);
+    const ms = (s) => { const [y, m, dd] = String(s).slice(0, 10).split("-").map(Number); return Date.UTC(y, m - 1, dd); };
+    const minDate = new Date(ms(today) - 60 * 86400000).toISOString().slice(0, 10);
+    const maxDate = new Date(ms(today) + 30 * 86400000).toISOString().slice(0, 10);
+    const { rows } = await pool.query(
+      `SELECT b.id, b.patient_id, b.patient_name, b.phone, b.date, b.follow_up_days, b.follow_up_date,
+              (SELECT p.diagnosis FROM prescriptions p WHERE p.booking_id = b.id ORDER BY p.created_at DESC LIMIT 1) AS diagnosis
+         FROM bookings b
+        WHERE b.doctor_id = $1 AND b.status = 'completed'
+          AND b.follow_up_date IS NOT NULL
+          AND b.follow_up_date >= $2 AND b.follow_up_date <= $3
+          AND NOT EXISTS (
+            SELECT 1 FROM bookings n
+             WHERE n.doctor_id = b.doctor_id AND n.patient_id = b.patient_id
+               AND lower(btrim(n.patient_name)) = lower(btrim(b.patient_name))
+               AND n.id <> b.id AND n.status IN ('confirmed','completed')
+               AND n.created_at > b.created_at)
+        ORDER BY b.follow_up_date ASC`,
+      [req.user.doctorId, minDate, maxDate]
+    );
+    res.json(rows.map((r) => {
+      const diff = Math.round((ms(today) - ms(r.follow_up_date)) / 86400000);
+      return {
+        bookingId: r.id, patientId: r.patient_id, patientName: r.patient_name, phone: r.phone || "",
+        visitDate: r.date, followUpDays: r.follow_up_days, followUpDate: r.follow_up_date,
+        diagnosis: r.diagnosis || "",
+        state: diff > 0 ? "overdue" : diff === 0 ? "due_today" : "upcoming",
+        daysOverdue: Math.max(diff, 0), daysToGo: diff < 0 ? -diff : 0,
+      };
+    }));
+  } catch (err) {
+    console.error("[doctor/follow-ups]", err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 module.exports = router;
