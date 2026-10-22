@@ -294,6 +294,8 @@ const MIGRATIONS = [
   "ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ",
   "ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS diagnosis TEXT",
   "ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS diagnosis_code TEXT",
+  "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS follow_up_days INTEGER",
+  "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS follow_up_date TEXT",
   "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS admin_user_id TEXT REFERENCES users(id) ON DELETE SET NULL",
   "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'premium' CHECK (plan IN ('basic','premium'))",
   "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS rate_per_token REAL NOT NULL DEFAULT 15",
