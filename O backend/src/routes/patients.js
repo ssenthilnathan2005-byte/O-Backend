@@ -66,7 +66,7 @@ router.get("/profile", requireAuth, async (req, res) => {
     return res.status(403).json({ error: "Patients only" });
   try {
     const { rows } = await pool.query(
-      "SELECT name, phone, age, year_of_birth FROM users WHERE id=$1",
+      "SELECT name, phone, age, year_of_birth, preferred_language FROM users WHERE id=$1",
       [req.user.id]
     );
     const u = rows[0] || {};
@@ -78,11 +78,28 @@ router.get("/profile", requireAuth, async (req, res) => {
       phone: u.phone || "",
       age: liveAge != null ? String(liveAge) : "",
       yearOfBirth: u.year_of_birth ? String(u.year_of_birth) : "",
+      preferredLanguage: u.preferred_language === "ta" ? "ta" : "en",
       isComplete,
     });
   } catch (err) {
     console.error("[profile] get error:", err.message);
     return res.status(500).json({ error: "Failed to load profile" });
+  }
+});
+
+// PATCH /api/patients/language - save the patient's preferred site language
+router.patch("/language", requireAuth, async (req, res) => {
+  if (req.user.role !== "patient")
+    return res.status(403).json({ error: "Patients only" });
+  const lang = req.body && req.body.preferredLanguage;
+  if (lang !== "en" && lang !== "ta")
+    return res.status(400).json({ error: "preferredLanguage must be 'en' or 'ta'" });
+  try {
+    await pool.query("UPDATE users SET preferred_language=$1 WHERE id=$2", [lang, req.user.id]);
+    return res.json({ success: true, preferredLanguage: lang });
+  } catch (err) {
+    console.error("[language] patch error:", err.message);
+    return res.status(500).json({ error: "Failed to save language" });
   }
 });
 

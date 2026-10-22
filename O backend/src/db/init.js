@@ -278,6 +278,7 @@ const MIGRATIONS = [
   "ALTER TABLE doctors ADD COLUMN IF NOT EXISTS schedule_config TEXT",
   "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS patient_age INTEGER",
   "ALTER TABLE users ADD COLUMN IF NOT EXISTS year_of_birth INTEGER",
+  "ALTER TABLE users ADD COLUMN IF NOT EXISTS preferred_language TEXT NOT NULL DEFAULT 'en'",
   "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS patient_year_of_birth INTEGER",
   "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS close_reason TEXT",
   "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS photo_data TEXT",
