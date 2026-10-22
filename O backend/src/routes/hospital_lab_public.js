@@ -114,7 +114,7 @@ router.get("/my-orders", requireAuth, async (req, res) => {
        FROM hospital_lab_orders o
        JOIN hospitals h ON h.id = o.hospital_id
        WHERE o.patient_id = $1 AND o.source = 'patient'
-       ORDER BY o.ordered_at DESC LIMIT 50`,
+       ORDER BY o.ordered_at DESC`,
       [req.user.id]);
     res.json(rows);
   } catch (err) { res.status(500).json({ error: err.message }); }

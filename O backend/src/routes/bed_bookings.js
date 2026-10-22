@@ -170,7 +170,7 @@ router.get("/my-stays", requireAuth, async (req, res) => {
          LEFT JOIN hospitals h ON h.id = ip.hospital_id
         WHERE ip.patient_user_id = $1
            OR ($2::text <> '' AND right(regexp_replace(COALESCE(ip.phone,''), '\\D', '', 'g'), 10) = $2)
-        ORDER BY ip.admitted_at DESC LIMIT 50`,
+        ORDER BY ip.admitted_at DESC`,
       [req.user.id, last10]);
     res.set("Cache-Control", "no-store");
     res.json(rows.map((r) => ({ ...r, daily_rate: Number(r.daily_rate) })));
