@@ -88,10 +88,10 @@ router.post("/create-order", requireAuth, async (req, res) => {
 
     // Check duplicate booking
     const { rows: dupRows } = await pool.query(
-      "SELECT id FROM bookings WHERE session_id=$1 AND patient_id=$2 AND status!='cancelled'",
-      [sessionId, req.user.id]
+      "SELECT id FROM bookings WHERE session_id=$1 AND patient_id=$2 AND status!='cancelled' AND lower(btrim(patient_name))=lower(btrim($3)) AND (patient_year_of_birth IS NULL OR $4::int IS NULL OR patient_year_of_birth=$4::int)",
+        [sessionId, req.user.id, (submittedName || (await pool.query("SELECT name FROM users WHERE id=$1", [req.user.id])).rows[0]?.name || ""), birthYearFrom(req.body)]
     );
-    if (dupRows[0]) return res.status(409).json({ error: "You already have a booking in this session." });
+    if (dupRows[0]) return res.status(409).json({ error: "You already have a booking for this patient in this session." });
 
     const amountRupees = doctor.consultation_fee || doctor.price || 10;
     const amountPaise  = Math.round(amountRupees * 100);
@@ -227,11 +227,11 @@ router.post("/verify", requireAuth, async (req, res) => {
 
       // Re-check duplicate
       const { rows: dupRows } = await client.query(
-        "SELECT id FROM bookings WHERE session_id=$1 AND patient_id=$2 AND status!='cancelled'",
-        [sessionId, req.user.id]
+        "SELECT id FROM bookings WHERE session_id=$1 AND patient_id=$2 AND status!='cancelled' AND lower(btrim(patient_name))=lower(btrim($3)) AND (patient_year_of_birth IS NULL OR $4::int IS NULL OR patient_year_of_birth=$4::int)",
+        [sessionId, req.user.id, (submittedName || patient.name), birthYearFrom(req.body)]
       );
       if (dupRows[0])
-        throw Object.assign(new Error("You already have a booking in this session."), { status: 409 });
+        throw Object.assign(new Error("You already have a booking for this patient in this session."), { status: 409 });
 
       const tokenNumber = freshCount + 1;
       const bookingYob = birthYearFrom(req.body);

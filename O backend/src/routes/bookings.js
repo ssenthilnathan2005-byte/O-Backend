@@ -184,11 +184,11 @@ router.post("/", requireAuth, async (req, res) => {
         throw Object.assign(new Error("This session is fully booked"), { status: 409 });
 
       const { rows: dupRows } = await client.query(
-        "SELECT id FROM bookings WHERE session_id=$1 AND patient_id=$2 AND status!='cancelled'",
-        [sessionId, req.user.id]
+        "SELECT id FROM bookings WHERE session_id=$1 AND patient_id=$2 AND status!='cancelled' AND lower(btrim(patient_name))=lower(btrim($3)) AND (patient_year_of_birth IS NULL OR $4::int IS NULL OR patient_year_of_birth=$4::int)",
+        [sessionId, req.user.id, (submittedName || patient?.name || "Unknown"), birthYearFrom(req.body)]
       );
       if (dupRows[0])
-        throw Object.assign(new Error("You already have a booking in this session"), { status: 409 });
+        throw Object.assign(new Error("You already have a booking for this patient in this session"), { status: 409 });
 
       finalTokenNumber = count + 1;
       const bookingYob = birthYearFrom(req.body);

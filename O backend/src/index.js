@@ -151,6 +151,7 @@ app.use("/api/bookings",  bookingRoutes);
 app.use("/api/tokens",    tokenRoutes);
 app.use("/api/patients", apiCache.cacheGet(300000, (r) => r.path === "/"));
 app.use("/api/patients",  patientRoutes);
+app.use("/api/family-members", require("./routes/family_members"));
 app.use("/api/payments",  paymentRoutes);
 app.use("/api/push", pushRoutes);
 app.use("/api/chat", chatRoutes);
