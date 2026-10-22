@@ -318,4 +318,4 @@ function parseImport(buf, filename) {
   return out;
 }
 
-module.exports = { parseImport, parseUniversal, detectFormat, parsePack, splitQty, num };
+module.exports = { parseImport, parseUniversal, parseSheet, detectFormat, parsePack, splitQty, num };
