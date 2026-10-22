@@ -70,7 +70,7 @@ const hospitalOfStaff = (req) =>
   req.user.role === "admin" ? (req.body.hospitalId || req.query.hospitalId) : req.user.hospitalId;
 
 function push(userId, title, body) {
-  sendPushToPatient(userId, { title, body, data: { tag: "bed-booking" } }).catch(() => {});
+  sendPushToPatient(userId, { title, body, data: { tag: "bed-booking", link: "/patient/admission" } }).catch(() => {});
 }
 
 // ───────────────────────── PATIENT ─────────────────────────

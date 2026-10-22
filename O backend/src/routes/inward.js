@@ -6,6 +6,7 @@ const { requirePerm, requireAnyPerm } = require("./permissions");
 const { randomBytes } = require("crypto");
 const ExcelJS = require("exceljs");
 const ipdBilling = require("./ipd_billing");
+const { sendPushToPatient } = require("../services/push");
 function nanoid(n=10) { return randomBytes(n).toString("hex").slice(0,n); }
 const router = express.Router();
 
@@ -86,6 +87,7 @@ router.post("/", requireAuth, requirePerm("ipd"), async (req, res) => {
     res.status(500).json({ error: err.message });
   } finally { client.release(); }
 });
+
 router.patch("/:id", requireAuth, requirePerm("ipd"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
@@ -121,6 +123,7 @@ router.patch("/:id", requireAuth, requirePerm("ipd"), async (req, res) => {
     res.json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
+
 pool.query(`
   CREATE TABLE IF NOT EXISTS ipd_transfers (
     id             TEXT PRIMARY KEY,
@@ -251,6 +254,13 @@ router.patch("/:id/discharge", requireAuth, requirePerm("ipd"), async (req, res)
       );
     }
     await client.query("COMMIT");
+    if (rows[0] && rows[0].patient_user_id) {
+      sendPushToPatient(rows[0].patient_user_id, {
+        title: "Discharged",
+        body: "You have been discharged. Your bill and receipts are in the app.",
+        data: { tag: "bed-booking", link: "/patient/admission" },
+      }).catch(() => {});
+    }
     res.json(rows[0]);
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});
