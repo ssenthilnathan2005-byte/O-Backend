@@ -1,6 +1,7 @@
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireDoctor } = require("../middleware/auth");
+const { logAccess } = require("../services/audit");
 
 const router = express.Router();
 
@@ -48,6 +49,7 @@ router.get("/patient-history/:patientId", requireDoctor, async (req, res) => {
       };
     });
 
+    logAccess(req, { action: "view_patient_history", resourceType: "patient", resourceId: patientId, patientId, meta: { visits: visits.length } });
     res.json({ totalVisits: visits.length, visits });
   } catch (err) {
     console.error("[doctor/patient-history]", err.message);

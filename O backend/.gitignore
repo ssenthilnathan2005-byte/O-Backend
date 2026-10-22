@@ -6,3 +6,10 @@ src/exports/
 # local backups
 *.bak*
 .env.bak*
+
+# databases, uploads, exports (never commit data)
+*.db
+*.db-shm
+*.db-wal
+data/
+uploads/

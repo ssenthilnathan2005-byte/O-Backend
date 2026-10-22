@@ -8,7 +8,7 @@ const { pool } = require("../db/init");
 const { requireAdminOrHospitalAdmin } = require("../middleware/auth");
 
 const { issueCode } = require("../services/loginCodes");
-const SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
+const SECRET = require("../utils/secrets").JWT_SECRET;
 const EXPIRES = process.env.JWT_EXPIRES_IN || "7d";
 const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
 const PW_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";

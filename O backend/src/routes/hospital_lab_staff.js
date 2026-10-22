@@ -8,7 +8,7 @@ const { pool } = require("../db/init");
 const { requireAuth, requireAdminOrHospitalAdmin } = require("../middleware/auth");
 const router = express.Router();
 
-const JWT_SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
+const JWT_SECRET = require("../utils/secrets").JWT_SECRET;
 function rid(n = 10) { return randomBytes(n).toString("hex").slice(0, n); }
 function sign(p) { return jwt.sign(p, JWT_SECRET, { expiresIn: "7d" }); }
 

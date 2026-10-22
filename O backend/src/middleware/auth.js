@@ -1,17 +1,7 @@
 "use strict";
 const jwt = require("jsonwebtoken");
 
-const SECRET = process.env.JWT_SECRET;
-if (!SECRET || SECRET === "fallback_dev_secret") {
-  if (process.env.NODE_ENV === "production") {
-    console.error("[FATAL] JWT_SECRET is not set! Set it in Railway environment variables.");
-    process.exit(1);
-  } else {
-    console.warn("[AUTH] WARNING: Using fallback JWT secret. Set JWT_SECRET in .env");
-  }
-}
-
-const JWT_SECRET = SECRET || "fallback_dev_secret";
+const { JWT_SECRET } = require("../utils/secrets");
 
 const _docActive = new Map();
 const _staffActive = new Map();
@@ -59,7 +49,10 @@ function requireAuth(req, res, next) {
   const token  = header.startsWith("Bearer ") ? header.slice(7).trim() : null;
   if (!token) return res.status(401).json({ error: "No token provided" });
   try {
-    req.user = jwt.verify(token, JWT_SECRET);
+    const decoded = jwt.verify(token, JWT_SECRET);
+    // Single-purpose tokens (e.g. password-reset links) must never work as login sessions.
+    if (decoded && decoded.purpose) return res.status(401).json({ error: "Invalid token. Please log in again." });
+    req.user = decoded;
     doctorActiveCheck(req, res, () => staffActiveCheck(req, res, next));
   } catch (err) {
     if (err.name === "TokenExpiredError")

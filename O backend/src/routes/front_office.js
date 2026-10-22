@@ -8,7 +8,7 @@ const { issueCode } = require("../services/loginCodes");
 let bcrypt; try { bcrypt = require("bcryptjs"); } catch (_) { bcrypt = require("bcrypt"); }
 
 const router = express.Router();
-const JWT_SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
+const JWT_SECRET = require("../utils/secrets").JWT_SECRET;
 const sign = p => jwt.sign(p, JWT_SECRET, { expiresIn: "12h" });
 const id = pre => pre + randomBytes(5).toString("hex");
 const todayIST = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);

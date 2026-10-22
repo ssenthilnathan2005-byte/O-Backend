@@ -6,7 +6,7 @@ const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
 const jwt = require("jsonwebtoken");
 
-const SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
+const SECRET = require("../utils/secrets").JWT_SECRET;
 const sign = (payload) => jwt.sign(payload, SECRET, { expiresIn: "30d" });
 
 function requirePharmacyOwner(req, res, next) {

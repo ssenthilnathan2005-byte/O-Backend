@@ -2,7 +2,7 @@
 const jwt = require("jsonwebtoken");
 const cache = require("../utils/cache");
 
-const SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
+const SECRET = require("../utils/secrets").JWT_SECRET;
 const PLAN_TTL_MS = 60 * 1000;
 
 async function lookupPlan(hospitalId) {

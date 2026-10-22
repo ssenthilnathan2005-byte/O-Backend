@@ -2,3 +2,8 @@
 *.bak[0-9]
 *.bak_*
 *.bak*
+
+# databases and local keys (never commit data)
+*.db
+*.db-shm
+*.db-wal

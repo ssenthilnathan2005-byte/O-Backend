@@ -8,7 +8,7 @@ const { requireAuth, requireAdminOrHospitalAdmin } = require("../middleware/auth
 
 function nanoid(n = 10) { return randomBytes(n).toString("hex").slice(0, n); }
 
-const JWT_SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
+const JWT_SECRET = require("../utils/secrets").JWT_SECRET;
 
 // POST /api/ambulance — book an ambulance (guests allowed, login optional)
 router.post("/", async (req, res) => {

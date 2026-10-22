@@ -4,6 +4,11 @@ const bcrypt = require("bcrypt");
 const { pool, init } = require("./init");
 
 const ADMIN_CODE = process.env.ADMIN_CODE || "ADMIN-001";
+const { isProduction } = require("../utils/secrets");
+if (isProduction && !process.env.ADMIN_PASSWORD) {
+  console.error("[seed] ADMIN_PASSWORD must be set in production. Refusing to seed a default password.");
+  process.exit(1);
+}
 const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin@123";
 
 async function seed() {
@@ -24,7 +29,7 @@ async function seed() {
 
   console.log("✅  Admin seeded.");
   console.log(`   Code    : ${ADMIN_CODE}`);
-  console.log(`   Password: ${ADMIN_PASSWORD}`);
+  console.log(process.env.ADMIN_PASSWORD ? "   Password: (taken from ADMIN_PASSWORD)" : `   Password: ${ADMIN_PASSWORD} (insecure dev default)`);
   console.log("   ⚠️  Change ADMIN_PASSWORD in .env before going to production!");
   process.exit(0);
 }

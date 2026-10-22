@@ -42,7 +42,7 @@ router.post("/:id/enquire", async (req, res) => {
     if (header.startsWith("Bearer ")) {
       try {
         const jwt = require("jsonwebtoken");
-        const decoded = jwt.verify(header.slice(7).trim(), process.env.JWT_SECRET || "fallback_dev_secret");
+        const decoded = jwt.verify(header.slice(7).trim(), require("../utils/secrets").JWT_SECRET);
         patientId = decoded.id || null;
       } catch (_) {}
     }
@@ -62,7 +62,7 @@ router.patch("/:id/toggle-active", async (req, res) => {
     const jwt = require("jsonwebtoken");
     const header = req.headers.authorization || "";
     if (!header.startsWith("Bearer ")) return res.status(401).json({ error: "Unauthorized" });
-    const decoded = jwt.verify(header.slice(7).trim(), process.env.JWT_SECRET || "fallback_dev_secret");
+    const decoded = jwt.verify(header.slice(7).trim(), require("../utils/secrets").JWT_SECRET);
     if (decoded.role !== "admin") return res.status(403).json({ error: "Admin only" });
     const { rows } = await pool.query(
       "UPDATE pharmacies SET is_active = CASE WHEN is_active=1 THEN 0 ELSE 1 END WHERE id=$1 RETURNING *",
@@ -79,7 +79,7 @@ router.get("/:id/enquiries-admin", async (req, res) => {
     const jwt = require("jsonwebtoken");
     const header = req.headers.authorization || "";
     if (!header.startsWith("Bearer ")) return res.status(401).json({ error: "Unauthorized" });
-    const decoded = jwt.verify(header.slice(7).trim(), process.env.JWT_SECRET || "fallback_dev_secret");
+    const decoded = jwt.verify(header.slice(7).trim(), require("../utils/secrets").JWT_SECRET);
     if (decoded.role !== "admin") return res.status(403).json({ error: "Admin only" });
     const { rows } = await pool.query(
       "SELECT * FROM pharmacy_enquiries WHERE pharmacy_id=$1 ORDER BY created_at DESC LIMIT 200",

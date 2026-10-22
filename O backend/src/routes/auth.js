@@ -17,7 +17,7 @@ if (!resend) {
 
 const router = express.Router();
 
-const SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
+const SECRET = require("../utils/secrets").JWT_SECRET;
 const EXPIRES = process.env.JWT_EXPIRES_IN || "7d";
 const ADMIN_CODE = process.env.ADMIN_CODE || "ADMIN-001";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";

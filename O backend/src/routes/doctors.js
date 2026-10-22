@@ -76,7 +76,7 @@ function viewDoctor(req, d) {
   try {
     const h = req.headers.authorization || "";
     const t = h.startsWith("Bearer ") ? h.slice(7).trim() : null;
-    const u = t ? require("jsonwebtoken").verify(t, process.env.JWT_SECRET || "fallback_dev_secret") : null;
+    const u = t ? require("jsonwebtoken").verify(t, require("../utils/secrets").JWT_SECRET) : null;
     if (u && (u.role === "admin" || (u.role === "hospital_admin" && u.hospitalId === d.hospitalId) || (u.role === "doctor" && u.doctorId === d.id))) return d;
   } catch (e) {}
   return { ...d, phone: "", contactPhone: "", password: "" };
