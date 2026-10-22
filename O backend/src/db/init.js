@@ -292,6 +292,8 @@ const MIGRATIONS = [
   "CREATE INDEX IF NOT EXISTS idx_nurses_hospital ON nurses(hospital_id)",
   "ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS patient_confirmed INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS confirmed_at TIMESTAMPTZ",
+  "ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS diagnosis TEXT",
+  "ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS diagnosis_code TEXT",
   "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS admin_user_id TEXT REFERENCES users(id) ON DELETE SET NULL",
   "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS plan TEXT NOT NULL DEFAULT 'premium' CHECK (plan IN ('basic','premium'))",
   "ALTER TABLE hospitals ADD COLUMN IF NOT EXISTS rate_per_token REAL NOT NULL DEFAULT 15",

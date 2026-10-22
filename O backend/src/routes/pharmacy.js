@@ -89,17 +89,19 @@ router.post("/", requireAuth, async (req, res) => {
       return res.status(403).json({ error: "Only doctors can create prescriptions" });
     const { bookingId, doctorId, doctorName, patientId, patientName,
             hospitalId, hospitalName, items = [], notes = "" } = req.body;
+    const diagnosis = typeof req.body.diagnosis === "string" ? (req.body.diagnosis.trim().slice(0, 500) || null) : null;
+    const diagnosisCode = typeof req.body.diagnosisCode === "string" ? (req.body.diagnosisCode.trim().slice(0, 50) || null) : null;
     if (!bookingId || !doctorId || !hospitalId)
       return res.status(400).json({ error: "bookingId, doctorId, hospitalId required" });
     const id = "rx_" + Date.now() + "_" + Math.random().toString(36).substring(2, 8);
     const { rows } = await pool.query(
       `INSERT INTO prescriptions
         (id, booking_id, doctor_id, doctor_name, patient_id, patient_name,
-         hospital_id, hospital_name, items, notes, status)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending')
+         hospital_id, hospital_name, items, notes, status, diagnosis, diagnosis_code)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12)
        RETURNING *`,
       [id, bookingId, doctorId, doctorName || "", patientId || "", patientName || "",
-       hospitalId, hospitalName || "", JSON.stringify(items), notes]
+       hospitalId, hospitalName || "", JSON.stringify(items), notes, diagnosis, diagnosisCode]
     );
     // Notify patient via WebSocket — same room used for status updates,
     // so the app can toast + redirect the moment a new prescription lands.

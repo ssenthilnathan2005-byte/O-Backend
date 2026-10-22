@@ -23,7 +23,7 @@ router.get("/patient-history/:patientId", requireDoctor, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT b.id, b.date, b.session, b.token_number, b.complaint,
               b.doctor_name, b.hospital_name, b.created_at,
-              p.items, p.notes
+              p.items, p.notes, p.diagnosis, p.diagnosis_code
          FROM bookings b
          LEFT JOIN prescriptions p ON p.booking_id = b.id
         WHERE b.patient_id = $1
@@ -46,6 +46,7 @@ router.get("/patient-history/:patientId", requireDoctor, async (req, res) => {
         hospitalName: r.hospital_name,
         medicines: items,
         notes: r.notes || "",
+        diagnosis: r.diagnosis || "",
       };
     });
 
