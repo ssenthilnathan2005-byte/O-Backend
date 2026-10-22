@@ -47,6 +47,11 @@ pool.query(`
   CREATE INDEX IF NOT EXISTS idx_hlab_tests_hospital ON hospital_lab_tests(hospital_id);
   CREATE INDEX IF NOT EXISTS idx_hlab_orders_hospital ON hospital_lab_orders(hospital_id);
   CREATE INDEX IF NOT EXISTS idx_hlab_orders_status ON hospital_lab_orders(status);
+  ALTER TABLE hospital_lab_orders ADD COLUMN IF NOT EXISTS inward_id TEXT;
+  ALTER TABLE hospital_lab_orders ADD COLUMN IF NOT EXISTS amount NUMERIC(12,2);
+  ALTER TABLE hospital_lab_orders ADD COLUMN IF NOT EXISTS ipd_bill_item_id TEXT;
+  ALTER TABLE hospital_lab_orders ADD COLUMN IF NOT EXISTS billed_by TEXT;
+  CREATE INDEX IF NOT EXISTS idx_hlab_orders_inward ON hospital_lab_orders(inward_id);
 `).catch(e => console.warn("[hospital_lab] migration:", e.message));
 
 // ── Tests CRUD ────────────────────────────────────────────────────────────────
@@ -124,6 +129,11 @@ router.patch("/orders/:id", requireAuth, adminOnly, async (req, res) => {
        WHERE id=$5 AND hospital_id=$6 RETURNING *`,
       [status||null, resultValue||null, reportUrl||null, notes||null, req.params.id, hospitalId]);
     if (!rows.length) return res.status(404).json({ error: "Not found" });
+    if (rows[0].status === "cancelled" && rows[0].ipd_bill_item_id) {
+      await pool.query(
+        "DELETE FROM ipd_bill_items WHERE id=$1 AND inward_id IN (SELECT id FROM inward_patients WHERE id=$2 AND status='admitted')",
+        [rows[0].ipd_bill_item_id, rows[0].inward_id]);
+    }
     res.json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

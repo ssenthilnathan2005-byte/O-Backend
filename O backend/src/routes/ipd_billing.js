@@ -152,6 +152,15 @@ async function buildBill(db, stay) {
     "SELECT * FROM ipd_bill_items WHERE inward_id=$1 ORDER BY created_at ASC", [stay.id]);
   const { rows: pays } = await db.query(
     "SELECT * FROM ipd_payments WHERE inward_id=$1 ORDER BY created_at ASC", [stay.id]);
+  let labTests = [];
+  try {
+    const lr = await db.query(
+      "SELECT * FROM hospital_lab_orders WHERE inward_id=$1 AND status<>'cancelled' ORDER BY ordered_at ASC", [stay.id]);
+    labTests = lr.rows.map((r) => ({
+      id: r.id, testName: r.test_name, status: r.status, priority: r.priority,
+      amount: num(r.amount), result: r.result_value || null, orderedAt: r.ordered_at,
+    }));
+  } catch (_) { labTests = []; }
   const { rows: segRows } = await db.query(
     "SELECT seg_no, seg_ward, seg_rate, seg_start::text AS seg_start, seg_days FROM ipd_bed_segments($1) ORDER BY seg_no", [stay.id]);
   const moved = segRows.length > 1;
@@ -182,6 +191,7 @@ async function buildBill(db, stay) {
     status: stay.status, admittedAt: stay.admitted_at, dischargedAt: stay.discharged_at,
     days: stay.days, bedRate: rate, bedCharge, segments,
     items: items.map((i) => ({ ...i, qty: num(i.qty), unit_price: num(i.unit_price), amount: num(i.amount) })),
+    labTests, labTotal: money(labTests.reduce((t, x) => t + num(x.amount), 0)),
     payments: pays.map((p) => ({ ...p, amount: num(p.amount) })),
     itemsTotal, subtotal, discount, discountType, discountValue, taxable, cgstRate, sgstRate, cgst, sgst, total, paid, balance: money(total - paid),
   };

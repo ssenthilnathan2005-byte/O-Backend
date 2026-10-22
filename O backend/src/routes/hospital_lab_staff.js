@@ -146,8 +146,102 @@ router.patch("/orders/:id", requireLabStaff, async (req, res) => {
        WHERE id=$3 AND hospital_id=$4 AND status <> 'cancelled' RETURNING *`,
       [status || null, resultValue || null, req.params.id, req.user.hospitalId]);
     if (!rows.length) return res.status(404).json({ error: "Order not found or already cancelled" });
+    if (rows[0].status === "cancelled" && rows[0].ipd_bill_item_id) {
+      await pool.query(
+        "DELETE FROM ipd_bill_items WHERE id=$1 AND inward_id IN (SELECT id FROM inward_patients WHERE id=$2 AND status='admitted')",
+        [rows[0].ipd_bill_item_id, rows[0].inward_id]);
+    }
     res.json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Inpatients: lab staff picks an admitted patient, adds tests + amounts, sends to IPD bill ──
+router.get("/inpatients", requireLabStaff, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      `SELECT ip.id, ip.patient_name, ip.phone, ip.age, ip.gender, ip.ward, ip.bed_number,
+              ip.admitting_doctor_name, ip.diagnosis, ip.admitted_at,
+              (SELECT COUNT(*) FROM hospital_lab_orders o WHERE o.inward_id=ip.id AND o.status<>'cancelled')::int AS test_count
+         FROM inward_patients ip
+        WHERE ip.hospital_id=$1 AND ip.status='admitted'
+        ORDER BY ip.ward, ip.bed_number`, [req.user.hospitalId]);
+    res.set("Cache-Control", "no-store");
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get("/catalog", requireLabStaff, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT id, name, category, sample_type, price FROM hospital_lab_tests WHERE hospital_id=$1 AND is_active=1 ORDER BY category, name",
+      [req.user.hospitalId]);
+    res.set("Cache-Control", "no-store");
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.get("/inpatients/:inwardId/orders", requireLabStaff, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT * FROM hospital_lab_orders WHERE inward_id=$1 AND hospital_id=$2 ORDER BY ordered_at DESC",
+      [req.params.inwardId, req.user.hospitalId]);
+    res.set("Cache-Control", "no-store");
+    res.json(rows);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post("/inpatients/:inwardId/orders", requireLabStaff, async (req, res) => {
+  const client = await pool.connect();
+  let began = false;
+  try {
+    const b = req.body || {};
+    const picks = Array.isArray(b.tests) ? b.tests : [];
+    if (!picks.length) return res.status(400).json({ error: "Choose at least one test" });
+    if (picks.length > 20) return res.status(400).json({ error: "Too many tests in one go" });
+    const priority = b.priority === "urgent" ? "urgent" : "normal";
+    const notes = b.notes ? String(b.notes).slice(0, 300) : null;
+    const hid = req.user.hospitalId;
+
+    await client.query("BEGIN"); began = true;
+    const ipR = await client.query(
+      "SELECT id, patient_name, admitting_doctor_id, admitting_doctor_name, status FROM inward_patients WHERE id=$1 AND hospital_id=$2 FOR SHARE",
+      [req.params.inwardId, hid]);
+    if (!ipR.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Inpatient not found" }); }
+    const ip = ipR.rows[0];
+    if (ip.status !== "admitted") { await client.query("ROLLBACK"); return res.status(409).json({ error: "This patient is already discharged" }); }
+
+    const created = [];
+    let added = 0;
+    for (const p of picks) {
+      const tR = await client.query(
+        "SELECT id, name, price FROM hospital_lab_tests WHERE id=$1 AND hospital_id=$2 AND is_active=1", [String(p.testId || ""), hid]);
+      if (!tR.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "A selected test was not found" }); }
+      const t = tR.rows[0];
+      const amount = (p.amount === undefined || p.amount === null || p.amount === "") ? Number(t.price) || 0 : Number(p.amount);
+      if (!(amount >= 0)) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Enter a valid amount for " + t.name }); }
+      const amt = Math.round(amount * 100) / 100;
+      const orderId = "hlo_" + rid(10);
+      const itemId = "ibi_" + randomBytes(6).toString("hex");
+      await client.query(
+        `INSERT INTO ipd_bill_items (id, inward_id, hospital_id, category, description, qty, unit_price, amount, created_by)
+         VALUES ($1,$2,$3,'test',$4,1,$5,$5,$6)`,
+        [itemId, ip.id, hid, "Lab: " + t.name, amt, req.user.id]);
+      const oR = await client.query(
+        `INSERT INTO hospital_lab_orders
+           (id, hospital_id, patient_name, doctor_id, doctor_name, test_id, test_name, priority, notes, inward_id, amount, ipd_bill_item_id, billed_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13) RETURNING *`,
+        [orderId, hid, ip.patient_name, ip.admitting_doctor_id || null, ip.admitting_doctor_name || null,
+         t.id, t.name, priority, notes, ip.id, amt, itemId, req.user.id]);
+      created.push(oR.rows[0]);
+      added += amt;
+    }
+    await client.query("COMMIT");
+    res.status(201).json({ orders: created, addedToBill: Math.round(added * 100) / 100 });
+  } catch (err) {
+    if (began) { try { await client.query("ROLLBACK"); } catch (_) {} }
+    console.error("[hl-staff inpatient order]", err.message);
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
 });
 
 module.exports = router;
