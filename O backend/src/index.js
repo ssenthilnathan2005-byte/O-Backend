@@ -160,6 +160,10 @@ const doctorExportRoutes = require("./routes/doctor_exports");
 app.use("/api/doctor", doctorExportRoutes);
 const doctorHistoryRoutes = require("./routes/doctor_history");
 app.use("/api/doctor", doctorHistoryRoutes);
+// ABDM opt-in (off by default per hospital)
+app.use("/api/abdm", require("./abdm/optin")({ pool, requireAuth: require("./middleware/auth").requireAuth }));
+// ABDM FHIR export (read-only)
+app.use("/api/abdm", require("./abdm/fhir-route"));
 const hospitalExportRoutes = require("./routes/hospital_exports");
 const pharmacyRoutes = require("./routes/pharmacy");
 const inwardRoutes   = require("./routes/inward");
