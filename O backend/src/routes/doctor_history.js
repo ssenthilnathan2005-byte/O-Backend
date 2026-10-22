@@ -47,6 +47,7 @@ router.get("/patient-history/:patientId", requireDoctor, async (req, res) => {
         medicines: items,
         notes: r.notes || "",
         diagnosis: r.diagnosis || "",
+      diagnosisCode: r.diagnosis_code || "",
       };
     });
 
