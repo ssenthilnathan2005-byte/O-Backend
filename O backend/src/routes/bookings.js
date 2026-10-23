@@ -354,7 +354,7 @@ router.get("/follow-ups/mine", requireAuth, async (req, res) => {
          LEFT JOIN doctors d ON d.id = b.doctor_id
         WHERE b.patient_id = $1 AND b.status = 'completed'
           AND b.follow_up_date IS NOT NULL
-          AND b.follow_up_date <= $2 AND b.follow_up_date >= $3
+          AND b.follow_up_date >= $2
           AND NOT EXISTS (
             SELECT 1 FROM bookings n
              WHERE n.doctor_id = b.doctor_id AND n.patient_id = b.patient_id
@@ -362,7 +362,7 @@ router.get("/follow-ups/mine", requireAuth, async (req, res) => {
                AND n.id <> b.id AND n.status IN ('confirmed','completed')
                AND n.created_at > b.created_at)
         ORDER BY b.follow_up_date ASC`,
-      [req.user.id, today, minDate]
+      [req.user.id, today]
     );
     res.json(rows.map((r) => {
       const over = Math.round((ms(today) - ms(r.follow_up_date)) / 86400000);
@@ -371,7 +371,7 @@ router.get("/follow-ups/mine", requireAuth, async (req, res) => {
         hospitalId: r.hospital_id, hospitalName: r.hospital_name,
         patientName: r.patient_name, visitDate: r.date,
         followUpDays: r.follow_up_days, followUpDate: r.follow_up_date,
-        state: over <= 0 ? "due_today" : "overdue", daysOverdue: Math.max(over, 0),
+        state: over === 0 ? "due_today" : "upcoming", daysLeft: Math.max(-over, 0), daysOverdue: 0,
       };
     }));
   } catch (err) {
