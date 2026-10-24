@@ -18,6 +18,11 @@ router.post("/register", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "A valid FCM token is required" });
 
   try {
+    const u = await pool.query("SELECT 1 FROM users WHERE id=$1", [req.user.id]);
+    if (!u.rowCount) {
+      console.warn("[push register] no user row for id", req.user.id);
+      return res.status(401).json({ error: "Session expired. Please log in again." });
+    }
     await pool.query(
       `INSERT INTO fcm_tokens (token, patient_id, updated_at)
        VALUES ($1, $2, now())
@@ -27,7 +32,7 @@ router.post("/register", requireAuth, async (req, res) => {
     res.json({ success: true });
   } catch (err) {
     console.error("[push register]", err.message);
-    res.status(500).json({ error: err.message });
+    res.status(500).json({ error: "Could not register for notifications" });
   }
 });
 
