@@ -11,6 +11,7 @@ const bcrypt = require("bcrypt");
 
 pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS dispensed_items TEXT")
   .catch(err => console.warn("[pharmacy] migration:", err.message));
+pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS manual_items TEXT").catch(err => console.warn("[pharmacy] migration:", err.message));
 pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS bill_amount NUMERIC(12,2)")
   .then(() => pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS tablets_sold INTEGER"))
   .then(() => pool.query("CREATE INDEX IF NOT EXISTS idx_prescriptions_handed_over ON prescriptions(hospital_id, handed_over_at)"))
@@ -226,6 +227,7 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
     let dispensedJson = null;
     let billAmount = null;
     let tabletsSold = null;
+    let manualJson = null;
     if (status === "packed") {
       if (p.status !== "pending") {
         await client.query("ROLLBACK");
@@ -335,13 +337,24 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
       }
       if (changed) dispensedJson = JSON.stringify(lines);
       tabletsSold = lines.reduce((s, l) => s + (Number(l.tablets) || 0), 0);
+      let manualSum = 0;
+      const manualClean = [];
+      for (const m of (Array.isArray(req.body.manualItems) ? req.body.manualItems.slice(0, 50) : [])) {
+        const name = String((m && m.name) || "").trim().slice(0, 200);
+        const q = Number(m && m.quantity), pr = Number(m && m.unitPrice);
+        if (!name || !(q > 0) || q > 100000 || !(pr >= 0) || pr > 10000000) continue;
+        const amount = Math.round(q * pr * 100) / 100;
+        manualClean.push({ name, quantity: q, unitPrice: pr, amount });
+        manualSum += amount;
+      }
+      if (manualClean.length) manualJson = JSON.stringify(manualClean);
       if (lines.length && lines.every(l => l.unitPrice != null)) {
         let sum = 0;
         for (const l of lines) {
           l.amount = Math.round((Number(l.tablets) || 0) * Number(l.unitPrice) * 100) / 100;
           sum += l.amount;
         }
-        billAmount = Math.round(sum * 100) / 100;
+        billAmount = Math.round((sum + manualSum) * 100) / 100;
         dispensedJson = JSON.stringify(lines);
       }
     }
@@ -358,6 +371,7 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
     if (status === "handed_over") {
       vals.push(billAmount); setClause += `, bill_amount=$${vals.length}`;
       vals.push(tabletsSold); setClause += `, tablets_sold=$${vals.length}`;
+      if (manualJson) { vals.push(manualJson); setClause += `, manual_items=$${vals.length}`; }
       { const pm = String(req.body.paymentMode || "cash").toLowerCase();
         vals.push(["cash", "upi", "insurance"].includes(pm) ? pm : "cash"); setClause += `, payment_mode=$${vals.length}`; }
     }
