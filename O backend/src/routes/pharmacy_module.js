@@ -693,6 +693,17 @@ router.post("/stock-deduct", guard, async (req, res) => {
   } finally { client.release(); }
 });
 
+// Medicines bought outside stock, saved by the pharmacist at hand over (name, qty, rate).
+function manualLinesOf(rx) {
+  let arr = [];
+  try { arr = rx.manual_items ? JSON.parse(rx.manual_items) : []; } catch (_) {}
+  if (!Array.isArray(arr)) return [];
+  return arr.map(m => {
+    const q = Number(m.quantity) || 0, pr = Number(m.unitPrice) || 0;
+    return { name: String(m.name || "Medicine"), tablets: q, unitPrice: r2(pr), amount: r2(q * pr), priceSource: "manual" };
+  });
+}
+
 // Makes invoice lines add up to the saved bill total by adding one adjustment line.
 function withAdjustment(lines, billAmount) {
   if (billAmount == null || billAmount === "") return lines;
@@ -712,7 +723,7 @@ router.get("/invoice/:id", guard, async (req, res) => {
     const { rows } = await pool.query("SELECT * FROM prescriptions WHERE id=$1 AND hospital_id=$2", [req.params.id, req.hid]);
     if (!rows.length) return res.status(404).json({ error: "Prescription not found" });
     const rx = rows[0];
-    const lines = lineAmounts(rx, await invMap(req.hid));
+    const lines = lineAmounts(rx, await invMap(req.hid)).concat(manualLinesOf(rx));
     res.json({
       billNo: rx.bill_no == null ? null : Number(rx.bill_no),
       invoiceNo: rx.bill_no == null ? "Bill pending" : "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
@@ -740,7 +751,7 @@ router.get("/my-invoice/:id", __patientAuth, async (req, res) => {
       [req.params.id, req.user.id]);
     if (!rows.length || rows[0].bill_no == null) return res.status(404).json({ error: "Bill not available yet" });
     const rx = rows[0];
-    const lines = lineAmounts(rx, await invMap(rx.hospital_id));
+    const lines = lineAmounts(rx, await invMap(rx.hospital_id)).concat(manualLinesOf(rx));
     res.set("Cache-Control", "no-store");
     res.json({
       billNo: Number(rx.bill_no),
