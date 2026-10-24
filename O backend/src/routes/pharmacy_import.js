@@ -9,6 +9,8 @@ const { ready: batchesReady, addBatch } = require("../services/batches");
 const { STD_CATEGORIES } = require("../services/importParser");
 const { parseImport } = require("../services/universalImport");
 const { parsePdfImport } = require("../services/pdfImport");
+const { applyGst } = require("../services/gstRules");
+const withGst = o => { if (o && Array.isArray(o.rows)) o.rows.forEach(r => { try { applyGst(r); } catch (e) { /* keep the row as parsed */ } }); return o; };
 const { parseImageImport } = require("../services/imageImport");
 const { evaluateRow, categoryLabels, exactKey, looseKey } = require("../services/packaging");
 const router = express.Router();
@@ -47,16 +49,16 @@ router.post("/parse", guard, (req, res) => {
       if (/\.(xlsx|xls|csv)$/.test(fname)) {
         const out = parseImport(req.file.buffer, req.file.originalname);
         if (!out.rows.length) return res.status(422).json({ error: "No medicine rows were found in the file" });
-        return res.json({ fileName: req.file.originalname, ...out });
+        return res.json({ fileName: req.file.originalname, ...withGst(out) });
       }
       if (/\.pdf$/.test(fname)) {
         const out = await parsePdfImport(req.file.buffer);
         if (!out.rows.length) return res.status(422).json({ error: "No medicine rows were found in the PDF" });
-        return res.json({ fileName: req.file.originalname, ...out });
+        return res.json({ fileName: req.file.originalname, ...withGst(out) });
       }
       if (/\.(jpg|jpeg|png)$/.test(fname)) {
         const out = await parseImageImport(req.file.buffer);
-        return res.json({ fileName: req.file.originalname, ...out });
+        return res.json({ fileName: req.file.originalname, ...withGst(out) });
       }
       return res.status(415).json({ error: "Upload a PDF, JPG, PNG, Excel or CSV file" });
     } catch (e) {
