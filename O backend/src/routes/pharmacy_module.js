@@ -704,6 +704,33 @@ function manualLinesOf(rx) {
   });
 }
 
+// Late stock deductions (Stock Update) only move stock. They must never change the patient's bill.
+function billRx(rx) {
+  const all = parse(rx.dispensed_items);
+  if (!all.some(l => l && l.lateDeduct)) return rx;
+  const rest = all.filter(l => !(l && l.lateDeduct));
+  let hasManual = false;
+  try { hasManual = JSON.parse(rx.manual_items || "[]").length > 0; } catch (_) {}
+  if (!rest.length && !hasManual) return rx;
+  return Object.assign({}, rx, { dispensed_items: JSON.stringify(rest) });
+}
+
+// Invoice lines, each with the dosage / timing note the doctor wrote for that medicine.
+function invoiceLines(rx, inv) {
+  const src = billRx(rx);
+  const dl = parse(src.dispensed_items);
+  let items = [];
+  try { items = JSON.parse(rx.items || "[]"); } catch (_) {}
+  if (!Array.isArray(items)) items = [];
+  const noteOf = it => it ? [it.dosage, String(it.instructions || "").trim(), it.duration].filter(Boolean).join(" \u00b7 ") : "";
+  const stock = lineAmounts(src, inv).map((l, i) => {
+    const ix = dl[i] && dl[i].index;
+    return Object.assign({}, l, { note: (ix === undefined || ix === null) ? "" : noteOf(items[Number(ix)]) });
+  });
+  const manual = manualLinesOf(rx).map(m => Object.assign({}, m, { note: noteOf(items.find(x => x && x.name === m.name)) }));
+  return stock.concat(manual);
+}
+
 // Makes invoice lines add up to the saved bill total by adding one adjustment line.
 function withAdjustment(lines, billAmount) {
   if (billAmount == null || billAmount === "") return lines;
@@ -723,13 +750,13 @@ router.get("/invoice/:id", guard, async (req, res) => {
     const { rows } = await pool.query("SELECT * FROM prescriptions WHERE id=$1 AND hospital_id=$2", [req.params.id, req.hid]);
     if (!rows.length) return res.status(404).json({ error: "Prescription not found" });
     const rx = rows[0];
-    const lines = lineAmounts(rx, await invMap(req.hid)).concat(manualLinesOf(rx));
+    const lines = invoiceLines(rx, await invMap(req.hid));
     res.json({
       billNo: rx.bill_no == null ? null : Number(rx.bill_no),
       invoiceNo: rx.bill_no == null ? "Bill pending" : "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
       patientId: rx.patient_id, patientName: rx.patient_name, doctorName: rx.doctor_name,
       issuedAt: rx.handed_over_at, paymentMode: rx.payment_mode || null,
-      lines: withAdjustment(lines, rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount, manual: l.priceSource === "manual" })),
+      lines: withAdjustment(lines, rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount, manual: l.priceSource === "manual", note: l.note || "" })),
       total: rx.bill_amount == null ? null : Number(rx.bill_amount),
       subtotal: rx.bill_subtotal == null ? null : Number(rx.bill_subtotal),
       discountPct: Number(rx.discount_pct) || 0, discountAmount: Number(rx.discount_amount) || 0,
@@ -751,14 +778,14 @@ router.get("/my-invoice/:id", __patientAuth, async (req, res) => {
       [req.params.id, req.user.id]);
     if (!rows.length || rows[0].bill_no == null) return res.status(404).json({ error: "Bill not available yet" });
     const rx = rows[0];
-    const lines = lineAmounts(rx, await invMap(rx.hospital_id)).concat(manualLinesOf(rx));
+    const lines = invoiceLines(rx, await invMap(rx.hospital_id));
     res.set("Cache-Control", "no-store");
     res.json({
       billNo: Number(rx.bill_no),
       invoiceNo: "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
       patientId: rx.patient_id, patientName: rx.patient_name, doctorName: rx.doctor_name,
       issuedAt: rx.handed_over_at, paymentMode: rx.payment_mode || null,
-      lines: withAdjustment(lines, rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount, manual: l.priceSource === "manual" })),
+      lines: withAdjustment(lines, rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount, manual: l.priceSource === "manual", note: l.note || "" })),
       total: rx.bill_amount == null ? null : Number(rx.bill_amount),
       subtotal: rx.bill_subtotal == null ? null : Number(rx.bill_subtotal),
       discountPct: Number(rx.discount_pct) || 0, discountAmount: Number(rx.discount_amount) || 0,
