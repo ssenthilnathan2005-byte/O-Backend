@@ -804,10 +804,11 @@ ensureGstTable().catch(err => console.warn("[pharmacy] gst profile table:", err.
 
 async function gstProfileFor(hid) {
   await ensureGstTable();
+  await pool.query("ALTER TABLE pharmacy_gst_profile ADD COLUMN IF NOT EXISTS company_name TEXT");
   const h = await pool.query("SELECT name, address, phone FROM hospitals WHERE id=$1", [hid]);
-  const p = await pool.query("SELECT gstin, address, drug_licence, default_hsn, gst_type FROM pharmacy_gst_profile WHERE hospital_id=$1", [hid]);
+  const p = await pool.query("SELECT gstin, address, drug_licence, default_hsn, gst_type, company_name FROM pharmacy_gst_profile WHERE hospital_id=$1", [hid]);
   const hr = h.rows[0] || {}, pr = p.rows[0] || {};
-  return { name: hr.name || "", address: pr.address || hr.address || "", phone: hr.phone || "",
+  return { name: pr.company_name || hr.name || "", companyName: pr.company_name || "", address: pr.address || hr.address || "", phone: hr.phone || "",
            gstin: pr.gstin || "", drugLicence: pr.drug_licence || "", defaultHsn: pr.default_hsn || "3004", gstType: pr.gst_type || (pr.gstin ? "registered" : "") };
 }
 
@@ -830,14 +831,15 @@ router.put("/gst-profile", guard, async (req, res) => {
     await ensureGstTable();
     const b = req.body || {};
     const gstin = String(b.gstin || "").trim().toUpperCase();
+    await pool.query("ALTER TABLE pharmacy_gst_profile ADD COLUMN IF NOT EXISTS company_name TEXT");
     const hsn = String(b.defaultHsn || "").trim();
     if (gstin && !/^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z][1-9A-Z]Z[0-9A-Z]$/.test(gstin))
       return res.status(400).json({ error: "GSTIN must be 15 characters, like 29ABCDE1234F1Z5" });
     if (hsn && !/^[0-9]{4,8}$/.test(hsn)) return res.status(400).json({ error: "HSN code must be 4 to 8 digits" });
     await pool.query(
-      "INSERT INTO pharmacy_gst_profile (hospital_id, gstin, address, drug_licence, default_hsn, updated_at) VALUES ($1,$2,$3,$4,$5,now()) " +
-      "ON CONFLICT (hospital_id) DO UPDATE SET gstin=EXCLUDED.gstin, address=EXCLUDED.address, drug_licence=EXCLUDED.drug_licence, default_hsn=EXCLUDED.default_hsn, updated_at=now()",
-      [req.hid, gstin || null, String(b.address || "").trim() || null, String(b.drugLicence || "").trim() || null, hsn || null]);
+      "INSERT INTO pharmacy_gst_profile (hospital_id, gstin, address, drug_licence, default_hsn, company_name, updated_at) VALUES ($1,$2,$3,$4,$5,$6,now()) " +
+      "ON CONFLICT (hospital_id) DO UPDATE SET gstin=EXCLUDED.gstin, address=EXCLUDED.address, drug_licence=EXCLUDED.drug_licence, default_hsn=EXCLUDED.default_hsn, company_name=COALESCE(EXCLUDED.company_name, pharmacy_gst_profile.company_name), updated_at=now()",
+      [req.hid, gstin || null, String(b.address || "").trim() || null, String(b.drugLicence || "").trim() || null, hsn || null, String(b.companyName || "").trim().slice(0, 120) || null]);
     res.json(await gstProfileFor(req.hid));
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
