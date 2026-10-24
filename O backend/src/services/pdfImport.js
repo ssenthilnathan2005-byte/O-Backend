@@ -90,7 +90,30 @@ function packCell(v, stockUnit) {
   const one = u1.toLowerCase().replace(/s$/, "");
   return n + " " + u1.toLowerCase() + "/" + String(stockUnit || "box").toLowerCase() + "; " + k + " " + u2.toLowerCase() + "/" + one;
 }
+const numOf = v => { const m = /-?\d*\.?\d+/.exec(String(v == null ? "" : v).replace(/,/g, "")); return m ? Number(m[0]) : null; };
+// GST % must come from the GST % cell only (e.g. "5%"). Taxable/CGST/SGST are used just to cross-check it.
+function checkGst(row, ix) {
+  const warn = [];
+  let gst = "";
+  const raw = clean(row[ix.gst]);
+  const m = /^(\d+(?:\.\d+)?)\s*%?$/.exec(raw);
+  if (!raw) warn.push("GST % is blank in the PDF - enter it manually");
+  else if (!m) warn.push("GST % could not be read reliably (" + raw + ") - enter it manually");
+  else if (Number(m[1]) > 100) warn.push("GST % in the PDF looks wrong (" + raw + ") - enter it manually");
+  else gst = m[1];
+  const tax = ix.tax >= 0 ? numOf(row[ix.tax]) : null;
+  const cg = ix.cgst >= 0 ? numOf(row[ix.cgst]) : null, sg = ix.sgst >= 0 ? numOf(row[ix.sgst]) : null;
+  if (gst !== "" && tax && cg != null && sg != null) {
+    const exp = tax * Number(gst) / 100;
+    if (Math.abs(cg + sg - exp) > Math.max(0.05, exp * 0.01)) { warn.push("GST % does not match the CGST + SGST amounts - check it manually"); gst = ""; }
+  }
+  const pp = ix.pur >= 0 ? numOf(row[ix.pur]) : null, q = ix.qty >= 0 ? numOf(row[ix.qty]) : null;
+  if (tax != null && pp != null && q != null && Math.abs(pp * q - tax) > Math.max(0.05, tax * 0.01)) warn.push("Taxable amount does not equal Purchase price x Qty - check price and quantity");
+  return { gst, warn };
+}
 function normalizeTable(rows) {
+  normalizeTable.lastChecks = [];
+  const checks = normalizeTable.lastChecks;
   const hi = rows.findIndex(r => r.length >= 4 && r.some(c => /item|medicine|product/i.test(clean(c))) && r.some(c => /^(qty|quantity)/i.test(clean(c))));
   if (hi < 0) return rows;
   let supplier = "", invoice = "";
@@ -106,10 +129,14 @@ function normalizeTable(rows) {
   supplier = labelValue(/^(supplier|vendor|supplier name)\s*:?$/i);
   invoice = labelValue(/^(invoice|bill)\s*(no\.?|number|#)\s*:?$/i);
   const hdr = rows[hi].map(clean), cols = [];
+  const hIdx = re => hdr.findIndex(h => re.test(h));
+  const gstI = hIdx(/^gst\b/i), taxI = hIdx(/^taxable/i), cgstI = hIdx(/^cgst/i), sgstI = hIdx(/^sgst/i), totI = hIdx(/^(line\s*)?total/i);
+  const dropI = new Set([taxI, cgstI, sgstI, totI].filter(k => k >= 0));
   hdr.forEach((h, i) => {
     const hit = HDR.find(x => x[0].test(h));
     cols.push({ i, name: hit ? hit[1] : h, split: /basis/i.test(h) && hit && /Price|MRP/.test(hit[1]) });
   });
+  for (let k = cols.length - 1; k >= 0; k--) if (dropI.has(cols[k].i)) cols.splice(k, 1);
   const out = [];
   const outHdr = [];
   cols.forEach(c => { outHdr.push(c.name); if (c.split) outHdr.push(c.name + " Basis"); });
@@ -122,15 +149,19 @@ function normalizeTable(rows) {
     if (row.length !== hdr.length) continue;                         // notes / totals lines do not fit the table
     if (!/^\d+(\.\d+)?$/.test(clean(row[cols[qtyI].i]))) continue;  // a data row has a numeric quantity
     const unit = unitI >= 0 ? clean(row[cols[unitI].i]) : "";
+    const colI = n => { const c = cols.find(x => x.name === n); return c ? c.i : -1; };
+    const gstRes = gstI >= 0 ? checkGst(row, { gst: gstI, tax: taxI, cgst: cgstI, sgst: sgstI, pur: colI("Purchase Price"), qty: colI("Stock Qty") }) : null;
     const cells = [];
     cols.forEach(c => {
       const v = row[c.i];
       if (c.split) { const [amt, basis] = moneyCell(v); cells.push(amt, basis); }
       else if (c.name === "Packing Details") cells.push(packCell(v, unit));
+      else if (gstRes && c.i === gstI) cells.push(gstRes.gst);
       else cells.push(clean(v));
     });
     cells.push(supplier, invoice);
     out.push(cells);
+    if (gstRes) checks.push({ key: String(clean(row[colI("Batch No")]) || clean(row[colI("Medicine Name")])).toLowerCase(), warn: gstRes.warn });
   }
   return out.length > 1 ? out : rows;
 }
@@ -162,6 +193,11 @@ async function parsePdfImport(buf, opts) {
   const out = parseSheet(rows, "PDF");
   if (!out || !out.rows || !out.rows.length)
     throw new Error("Could not find a medicine table in this PDF. It needs a header row with at least a medicine name column and a quantity column.");
+  const checks = normalizeTable.lastChecks || [];
+  for (const r of out.rows) {
+    const hit = checks.find(c => c.key === String(r.batchNo || r.name || "").toLowerCase());
+    if (hit && hit.warn.length) { if (!Array.isArray(r.warnings)) r.warnings = []; r.warnings.push(...hit.warn); }
+  }
   out.parser = "universal";
   out.format = "pdf";
   return out;
