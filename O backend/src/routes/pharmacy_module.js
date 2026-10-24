@@ -842,6 +842,34 @@ router.put("/gst-profile", guard, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// Sequential tax-invoice numbers: INV/<fy>/<5 digits>, consecutive per hospital, restarting each April.
+const invFy = () => { const d = new Date(Date.now() + 5.5 * 3600 * 1000); const y = d.getUTCFullYear(); const s = d.getUTCMonth() >= 3 ? y : y - 1; return String(s).slice(2) + "-" + String(s + 1).slice(2); };
+const ensureInvTables = () => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_invoice_counter (hospital_id TEXT NOT NULL, fy TEXT NOT NULL, last_seq INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (hospital_id, fy))")
+  .then(() => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_invoice_register (hospital_id TEXT NOT NULL, invoice_no TEXT NOT NULL, from_date DATE NOT NULL, to_date DATE NOT NULL, bills INTEGER, total NUMERIC(14,2), issued_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (hospital_id, invoice_no))"));
+router.post("/gst-invoice-no", guard, async (req, res) => {
+  const b = req.body || {};
+  if (!DATE_RE.test(String(b.from || "")) || !DATE_RE.test(String(b.to || ""))) return res.status(400).json({ error: "Invalid from/to dates" });
+  const total = Number(b.total), bills = Number(b.bills);
+  if (!isFinite(total)) return res.status(400).json({ error: "Invalid total" });
+  const billsN = isFinite(bills) ? Math.round(bills) : -1;
+  try {
+    await ensureInvTables();
+    const ex = await pool.query("SELECT invoice_no FROM pharmacy_invoice_register WHERE hospital_id=$1 AND from_date=$2 AND to_date=$3 AND total=$4 AND COALESCE(bills,-1)=$5 ORDER BY issued_at DESC LIMIT 1",
+      [req.hid, b.from, b.to, total.toFixed(2), billsN]);
+    if (ex.rows[0]) return res.json({ invoiceNo: ex.rows[0].invoice_no, reused: true });
+    const fy = invFy();
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      const n = await c.query("INSERT INTO pharmacy_invoice_counter (hospital_id, fy, last_seq) VALUES ($1,$2,1) ON CONFLICT (hospital_id, fy) DO UPDATE SET last_seq = pharmacy_invoice_counter.last_seq + 1 RETURNING last_seq", [req.hid, fy]);
+      const no = "INV/" + fy + "/" + String(n.rows[0].last_seq).padStart(5, "0");
+      await c.query("INSERT INTO pharmacy_invoice_register (hospital_id, invoice_no, from_date, to_date, bills, total) VALUES ($1,$2,$3,$4,$5,$6)", [req.hid, no, b.from, b.to, billsN < 0 ? null : billsN, total.toFixed(2)]);
+      await c.query("COMMIT");
+      res.json({ invoiceNo: no, reused: false });
+    } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; } finally { c.release(); }
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 router.get("/gst-report", guard, async (req, res) => {
   try {
     const rg = await getRange(req);
