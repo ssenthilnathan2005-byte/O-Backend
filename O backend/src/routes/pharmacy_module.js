@@ -745,13 +745,57 @@ function withAdjustment(lines, billAmount) {
   }]);
 }
 
+// Tax-invoice data for pharmacy bills: per-medicine HSN and GST %, seller details and a once-per-bill invoice number.
+const __normName = s => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+const __baseName = s => __normName(s).replace(/\s*\(.*$/, "");
+const ensureBillInvTable = () => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_bill_invoice (hospital_id TEXT NOT NULL, rx_id TEXT NOT NULL, invoice_no TEXT NOT NULL, issued_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (hospital_id, rx_id), UNIQUE (hospital_id, invoice_no))");
+async function billInvoiceNo(hid, rxId) {
+  await ensureInvTables(); await ensureBillInvTable();
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [hid + ":" + rxId]);
+    const ex = await c.query("SELECT invoice_no FROM pharmacy_bill_invoice WHERE hospital_id=$1 AND rx_id=$2", [hid, rxId]);
+    if (ex.rows[0]) { await c.query("COMMIT"); return ex.rows[0].invoice_no; }
+    const fy = invFy();
+    const n = await c.query("INSERT INTO pharmacy_invoice_counter (hospital_id, fy, last_seq) VALUES ($1,$2,1) ON CONFLICT (hospital_id, fy) DO UPDATE SET last_seq = pharmacy_invoice_counter.last_seq + 1 RETURNING last_seq", [hid, fy]);
+    const no = "INV/" + fy + "/" + String(n.rows[0].last_seq).padStart(5, "0");
+    await c.query("INSERT INTO pharmacy_bill_invoice (hospital_id, rx_id, invoice_no) VALUES ($1,$2,$3)", [hid, rxId, no]);
+    await c.query("COMMIT");
+    return no;
+  } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; } finally { c.release(); }
+}
+async function sendTax(rx, res, obj) {
+  try {
+    const hid = rx.hospital_id;
+    const prof = await gstProfileFor(hid);
+    obj.gstType = prof.gstType || "";
+    obj.seller = { name: prof.name || "", address: prof.address || "", gstin: prof.gstin || "", drugLicence: prof.drugLicence || "" };
+    if (prof.gstType === "registered") {
+      const it = await pool.query("SELECT name, hsn_code, gst_percent FROM inventory_items WHERE hospital_id=$1", [hid]);
+      const byName = new Map(), byBase = new Map();
+      const put = (m, k, r) => { const o = m.get(k); if (!o || (!o.hsn_code && r.hsn_code)) m.set(k, r); };
+      for (const r of it.rows) { put(byName, __normName(r.name), r); put(byBase, __baseName(r.name), r); }
+      obj.lines = (obj.lines || []).map(l => {
+        if (l.name === "Other / manual charges" || l.name === "Discount / adjustment") return Object.assign({}, l, { adjustment: true, hsn: null, gstPercent: 0 });
+        const m = byName.get(__normName(l.name)) || byBase.get(__baseName(l.name));
+        return Object.assign({}, l, { hsn: m && m.hsn_code ? String(m.hsn_code) : null, gstPercent: m && m.gst_percent != null ? Number(m.gst_percent) : null });
+      });
+      const complete = obj.lines.every(l => l.adjustment || (l.hsn && l.gstPercent != null));
+      const legacy = (Number(obj.cgstPct) || 0) + (Number(obj.sgstPct) || 0) > 0;
+      if (complete && !legacy && prof.gstin && rx.status === "handed_over" && rx.bill_no != null && obj.lines.length) obj.taxInvoiceNo = await billInvoiceNo(hid, String(rx.id));
+    }
+  } catch (e) { console.warn("[pharmacy] tax invoice data:", e.message); }
+  res.json(obj);
+}
+
 router.get("/invoice/:id", guard, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM prescriptions WHERE id=$1 AND hospital_id=$2", [req.params.id, req.hid]);
     if (!rows.length) return res.status(404).json({ error: "Prescription not found" });
     const rx = rows[0];
     const lines = invoiceLines(rx, await invMap(req.hid));
-    res.json({
+    await sendTax(rx, res, {
       billNo: rx.bill_no == null ? null : Number(rx.bill_no),
       invoiceNo: rx.bill_no == null ? "Bill pending" : "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
       patientId: rx.patient_id, patientName: rx.patient_name, doctorName: rx.doctor_name,
@@ -780,7 +824,7 @@ router.get("/my-invoice/:id", __patientAuth, async (req, res) => {
     const rx = rows[0];
     const lines = invoiceLines(rx, await invMap(rx.hospital_id));
     res.set("Cache-Control", "no-store");
-    res.json({
+    await sendTax(rx, res, {
       billNo: Number(rx.bill_no),
       invoiceNo: "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
       patientId: rx.patient_id, patientName: rx.patient_name, doctorName: rx.doctor_name,
