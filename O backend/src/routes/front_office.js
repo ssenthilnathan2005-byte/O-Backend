@@ -1,5 +1,6 @@
 "use strict";
 const express = require("express");
+const { getSessionCapacity } = require("../utils/scheduleCapacity");
 const { broadcast } = require("../services/ws");
 const jwt = require("jsonwebtoken");
 const { randomBytes, randomInt } = require("crypto");
@@ -241,8 +242,8 @@ router.post("/admit", fo, async (req, res) => {
 // ---- front-desk registration (patients without the app) ----
 router.get("/walkin/doctors", fo, async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT id, name, specialty FROM doctors WHERE hospital_id=$1 AND COALESCE(is_active,1)<>0 ORDER BY name", [req.user.hospitalId]);
-    res.json({ doctors: rows });
+    const { rows } = await pool.query("SELECT * FROM doctors WHERE hospital_id=$1 AND COALESCE(is_active,1)<>0 ORDER BY name", [req.user.hospitalId]);
+    res.json({ doctors: rows.map((r) => ({ id: r.id, name: r.name, specialty: r.specialty, schedule_config: r.schedule_config, tokens_per_session: r.tokens_per_session, session_timings: r.session_timings || r.sessionTimings || null })) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -269,6 +270,8 @@ router.post("/walkin", fo, async (req, res) => {
     const dR = await client.query("SELECT id, name FROM doctors WHERE id=$1 AND hospital_id=$2", [b.doctorId, hid]);
     if (!dR.rows.length) return res.status(404).json({ error: "Doctor not found" });
     const doctor = dR.rows[0];
+    const fullDoc = (await client.query("SELECT * FROM doctors WHERE id=$1", [doctor.id])).rows[0];
+    if (!(getSessionCapacity(fullDoc, date, session) > 0)) return res.status(400).json({ error: "This doctor does not have this session on the chosen date" });
     const hR = await client.query("SELECT name, rate_per_token FROM hospitals WHERE id=$1", [hid]);
     const hospital = hR.rows[0];
     const sessionId = doctor.id + "_" + date + "_" + session;
