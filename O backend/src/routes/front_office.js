@@ -241,25 +241,16 @@ router.post("/admit", fo, async (req, res) => {
 
 // ---- front-desk registration (patients without the app) ----
 function walkinCapacity(doc, date, session) {
-  let cfg = doc.schedule_config;
-  if (typeof cfg === "string") { try { cfg = JSON.parse(cfg); } catch { cfg = null; } }
-  const day = new Date(date + "T00:00:00Z").getUTCDay();
-  const bucket = cfg && cfg[day === 0 || day === 6 ? "weekend" : "weekday"];
-  const has = (x) => x !== undefined && x !== null && x !== "";
-  if (bucket && typeof bucket === "object" && ["morning", "afternoon", "evening"].some((k) => has(bucket[k]))) {
-    const raw = bucket[session];
-    if (!has(raw)) return 0;
-    const val = typeof raw === "object" ? raw.count : raw;
-    const num = Number(val);
-    return has(val) && Number.isFinite(num) && num >= 0 ? num : Number(doc.tokens_per_session);
-  }
+  let list = doc.sessions;
+  if (typeof list === "string") { try { list = JSON.parse(list); } catch { list = null; } }
+  if (Array.isArray(list) && list.length && !list.includes(session)) return 0;
   return getSessionCapacity(doc, date, session);
 }
 
 router.get("/walkin/doctors", fo, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM doctors WHERE hospital_id=$1 AND COALESCE(is_active,1)<>0 ORDER BY name", [req.user.hospitalId]);
-    res.json({ doctors: rows.map((r) => ({ id: r.id, name: r.name, specialty: r.specialty, schedule_config: r.schedule_config, tokens_per_session: r.tokens_per_session, session_timings: r.session_timings || r.sessionTimings || null })) });
+    res.json({ doctors: rows.map((r) => ({ id: r.id, name: r.name, specialty: r.specialty, schedule_config: r.schedule_config, tokens_per_session: r.tokens_per_session, session_timings: r.session_timings || r.sessionTimings || null, sessions: r.sessions ?? null })) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
