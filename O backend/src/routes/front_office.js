@@ -240,6 +240,22 @@ router.post("/admit", fo, async (req, res) => {
 });
 
 // ---- front-desk registration (patients without the app) ----
+function walkinCapacity(doc, date, session) {
+  let cfg = doc.schedule_config;
+  if (typeof cfg === "string") { try { cfg = JSON.parse(cfg); } catch { cfg = null; } }
+  const day = new Date(date + "T00:00:00Z").getUTCDay();
+  const bucket = cfg && cfg[day === 0 || day === 6 ? "weekend" : "weekday"];
+  const has = (x) => x !== undefined && x !== null && x !== "";
+  if (bucket && typeof bucket === "object" && ["morning", "afternoon", "evening"].some((k) => has(bucket[k]))) {
+    const raw = bucket[session];
+    if (!has(raw)) return 0;
+    const val = typeof raw === "object" ? raw.count : raw;
+    const num = Number(val);
+    return has(val) && Number.isFinite(num) && num >= 0 ? num : Number(doc.tokens_per_session);
+  }
+  return getSessionCapacity(doc, date, session);
+}
+
 router.get("/walkin/doctors", fo, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM doctors WHERE hospital_id=$1 AND COALESCE(is_active,1)<>0 ORDER BY name", [req.user.hospitalId]);
@@ -271,7 +287,7 @@ router.post("/walkin", fo, async (req, res) => {
     if (!dR.rows.length) return res.status(404).json({ error: "Doctor not found" });
     const doctor = dR.rows[0];
     const fullDoc = (await client.query("SELECT * FROM doctors WHERE id=$1", [doctor.id])).rows[0];
-    if (!(getSessionCapacity(fullDoc, date, session) > 0)) return res.status(400).json({ error: "This doctor does not have this session on the chosen date" });
+    if (!(walkinCapacity(fullDoc, date, session) > 0)) return res.status(400).json({ error: "This doctor does not have this session on the chosen date" });
     const hR = await client.query("SELECT name, rate_per_token FROM hospitals WHERE id=$1", [hid]);
     const hospital = hR.rows[0];
     const sessionId = doctor.id + "_" + date + "_" + session;
@@ -293,7 +309,7 @@ router.post("/walkin", fo, async (req, res) => {
     if (dup.rows.length) throw bad(409, "This patient already has a token in this session");
 
     const mx = await client.query("SELECT COUNT(*) AS m FROM bookings WHERE session_id=$1 AND payment_done=1 AND status<>'cancelled' AND token_number<1000", [sessionId]);
-    if (Number(mx.rows[0].m) >= getSessionCapacity(fullDoc, date, session)) throw Object.assign(new Error("This session is fully booked"), { status: 409 });
+    if (Number(mx.rows[0].m) >= walkinCapacity(fullDoc, date, session)) throw Object.assign(new Error("This session is fully booked"), { status: 409 });
     const token = Number(mx.rows[0].m) + 1;
     const bookingId = "b_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
 
