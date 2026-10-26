@@ -292,7 +292,8 @@ router.post("/walkin", fo, async (req, res) => {
     const dup = await client.query("SELECT 1 FROM bookings WHERE session_id=$1 AND patient_id=$2 AND status<>'cancelled' LIMIT 1", [sessionId, patientId]);
     if (dup.rows.length) throw bad(409, "This patient already has a token in this session");
 
-    const mx = await client.query("SELECT COALESCE(MAX(token_number), 1000) AS m FROM bookings WHERE session_id=$1 AND token_number>=1000", [sessionId]);
+    const mx = await client.query("SELECT COUNT(*) AS m FROM bookings WHERE session_id=$1 AND payment_done=1 AND status<>'cancelled' AND token_number<1000", [sessionId]);
+    if (Number(mx.rows[0].m) >= getSessionCapacity(fullDoc, date, session)) throw Object.assign(new Error("This session is fully booked"), { status: 409 });
     const token = Number(mx.rows[0].m) + 1;
     const bookingId = "b_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
 
