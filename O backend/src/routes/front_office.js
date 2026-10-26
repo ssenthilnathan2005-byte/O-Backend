@@ -24,6 +24,8 @@ const ready = (async () => {
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fee_mode TEXT");
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fee_paid_at TIMESTAMPTZ");
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS fee_by TEXT");
+  await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS booking_source TEXT NOT NULL DEFAULT 'online'");
+  await pool.query("ALTER TABLE users ADD COLUMN IF NOT EXISTS walkin_hospital_id TEXT");
 })().catch(e => console.warn("[front-office] setup:", e.message));
 
 function fo(req, res, next) {
@@ -136,7 +138,7 @@ router.get("/today", fo, async (req, res) => {
     const q = String(req.query.date || "");
     const date = /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : todayIST();
     const { rows } = await pool.query(
-      "SELECT b.id, b.patient_name, b.patient_age, b.phone, b.complaint, b.doctor_id, b.doctor_name, b.date, b.session, b.token_number, b.payment_done, b.status, b.checked_in_at, b.vitals, b.vitals_at, b.fee_amount, b.fee_mode, b.fee_paid_at, d.doctor_fee, (SELECT pr.status FROM prescriptions pr WHERE pr.booking_id=b.id ORDER BY pr.created_at DESC LIMIT 1) AS rx_status " +
+      "SELECT b.id, b.patient_name, b.patient_age, b.phone, b.complaint, b.doctor_id, b.doctor_name, b.date, b.session, b.token_number, b.payment_done, b.status, b.booking_source, b.checked_in_at, b.vitals, b.vitals_at, b.fee_amount, b.fee_mode, b.fee_paid_at, d.doctor_fee, (SELECT pr.status FROM prescriptions pr WHERE pr.booking_id=b.id ORDER BY pr.created_at DESC LIMIT 1) AS rx_status " +
       "FROM bookings b JOIN doctors d ON d.id=b.doctor_id WHERE d.hospital_id=$1 AND b.date=$2 AND b.status<>'cancelled' AND b.archived = FALSE " +
       "ORDER BY CASE b.session WHEN 'morning' THEN 0 WHEN 'afternoon' THEN 1 ELSE 2 END, b.doctor_name ASC, b.token_number ASC",
       [req.user.hospitalId, date]);
@@ -232,6 +234,81 @@ router.post("/admit", fo, async (req, res) => {
   } catch (e) {
     if (began) { try { await client.query("ROLLBACK"); } catch (_) {} }
     res.status(500).json({ error: e.message });
+  } finally { client.release(); }
+});
+
+// ---- front-desk registration (patients without the app) ----
+router.get("/walkin/doctors", fo, async (req, res) => {
+  try {
+    const { rows } = await pool.query("SELECT id, name, specialty FROM doctors WHERE hospital_id=$1 AND COALESCE(is_active,1)<>0 ORDER BY name", [req.user.hospitalId]);
+    res.json({ doctors: rows });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.post("/walkin", fo, async (req, res) => {
+  const client = await pool.connect();
+  let began = false;
+  const bad = (s, m) => Object.assign(new Error(m), { status: s });
+  try {
+    await ready;
+    const b = req.body || {};
+    const hid = req.user.hospitalId;
+    const name = String(b.patientName || "").trim();
+    if (!name) return res.status(400).json({ error: "Patient name is required" });
+    const rawPhone = String(b.phone || "").replace(/\D/g, "");
+    const phone = rawPhone ? rawPhone.slice(-10) : null;
+    if (phone && phone.length !== 10) return res.status(400).json({ error: "Enter a valid 10-digit phone number" });
+    const age = (b.age === undefined || b.age === null || b.age === "") ? null : Number(b.age);
+    if (age !== null && !(Number.isInteger(age) && age >= 0 && age <= 130)) return res.status(400).json({ error: "Enter a valid age" });
+    const session = String(b.session || "");
+    if (!["morning", "afternoon", "evening"].includes(session)) return res.status(400).json({ error: "Choose a session" });
+    const date = /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || "")) ? b.date : todayIST();
+    if (!b.doctorId) return res.status(400).json({ error: "Choose a doctor" });
+
+    const dR = await client.query("SELECT id, name FROM doctors WHERE id=$1 AND hospital_id=$2", [b.doctorId, hid]);
+    if (!dR.rows.length) return res.status(404).json({ error: "Doctor not found" });
+    const doctor = dR.rows[0];
+    const hR = await client.query("SELECT name, rate_per_token FROM hospitals WHERE id=$1", [hid]);
+    const hospital = hR.rows[0];
+    const sessionId = doctor.id + "_" + date + "_" + session;
+
+    await client.query("BEGIN"); began = true;
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [sessionId]);
+
+    let patientId = null;
+    if (phone) {
+      const ex = await client.query("SELECT b.patient_id FROM bookings b JOIN users u ON u.id=b.patient_id WHERE u.walkin_hospital_id=$1 AND b.phone=$2 AND lower(b.patient_name)=lower($3) LIMIT 1", [hid, phone, name]);
+      if (ex.rows.length) patientId = ex.rows[0].patient_id;
+    }
+    if (!patientId) {
+      patientId = "u_walkin_" + randomBytes(6).toString("hex");
+      await client.query("INSERT INTO users (id, name, role, walkin_hospital_id) VALUES ($1,$2,'patient',$3)", [patientId, name, hid]);
+    }
+
+    const dup = await client.query("SELECT 1 FROM bookings WHERE session_id=$1 AND patient_id=$2 AND status<>'cancelled' LIMIT 1", [sessionId, patientId]);
+    if (dup.rows.length) throw bad(409, "This patient already has a token in this session");
+
+    const cnt = await client.query("SELECT COUNT(*) AS c FROM bookings WHERE session_id=$1 AND payment_done=1 AND status<>'cancelled'", [sessionId]);
+    const token = Number(cnt.rows[0].c) + 1;
+    const bookingId = "b_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
+
+    await client.query(
+      "INSERT INTO bookings (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, rate_per_token, booking_source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,'front_desk')",
+      [bookingId, patientId, name, doctor.id, doctor.name, hospital ? hospital.name : "Unknown", date, session, token, sessionId, phone, String(b.complaint || ""), age, hospital ? hospital.rate_per_token : null]);
+
+    const ts = await client.query("SELECT token_statuses FROM token_states WHERE session_id=$1", [sessionId]);
+    if (ts.rows.length) {
+      const st = JSON.parse(ts.rows[0].token_statuses || "{}");
+      st[token] = "red";
+      await client.query("UPDATE token_states SET token_statuses=$1, updated_at=now() WHERE session_id=$2", [JSON.stringify(st), sessionId]);
+    } else {
+      await client.query("INSERT INTO token_states (session_id, doctor_id, date, session, token_statuses) VALUES ($1,$2,$3,$4,$5)", [sessionId, doctor.id, date, session, JSON.stringify({ [token]: "red" })]);
+    }
+    await client.query("COMMIT");
+    res.status(201).json({ ok: true, bookingId, tokenNumber: token, doctorName: doctor.name, session, date, patientName: name });
+  } catch (e) {
+    if (began) { try { await client.query("ROLLBACK"); } catch (_) {} }
+    res.status(e.status || 500).json({ error: e.message });
   } finally { client.release(); }
 });
 
