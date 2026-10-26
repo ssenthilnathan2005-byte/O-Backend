@@ -1,5 +1,6 @@
 "use strict";
 const express = require("express");
+const { broadcast } = require("../services/ws");
 const jwt = require("jsonwebtoken");
 const { randomBytes, randomInt } = require("crypto");
 const { pool } = require("../db/init");
@@ -288,8 +289,8 @@ router.post("/walkin", fo, async (req, res) => {
     const dup = await client.query("SELECT 1 FROM bookings WHERE session_id=$1 AND patient_id=$2 AND status<>'cancelled' LIMIT 1", [sessionId, patientId]);
     if (dup.rows.length) throw bad(409, "This patient already has a token in this session");
 
-    const cnt = await client.query("SELECT COUNT(*) AS c FROM bookings WHERE session_id=$1 AND payment_done=1 AND status<>'cancelled'", [sessionId]);
-    const token = Number(cnt.rows[0].c) + 1;
+    const mx = await client.query("SELECT COALESCE(MAX(token_number), 1000) AS m FROM bookings WHERE session_id=$1 AND token_number>=1000", [sessionId]);
+    const token = Number(mx.rows[0].m) + 1;
     const bookingId = "b_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
 
     await client.query(
@@ -305,6 +306,7 @@ router.post("/walkin", fo, async (req, res) => {
       await client.query("INSERT INTO token_states (session_id, doctor_id, date, session, token_statuses) VALUES ($1,$2,$3,$4,$5)", [sessionId, doctor.id, date, session, JSON.stringify({ [token]: "red" })]);
     }
     await client.query("COMMIT");
+    try { broadcast(sessionId, { type: "token_booked", tokenNumber: token, sessionId }); } catch (_) {}
     res.status(201).json({ ok: true, bookingId, tokenNumber: token, doctorName: doctor.name, session, date, patientName: name });
   } catch (e) {
     if (began) { try { await client.query("ROLLBACK"); } catch (_) {} }
