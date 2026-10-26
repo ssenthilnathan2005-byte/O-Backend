@@ -1,0 +1,337 @@
+diff --git a/.gitignore b/.gitignore
+index 5a30008..935fe84 100644
+--- a/.gitignore
++++ b/.gitignore
+@@ -2,3 +2,8 @@
+ *.bak[0-9]
+ *.bak_*
+ *.bak*
++
++# databases and local keys (never commit data)
++*.db
++*.db-shm
++*.db-wal
+diff --git a/O backend/.gitignore b/O backend/.gitignore
+index 09af9bb..3461be0 100644
+--- a/O backend/.gitignore	
++++ b/O backend/.gitignore	
+@@ -6,3 +6,10 @@ src/exports/
+ # local backups
+ *.bak*
+ .env.bak*
++
++# databases, uploads, exports (never commit data)
++*.db
++*.db-shm
++*.db-wal
++data/
++uploads/
+diff --git a/O backend/src/db/seed.js b/O backend/src/db/seed.js
+index d709efe..a53610b 100644
+--- a/O backend/src/db/seed.js	
++++ b/O backend/src/db/seed.js	
+@@ -4,6 +4,11 @@ const bcrypt = require("bcrypt");
+ const { pool, init } = require("./init");
+ 
+ const ADMIN_CODE = process.env.ADMIN_CODE || "ADMIN-001";
++const { isProduction } = require("../utils/secrets");
++if (isProduction && !process.env.ADMIN_PASSWORD) {
++  console.error("[seed] ADMIN_PASSWORD must be set in production. Refusing to seed a default password.");
++  process.exit(1);
++}
+ const ADMIN_PASSWORD = process.env.ADMIN_PASSWORD || "Admin@123";
+ 
+ async function seed() {
+@@ -24,7 +29,7 @@ async function seed() {
+ 
+   console.log("✅  Admin seeded.");
+   console.log(`   Code    : ${ADMIN_CODE}`);
+-  console.log(`   Password: ${ADMIN_PASSWORD}`);
++  console.log(process.env.ADMIN_PASSWORD ? "   Password: (taken from ADMIN_PASSWORD)" : `   Password: ${ADMIN_PASSWORD} (insecure dev default)`);
+   console.log("   ⚠️  Change ADMIN_PASSWORD in .env before going to production!");
+   process.exit(0);
+ }
+diff --git a/O backend/src/middleware/auth.js b/O backend/src/middleware/auth.js
+index a4a9765..ec2f0ee 100644
+--- a/O backend/src/middleware/auth.js	
++++ b/O backend/src/middleware/auth.js	
+@@ -1,17 +1,7 @@
+ "use strict";
+ const jwt = require("jsonwebtoken");
+ 
+-const SECRET = process.env.JWT_SECRET;
+-if (!SECRET || SECRET === "fallback_dev_secret") {
+-  if (process.env.NODE_ENV === "production") {
+-    console.error("[FATAL] JWT_SECRET is not set! Set it in Railway environment variables.");
+-    process.exit(1);
+-  } else {
+-    console.warn("[AUTH] WARNING: Using fallback JWT secret. Set JWT_SECRET in .env");
+-  }
+-}
+-
+-const JWT_SECRET = SECRET || "fallback_dev_secret";
++const { JWT_SECRET } = require("../utils/secrets");
+ 
+ const _docActive = new Map();
+ const _staffActive = new Map();
+@@ -59,7 +49,10 @@ function requireAuth(req, res, next) {
+   const token  = header.startsWith("Bearer ") ? header.slice(7).trim() : null;
+   if (!token) return res.status(401).json({ error: "No token provided" });
+   try {
+-    req.user = jwt.verify(token, JWT_SECRET);
++    const decoded = jwt.verify(token, JWT_SECRET);
++    // Single-purpose tokens (e.g. password-reset links) must never work as login sessions.
++    if (decoded && decoded.purpose) return res.status(401).json({ error: "Invalid token. Please log in again." });
++    req.user = decoded;
+     doctorActiveCheck(req, res, () => staffActiveCheck(req, res, next));
+   } catch (err) {
+     if (err.name === "TokenExpiredError")
+diff --git a/O backend/src/middleware/plan.js b/O backend/src/middleware/plan.js
+index 064c405..177d273 100644
+--- a/O backend/src/middleware/plan.js	
++++ b/O backend/src/middleware/plan.js	
+@@ -2,7 +2,7 @@
+ const jwt = require("jsonwebtoken");
+ const cache = require("../utils/cache");
+ 
+-const SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
++const SECRET = require("../utils/secrets").JWT_SECRET;
+ const PLAN_TTL_MS = 60 * 1000;
+ 
+ async function lookupPlan(hospitalId) {
+diff --git a/O backend/src/routes/ambulance.js b/O backend/src/routes/ambulance.js
+index 12182a7..69781e9 100644
+--- a/O backend/src/routes/ambulance.js	
++++ b/O backend/src/routes/ambulance.js	
+@@ -8,7 +8,7 @@ const { requireAuth, requireAdminOrHospitalAdmin } = require("../middleware/auth
+ 
+ function nanoid(n = 10) { return randomBytes(n).toString("hex").slice(0, n); }
+ 
+-const JWT_SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
++const JWT_SECRET = require("../utils/secrets").JWT_SECRET;
+ 
+ // POST /api/ambulance — book an ambulance (guests allowed, login optional)
+ router.post("/", async (req, res) => {
+diff --git a/O backend/src/routes/auth.js b/O backend/src/routes/auth.js
+index cce60e3..69e9be1 100644
+--- a/O backend/src/routes/auth.js	
++++ b/O backend/src/routes/auth.js	
+@@ -17,7 +17,7 @@ if (!resend) {
+ 
+ const router = express.Router();
+ 
+-const SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
++const SECRET = require("../utils/secrets").JWT_SECRET;
+ const EXPIRES = process.env.JWT_EXPIRES_IN || "7d";
+ const ADMIN_CODE = process.env.ADMIN_CODE || "ADMIN-001";
+ const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
+diff --git a/O backend/src/routes/doctor_history.js b/O backend/src/routes/doctor_history.js
+index 5d955fa..319df4c 100644
+--- a/O backend/src/routes/doctor_history.js	
++++ b/O backend/src/routes/doctor_history.js	
+@@ -1,6 +1,7 @@
+ const express = require("express");
+ const { pool } = require("../db/init");
+ const { requireDoctor } = require("../middleware/auth");
++const { logAccess } = require("../services/audit");
+ 
+ const router = express.Router();
+ 
+@@ -48,6 +49,7 @@ router.get("/patient-history/:patientId", requireDoctor, async (req, res) => {
+       };
+     });
+ 
++    logAccess(req, { action: "view_patient_history", resourceType: "patient", resourceId: patientId, patientId, meta: { visits: visits.length } });
+     res.json({ totalVisits: visits.length, visits });
+   } catch (err) {
+     console.error("[doctor/patient-history]", err.message);
+diff --git a/O backend/src/routes/doctors.js b/O backend/src/routes/doctors.js
+index 678569a..67bd442 100644
+--- a/O backend/src/routes/doctors.js	
++++ b/O backend/src/routes/doctors.js	
+@@ -76,7 +76,7 @@ function viewDoctor(req, d) {
+   try {
+     const h = req.headers.authorization || "";
+     const t = h.startsWith("Bearer ") ? h.slice(7).trim() : null;
+-    const u = t ? require("jsonwebtoken").verify(t, process.env.JWT_SECRET || "fallback_dev_secret") : null;
++    const u = t ? require("jsonwebtoken").verify(t, require("../utils/secrets").JWT_SECRET) : null;
+     if (u && (u.role === "admin" || (u.role === "hospital_admin" && u.hospitalId === d.hospitalId) || (u.role === "doctor" && u.doctorId === d.id))) return d;
+   } catch (e) {}
+   return { ...d, phone: "", contactPhone: "", password: "" };
+diff --git a/O backend/src/routes/front_office.js b/O backend/src/routes/front_office.js
+index be1683f..61fbb2d 100644
+--- a/O backend/src/routes/front_office.js	
++++ b/O backend/src/routes/front_office.js	
+@@ -8,7 +8,7 @@ const { issueCode } = require("../services/loginCodes");
+ let bcrypt; try { bcrypt = require("bcryptjs"); } catch (_) { bcrypt = require("bcrypt"); }
+ 
+ const router = express.Router();
+-const JWT_SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
++const JWT_SECRET = require("../utils/secrets").JWT_SECRET;
+ const sign = p => jwt.sign(p, JWT_SECRET, { expiresIn: "12h" });
+ const id = pre => pre + randomBytes(5).toString("hex");
+ const todayIST = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().slice(0, 10);
+diff --git a/O backend/src/routes/hospital_lab_staff.js b/O backend/src/routes/hospital_lab_staff.js
+index 8d3ba49..8c18d74 100644
+--- a/O backend/src/routes/hospital_lab_staff.js	
++++ b/O backend/src/routes/hospital_lab_staff.js	
+@@ -8,7 +8,7 @@ const { pool } = require("../db/init");
+ const { requireAuth, requireAdminOrHospitalAdmin } = require("../middleware/auth");
+ const router = express.Router();
+ 
+-const JWT_SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
++const JWT_SECRET = require("../utils/secrets").JWT_SECRET;
+ function rid(n = 10) { return randomBytes(n).toString("hex").slice(0, n); }
+ function sign(p) { return jwt.sign(p, JWT_SECRET, { expiresIn: "7d" }); }
+ 
+diff --git a/O backend/src/routes/labs.js b/O backend/src/routes/labs.js
+index a94ed54..db0eb8b 100644
+--- a/O backend/src/routes/labs.js	
++++ b/O backend/src/routes/labs.js	
+@@ -28,7 +28,7 @@ function cleanMapLocation(v) {
+ }
+ 
+ function nanoid(n = 10) { return randomBytes(n).toString("hex").slice(0, n); }
+-const JWT_SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
++const JWT_SECRET = require("../utils/secrets").JWT_SECRET;
+ 
+ // ── Lab self-management: tests & pricing ───────────────────────────────────
+ 
+diff --git a/O backend/src/routes/nurses.js b/O backend/src/routes/nurses.js
+index 9ef1c49..31a3e89 100644
+--- a/O backend/src/routes/nurses.js	
++++ b/O backend/src/routes/nurses.js	
+@@ -8,7 +8,7 @@ const { pool } = require("../db/init");
+ const { requireAdminOrHospitalAdmin } = require("../middleware/auth");
+ 
+ const { issueCode } = require("../services/loginCodes");
+-const SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
++const SECRET = require("../utils/secrets").JWT_SECRET;
+ const EXPIRES = process.env.JWT_EXPIRES_IN || "7d";
+ const CODE_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZ23456789";
+ const PW_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
+diff --git a/O backend/src/routes/pharmacies_public.js b/O backend/src/routes/pharmacies_public.js
+index 5f4a492..385bd88 100644
+--- a/O backend/src/routes/pharmacies_public.js	
++++ b/O backend/src/routes/pharmacies_public.js	
+@@ -42,7 +42,7 @@ router.post("/:id/enquire", async (req, res) => {
+     if (header.startsWith("Bearer ")) {
+       try {
+         const jwt = require("jsonwebtoken");
+-        const decoded = jwt.verify(header.slice(7).trim(), process.env.JWT_SECRET || "fallback_dev_secret");
++        const decoded = jwt.verify(header.slice(7).trim(), require("../utils/secrets").JWT_SECRET);
+         patientId = decoded.id || null;
+       } catch (_) {}
+     }
+@@ -62,7 +62,7 @@ router.patch("/:id/toggle-active", async (req, res) => {
+     const jwt = require("jsonwebtoken");
+     const header = req.headers.authorization || "";
+     if (!header.startsWith("Bearer ")) return res.status(401).json({ error: "Unauthorized" });
+-    const decoded = jwt.verify(header.slice(7).trim(), process.env.JWT_SECRET || "fallback_dev_secret");
++    const decoded = jwt.verify(header.slice(7).trim(), require("../utils/secrets").JWT_SECRET);
+     if (decoded.role !== "admin") return res.status(403).json({ error: "Admin only" });
+     const { rows } = await pool.query(
+       "UPDATE pharmacies SET is_active = CASE WHEN is_active=1 THEN 0 ELSE 1 END WHERE id=$1 RETURNING *",
+@@ -79,7 +79,7 @@ router.get("/:id/enquiries-admin", async (req, res) => {
+     const jwt = require("jsonwebtoken");
+     const header = req.headers.authorization || "";
+     if (!header.startsWith("Bearer ")) return res.status(401).json({ error: "Unauthorized" });
+-    const decoded = jwt.verify(header.slice(7).trim(), process.env.JWT_SECRET || "fallback_dev_secret");
++    const decoded = jwt.verify(header.slice(7).trim(), require("../utils/secrets").JWT_SECRET);
+     if (decoded.role !== "admin") return res.status(403).json({ error: "Admin only" });
+     const { rows } = await pool.query(
+       "SELECT * FROM pharmacy_enquiries WHERE pharmacy_id=$1 ORDER BY created_at DESC LIMIT 200",
+diff --git a/O backend/src/routes/pharmacy_owner.js b/O backend/src/routes/pharmacy_owner.js
+index f438f4f..d46c485 100644
+--- a/O backend/src/routes/pharmacy_owner.js	
++++ b/O backend/src/routes/pharmacy_owner.js	
+@@ -6,7 +6,7 @@ const { pool } = require("../db/init");
+ const { requireAuth } = require("../middleware/auth");
+ const jwt = require("jsonwebtoken");
+ 
+-const SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
++const SECRET = require("../utils/secrets").JWT_SECRET;
+ const sign = (payload) => jwt.sign(payload, SECRET, { expiresIn: "30d" });
+ 
+ function requirePharmacyOwner(req, res, next) {
+diff --git a/O backend/src/services/audit.js b/O backend/src/services/audit.js
+new file mode 100644
+index 0000000..8c69314
+--- /dev/null
++++ b/O backend/src/services/audit.js	
+@@ -0,0 +1,45 @@
++"use strict";
++// Records who accessed which patient data. Needed for ABDM / DPDP accountability.
++// Fire-and-forget: an audit failure must never break the request it is logging.
++const crypto = require("crypto");
++const { pool } = require("../db/init");
++
++let tableReady = null;
++function ensureTable() {
++  if (!tableReady) {
++    tableReady = pool.query(`
++      CREATE TABLE IF NOT EXISTS data_access_audit (
++        id            TEXT PRIMARY KEY,
++        at            TIMESTAMPTZ NOT NULL DEFAULT now(),
++        actor_id      TEXT,
++        actor_role    TEXT,
++        hospital_id   TEXT,
++        action        TEXT NOT NULL,
++        resource_type TEXT,
++        resource_id   TEXT,
++        patient_id    TEXT,
++        ip            TEXT,
++        meta          JSONB
++      );
++      CREATE INDEX IF NOT EXISTS idx_daa_patient ON data_access_audit(patient_id, at DESC);
++      CREATE INDEX IF NOT EXISTS idx_daa_actor   ON data_access_audit(actor_id, at DESC);
++    `).catch((e) => { tableReady = null; throw e; });
++  }
++  return tableReady;
++}
++
++function logAccess(req, { action, resourceType = null, resourceId = null, patientId = null, meta = null }) {
++  const u = (req && req.user) || {};
++  const ip = (req && (req.headers["cf-connecting-ip"] || req.ip)) || null;
++  ensureTable()
++    .then(() => pool.query(
++      `INSERT INTO data_access_audit (id, actor_id, actor_role, hospital_id, action, resource_type, resource_id, patient_id, ip, meta)
++       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
++      ["aud_" + crypto.randomBytes(8).toString("hex"),
++       u.id || u.doctorId || null, u.role || null, u.hospitalId || null,
++       action, resourceType, resourceId, patientId, ip, meta ? JSON.stringify(meta) : null]
++    ))
++    .catch((e) => console.warn("[audit] not recorded:", e.message));
++}
++
++module.exports = { logAccess };
+diff --git a/O backend/src/utils/secrets.js b/O backend/src/utils/secrets.js
+new file mode 100644
+index 0000000..843b5d0
+--- /dev/null
++++ b/O backend/src/utils/secrets.js	
+@@ -0,0 +1,24 @@
++"use strict";
++// Single source of truth for the JWT signing secret.
++// Production = NODE_ENV=production OR running on Railway (which sets RAILWAY_* vars).
++// In production a missing/default secret is fatal; in local dev it falls back with a warning.
++const DEV_FALLBACK = "fallback_dev_secret";
++
++const isProduction =
++  process.env.NODE_ENV === "production" ||
++  !!process.env.RAILWAY_ENVIRONMENT ||
++  !!process.env.RAILWAY_ENVIRONMENT_NAME ||
++  !!process.env.RAILWAY_PROJECT_ID;
++
++let secret = process.env.JWT_SECRET;
++
++if (!secret || secret === DEV_FALLBACK) {
++  if (isProduction) {
++    console.error("[FATAL] JWT_SECRET is missing or insecure. Set a long random JWT_SECRET in the server environment.");
++    process.exit(1);
++  }
++  console.warn("[AUTH] WARNING: using the insecure development JWT secret. Set JWT_SECRET in .env");
++  secret = DEV_FALLBACK;
++}
++
++module.exports = { JWT_SECRET: secret, isProduction };
