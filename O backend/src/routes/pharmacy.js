@@ -4,6 +4,7 @@ const { v4: uuidv4 } = require("uuid");
 const { pool } = require("../db/init");
 const { broadcast } = require("../services/ws");
 const { requireAuth, requireAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
+const { requireAnyPerm } = require("./permissions");
 
 const { randomBytes } = require("crypto");
 const { issueCode } = require("../services/loginCodes");
@@ -94,15 +95,27 @@ router.post("/", requireAuth, async (req, res) => {
     const diagnosisCode = typeof req.body.diagnosisCode === "string" ? (req.body.diagnosisCode.trim().slice(0, 50) || null) : null;
     if (!bookingId || !doctorId || !hospitalId)
       return res.status(400).json({ error: "bookingId, doctorId, hospitalId required" });
-    const id = "rx_" + Date.now() + "_" + Math.random().toString(36).substring(2, 8);
+    // IP if the patient is currently admitted in this hospital (matched on last 10 digits of phone), else OP
+    let patientType = "OP", inwardId = null;
+    try {
+      const bk = await pool.query("SELECT phone FROM bookings WHERE id=$1", [bookingId]);
+      const ph = String((bk.rows[0] && bk.rows[0].phone) || "").replace(/\D/g, "").slice(-10);
+      if (ph.length === 10) {
+        const ip = await pool.query(
+          "SELECT id FROM inward_patients WHERE hospital_id=$1 AND status='admitted' AND RIGHT(regexp_replace(COALESCE(phone,''), '\\D', '', 'g'), 10)=$2 ORDER BY admitted_at DESC LIMIT 1",
+          [hospitalId, ph]
+        );
+        if (ip.rows.length) { patientType = "IP"; inwardId = ip.rows[0].id; }
+      }
+    } catch (_) {}    const id = "rx_" + Date.now() + "_" + Math.random().toString(36).substring(2, 8);
     const { rows } = await pool.query(
       `INSERT INTO prescriptions
         (id, booking_id, doctor_id, doctor_name, patient_id, patient_name,
-         hospital_id, hospital_name, items, notes, status, diagnosis, diagnosis_code)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12)
+         hospital_id, hospital_name, items, notes, status, diagnosis, diagnosis_code, patient_type, inward_id)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'pending',$11,$12,$13,$14)
        RETURNING *`,
       [id, bookingId, doctorId, doctorName || "", patientId || "", patientName || "",
-       hospitalId, hospitalName || "", JSON.stringify(items), notes, diagnosis, diagnosisCode]
+       hospitalId, hospitalName || "", JSON.stringify(items), notes, diagnosis, diagnosisCode, patientType, inwardId]
     );
     // Notify patient via WebSocket — same room used for status updates,
     // so the app can toast + redirect the moment a new prescription lands.
@@ -132,6 +145,68 @@ router.post("/", requireAuth, async (req, res) => {
 
 
 // ── GET my prescriptions (patient) ───────────────────────────────────────────
+// ── Inpatient prescriptions (Nurse Console / Beds & Wards) ──────────────────
+router.get("/inward/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd", "vitals", "all_patients"), async (req, res) => {
+  try {
+    const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
+    const { rows } = await pool.query(
+      "SELECT * FROM prescriptions WHERE inward_id=$1 AND hospital_id=$2 ORDER BY created_at DESC",
+      [req.params.inwardId, hospitalId]
+    );
+    res.json(rows.map(r => ({ ...r, items: JSON.parse(r.items || "[]") })));
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.post("/inward/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd"), async (req, res) => {
+  try {
+    const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
+    if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
+    const { doctorId, doctorName, items, notes = "" } = req.body;
+    const diagnosisCode = typeof req.body.diagnosisCode === "string" ? (req.body.diagnosisCode.trim().slice(0, 50) || null) : null;
+    const diagnosis = typeof req.body.diagnosis === "string" ? (req.body.diagnosis.trim().slice(0, 500) || null) : null;
+    if (!doctorName || !String(doctorName).trim()) return res.status(400).json({ error: "Prescribing doctor is required" });
+    if (!Array.isArray(items) || !items.length) return res.status(400).json({ error: "Add at least one medicine" });
+
+    const ipq = await pool.query(
+      "SELECT * FROM inward_patients WHERE id=$1 AND hospital_id=$2 AND status='admitted'",
+      [req.params.inwardId, hospitalId]
+    );
+    if (!ipq.rows.length) return res.status(404).json({ error: "Admitted patient not found" });
+    const p = ipq.rows[0];
+
+    const hq = await pool.query("SELECT name FROM hospitals WHERE id=$1", [hospitalId]);
+    const hospitalName = (hq.rows[0] && hq.rows[0].name) || "";
+
+    // link to the registered patient account (by phone) so it shows in Patient Login
+    let patientId = null;
+    const ph = String(p.phone || "").replace(/\D/g, "").slice(-10);
+    if (ph.length === 10) {
+      const uq = await pool.query(
+        "SELECT id FROM users WHERE role='patient' AND RIGHT(regexp_replace(COALESCE(phone,''), '\\D', '', 'g'), 10)=$1 LIMIT 1",
+        [ph]
+      );
+      if (uq.rows.length) patientId = uq.rows[0].id;
+    }
+
+    const id = "rx_" + Date.now() + "_" + Math.random().toString(36).substring(2, 8);
+    const { rows } = await pool.query(
+      `INSERT INTO prescriptions
+        (id, booking_id, doctor_id, doctor_name, patient_id, patient_name,
+         hospital_id, hospital_name, items, notes, status, diagnosis, diagnosis_code, patient_type, inward_id)
+       VALUES ($1,NULL,$2,$3,$4,$5,$6,$7,$8,$9,'pending',$10,$11,'IP',$12)
+       RETURNING *`,
+      [id, doctorId || null, String(doctorName).trim(), patientId, p.patient_name || "",
+       hospitalId, hospitalName, JSON.stringify(items), notes, diagnosis, diagnosisCode, p.id]
+    );
+    const created = { ...rows[0], items: JSON.parse(rows[0].items || "[]") };
+    if (patientId) {
+      try {
+        broadcast(`patient_${patientId}`, { type: "prescription_created", prescriptionId: created.id, doctorName: created.doctor_name, patientId });
+      } catch (_) {}
+    }
+    res.status(201).json(created);
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
 router.get("/my", requireAuth, async (req, res) => {
   try {
     const patientId = req.user.id;

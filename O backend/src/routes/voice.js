@@ -3,7 +3,18 @@
 const express = require("express");
 const multer = require("multer");
 const rateLimit = require("express-rate-limit");
-const { requireDoctor } = require("../middleware/auth");
+const { requireAuth } = require("../middleware/auth");
+const { requireAnyPerm } = require("./permissions");
+
+// Doctors, and nurses with Beds & Wards / IPD access (inpatient prescriptions from the Nurse Console)
+const nursePerm = requireAnyPerm("beds_wards", "ipd");
+function requireDoctorOrNurse(req, res, next) {
+  requireAuth(req, res, () => {
+    if (req.user.role === "doctor") return next();
+    if (req.user.role === "nurse") return nursePerm(req, res, next);
+    return res.status(403).json({ error: "Doctor or nurse access required" });
+  });
+}
 
 const router = express.Router();
 
@@ -102,7 +113,7 @@ async function transcribeWithRetry(fn, buf, mime, opts) {
 }
 
 // POST /api/voice/transcribe   (multipart: audio, optional language, optional hints JSON)
-router.post("/transcribe", requireDoctor, limiter, upload.single("audio"), async (req, res) => {
+router.post("/transcribe", requireDoctorOrNurse, limiter, upload.single("audio"), async (req, res) => {
   const started = Date.now();
   res.set("Cache-Control", "no-store");
   try {

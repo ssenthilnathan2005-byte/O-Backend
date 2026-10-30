@@ -304,6 +304,13 @@ const MIGRATIONS = [
   "CREATE TABLE IF NOT EXISTS inward_patients (id TEXT PRIMARY KEY, hospital_id TEXT NOT NULL REFERENCES hospitals(id) ON DELETE CASCADE, patient_name TEXT NOT NULL, phone TEXT, age INTEGER, gender TEXT, ward TEXT, bed_number TEXT, admitting_doctor_id TEXT REFERENCES doctors(id) ON DELETE SET NULL, admitting_doctor_name TEXT, diagnosis TEXT, notes TEXT, status TEXT NOT NULL DEFAULT 'admitted' CHECK(status IN ('admitted','discharged')), admitted_at TIMESTAMPTZ NOT NULL DEFAULT now(), discharged_at TIMESTAMPTZ, created_at TIMESTAMPTZ NOT NULL DEFAULT now())",
   "CREATE INDEX IF NOT EXISTS idx_inward_hospital ON inward_patients(hospital_id)",
   "CREATE INDEX IF NOT EXISTS idx_inward_status ON inward_patients(status)",
+  "ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS patient_type TEXT NOT NULL DEFAULT 'OP' CHECK(patient_type IN ('OP','IP'))",
+  "ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS inward_id TEXT REFERENCES inward_patients(id) ON DELETE SET NULL",
+  "ALTER TABLE prescriptions ALTER COLUMN booking_id DROP NOT NULL",
+  "ALTER TABLE prescriptions ALTER COLUMN patient_id DROP NOT NULL",
+  "ALTER TABLE prescriptions ALTER COLUMN doctor_id DROP NOT NULL",
+  "CREATE INDEX IF NOT EXISTS idx_prescriptions_inward ON prescriptions(inward_id)",
+  "CREATE INDEX IF NOT EXISTS idx_prescriptions_type ON prescriptions(patient_type)",
   `CREATE TABLE IF NOT EXISTS ambulance_bookings (
     id             TEXT PRIMARY KEY,
     patient_id     TEXT REFERENCES users(id) ON DELETE SET NULL,

@@ -28,6 +28,11 @@ async function resolveDoctorId(req) {
     const r = await pool.query("SELECT id FROM doctors WHERE user_id = $1 LIMIT 1", [u.id]);
     return r.rows[0] ? r.rows[0].id : null;
   }
+  if (u.role === "nurse" && req.method === "GET" && req.query.doctorId && u.hospitalId) {
+    // nurses may only READ the presets of a doctor in their own hospital
+    const nr = await pool.query("SELECT id FROM doctors WHERE id = $1 AND hospital_id = $2 LIMIT 1", [req.query.doctorId, u.hospitalId]);
+    return nr.rows[0] ? nr.rows[0].id : null;
+  }
   if (u.role === "admin") return req.query.doctorId || (req.body && req.body.doctorId) || null;
   return null;
 }
