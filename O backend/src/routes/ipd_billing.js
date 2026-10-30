@@ -147,22 +147,26 @@ async function buildBill(db, stay) {
       invoiceNo = cur.rows[0] && cur.rows[0].invoice_no;
     }
   }
-  const { rows: hosp } = await db.query("SELECT name, address, phone FROM hospitals WHERE id=$1", [stay.hospital_id]);
-  const { rows: items } = await db.query(
-    "SELECT * FROM ipd_bill_items WHERE inward_id=$1 ORDER BY created_at ASC", [stay.id]);
-  const { rows: pays } = await db.query(
-    "SELECT * FROM ipd_payments WHERE inward_id=$1 ORDER BY created_at ASC", [stay.id]);
+  const par = (fns) => db.release
+    ? fns.reduce((pr, f) => pr.then(async (acc) => { acc.push(await f()); return acc; }), Promise.resolve([]))
+    : Promise.all(fns.map((f) => f()));
+  const [hospR, itemsR, paysR, lrR, segR] = await par([
+    () => db.query("SELECT name, address, phone FROM hospitals WHERE id=$1", [stay.hospital_id]),
+    () => db.query("SELECT * FROM ipd_bill_items WHERE inward_id=$1 ORDER BY created_at ASC", [stay.id]),
+    () => db.query("SELECT * FROM ipd_payments WHERE inward_id=$1 ORDER BY created_at ASC", [stay.id]),
+    () => db.query("SELECT * FROM hospital_lab_orders WHERE inward_id=$1 AND status<>'cancelled' ORDER BY ordered_at ASC", [stay.id]).catch(() => null),
+    () => db.query("SELECT seg_no, seg_ward, seg_rate, seg_start::text AS seg_start, seg_days FROM ipd_bed_segments($1) ORDER BY seg_no", [stay.id]),
+  ]);
+  const hosp = hospR.rows, items = itemsR.rows, pays = paysR.rows;
   let labTests = [];
   try {
-    const lr = await db.query(
-      "SELECT * FROM hospital_lab_orders WHERE inward_id=$1 AND status<>'cancelled' ORDER BY ordered_at ASC", [stay.id]);
+    const lr = lrR || { rows: [] };
     labTests = lr.rows.map((r) => ({
       id: r.id, testName: r.test_name, status: r.status, priority: r.priority,
       amount: num(r.amount), result: r.result_value || null, orderedAt: r.ordered_at,
     }));
   } catch (_) { labTests = []; }
-  const { rows: segRows } = await db.query(
-    "SELECT seg_no, seg_ward, seg_rate, seg_start::text AS seg_start, seg_days FROM ipd_bed_segments($1) ORDER BY seg_no", [stay.id]);
+  const segRows = segR.rows;
   const moved = segRows.length > 1;
   const segments = moved ? segRows.filter((s) => Number(s.seg_days) > 0).map((s) => ({
     ward: s.seg_ward, rate: num(s.seg_rate), days: Number(s.seg_days), from: s.seg_start,
@@ -410,10 +414,10 @@ router.delete("/:inwardId/items/:itemId", requireAuth, staff, async (req, res) =
     const stay = await loadStay(pool, req.params.inwardId, hospitalOf(req));
     if (!stay) return res.status(404).json({ error: "Admission not found" });
     const rxRow = await pool.query("SELECT rx_id FROM ipd_bill_items WHERE id=$1 AND inward_id=$2", [req.params.itemId, stay.id]);
-  const isRx = !!(rxRow.rows[0] && rxRow.rows[0].rx_id);
-  if (isRx && req.user.role !== "hospital_admin" && req.user.role !== "admin")
-    return res.status(403).json({ error: "Only the hospital admin can remove a pharmacy charge" });
-  if (!(await guardEdit(req, res, stay, "item_remove", { itemId: req.params.itemId, pharmacy: isRx }, { always: isRx }))) return;
+    const isRx = !!(rxRow.rows[0] && rxRow.rows[0].rx_id);
+    if (isRx && req.user.role !== "hospital_admin" && req.user.role !== "admin")
+      return res.status(403).json({ error: "Only the hospital admin can remove a pharmacy charge" });
+    if (!(await guardEdit(req, res, stay, "item_remove", { itemId: req.params.itemId, pharmacy: isRx }, { always: isRx }))) return;
     await pool.query("DELETE FROM ipd_bill_items WHERE id=$1 AND inward_id=$2", [req.params.itemId, stay.id]);
     res.json(await buildBill(pool, stay));
   } catch (e) { res.status(500).json({ error: e.message }); }
