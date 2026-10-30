@@ -178,9 +178,9 @@ router.post("/inward/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd"
     const hospitalName = (hq.rows[0] && hq.rows[0].name) || "";
 
     // link to the registered patient account (by phone) so it shows in Patient Login
-    let patientId = null;
+    let patientId = p.patient_user_id || null;
     const ph = String(p.phone || "").replace(/\D/g, "").slice(-10);
-    if (ph.length === 10) {
+    if (!patientId && ph.length === 10) {
       const uq = await pool.query(
         "SELECT id FROM users WHERE role='patient' AND RIGHT(regexp_replace(COALESCE(phone,''), '\\D', '', 'g'), 10)=$1 LIMIT 1",
         [ph]
@@ -210,10 +210,17 @@ router.post("/inward/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd"
 router.get("/my", requireAuth, async (req, res) => {
   try {
     const patientId = req.user.id;
+    const { rows: u } = await pool.query("SELECT phone FROM users WHERE id=$1", [patientId]);
+    const last10 = String((u[0] && u[0].phone) || "").replace(/\D/g, "").slice(-10);
     const { rows } = await pool.query(
-      `SELECT * FROM prescriptions WHERE patient_id=$1
-       ORDER BY created_at DESC`,
-      [patientId]
+      `SELECT * FROM prescriptions
+        WHERE patient_id=$1
+           OR inward_id IN (
+                SELECT ip.id FROM inward_patients ip
+                 WHERE ip.patient_user_id=$1
+                    OR ($2::text <> '' AND right(regexp_replace(COALESCE(ip.phone,''), '\\D', '', 'g'), 10) = $2))
+        ORDER BY created_at DESC`,
+      [patientId, last10]
     );
     res.json(rows.map(r => ({ ...r, items: JSON.parse(r.items || "[]") })));
   } catch (err) {
