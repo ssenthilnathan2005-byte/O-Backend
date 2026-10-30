@@ -13,7 +13,7 @@ const bcrypt = require("bcrypt");
 pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS dispensed_items TEXT")
   .catch(err => console.warn("[pharmacy] migration:", err.message));
 pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS manual_items TEXT").catch(err => console.warn("[pharmacy] migration:", err.message));
-pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS bill_amount NUMERIC(12,2)")
+pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS ip_billed BOOLEAN NOT NULL DEFAULT false").catch(() => {}); pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS bill_amount NUMERIC(12,2)")
   .then(() => pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS tablets_sold INTEGER"))
   .then(() => pool.query("CREATE INDEX IF NOT EXISTS idx_prescriptions_handed_over ON prescriptions(hospital_id, handed_over_at)"))
   .catch(err => console.warn("[pharmacy] revenue migration:", err.message));
@@ -439,6 +439,34 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
         billAmount = Math.round((sum + manualSum) * 100) / 100;
         dispensedJson = JSON.stringify(lines);
       }
+        // Charge to the IP bill only when the pharmacist chose it. Same transaction as stock and status.
+        if (req.body.chargeToIpBill === true) {
+          if (!p.inward_id) { await client.query("ROLLBACK"); return res.status(400).json({ error: "This prescription is not linked to an admitted patient, so it cannot be charged to an IP bill." }); }
+          const stayQ = await client.query("SELECT id FROM inward_patients WHERE id=$1 AND hospital_id=$2 AND status<>'discharged'", [p.inward_id, p.hospital_id]);
+          if (!stayQ.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "The patient is no longer admitted, so this cannot be charged to the IP bill. Collect payment at the counter instead." }); }
+          const dup = await client.query("SELECT 1 FROM ipd_bill_items WHERE inward_id=$1 AND rx_id=$2 LIMIT 1", [p.inward_id, p.id]);
+          if (!dup.rows.length) {
+            const r2 = (v) => Math.round((Number(v) || 0) * 100) / 100;
+            const billLines = [];
+            for (const l of lines) {
+              const q = Number(l.tablets) || 0;
+              if (!(q > 0)) continue;
+              const up = l.unitPrice != null ? Number(l.unitPrice) : 0;
+              billLines.push({ d: "Pharmacy: " + (l.inventoryName || l.name || "Medicine"), q, up: r2(up), a: l.amount != null ? r2(l.amount) : r2(q * up) });
+            }
+            for (const m of manualClean) billLines.push({ d: "Pharmacy: " + m.name, q: m.quantity, up: r2(m.unitPrice), a: r2(m.amount) });
+            if (billAmount != null) {
+              const diff = r2(billAmount - billLines.reduce((s, x) => s + x.a, 0));
+              if (Math.abs(diff) >= 0.01) billLines.push({ d: "Pharmacy adjustment (discount / tax / other)", q: 1, up: diff, a: diff });
+            }
+            for (const x of billLines) {
+              await client.query(
+                `INSERT INTO ipd_bill_items (id, inward_id, hospital_id, category, description, qty, unit_price, amount, created_by, rx_id)
+                 VALUES ($1,$2,$3,'medicine',$4,$5,$6,$7,$8,$9)`,
+                ["ibi_" + randomBytes(6).toString("hex"), p.inward_id, p.hospital_id, x.d.slice(0, 200), x.q, x.up, x.a, req.user.id || null, p.id]);
+            }
+          }
+        }
     }
 
     const now = new Date().toISOString();
@@ -452,7 +480,7 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
     if (status === "handed_over" && dispensedJson) { vals.push(dispensedJson); setClause += `, dispensed_items=$${vals.length}`; }
     if (status === "handed_over") {
       vals.push(billAmount); setClause += `, bill_amount=$${vals.length}`;
-      vals.push(tabletsSold); setClause += `, tablets_sold=$${vals.length}`;
+      vals.push(tabletsSold); setClause += `, tablets_sold=$${vals.length}`; if (req.body.chargeToIpBill === true) setClause += ", ip_billed=true";
       if (manualJson) { vals.push(manualJson); setClause += `, manual_items=$${vals.length}`; }
       { const pm = String(req.body.paymentMode || "cash").toLowerCase();
         vals.push(["cash", "upi", "insurance"].includes(pm) ? pm : "cash"); setClause += `, payment_mode=$${vals.length}`; }

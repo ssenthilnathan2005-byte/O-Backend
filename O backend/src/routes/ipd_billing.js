@@ -44,7 +44,7 @@ pool.query(`
     received_by TEXT,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
   );
-  CREATE INDEX IF NOT EXISTS idx_ipdpay_inward ON ipd_payments(inward_id);
+  CREATE INDEX IF NOT EXISTS idx_ipdpay_inward ON ipd_payments(inward_id); ALTER TABLE ipd_bill_items ADD COLUMN IF NOT EXISTS rx_id TEXT; CREATE INDEX IF NOT EXISTS idx_ipdbi_rx ON ipd_bill_items(rx_id);
 `).catch((e) => console.warn("[ipd_billing] migration:", e.message));
 
 pool.query(`
@@ -170,7 +170,7 @@ async function buildBill(db, stay) {
   })) : [];
   if (moved) rate = num(segRows[segRows.length - 1].seg_rate);
   const bedCharge = moved ? money(segments.reduce((s, x) => s + x.amount, 0)) : money(rate * stay.days);
-  const itemsTotal = money(items.reduce((s, i) => s + num(i.amount), 0));
+  const itemsTotal = money(items.filter((i) => !i.rx_id).reduce((s, i) => s + num(i.amount), 0)); const pharmacyTotal = money(items.filter((i) => i.rx_id).reduce((s, i) => s + num(i.amount), 0));
   const subtotal = money(bedCharge + itemsTotal);
   const discountType = stay.discount_type === "percent" ? "percent" : "amount";
   const discountValue = money(stay.bill_discount);
@@ -182,7 +182,7 @@ async function buildBill(db, stay) {
   const sgstRate = num(stay.sgst_rate);
   const cgst = money((taxable * cgstRate) / 100);
   const sgst = money((taxable * sgstRate) / 100);
-  const total = money(taxable + cgst + sgst);
+  const total = money(taxable + cgst + sgst + pharmacyTotal);
   const paid = money(pays.reduce((s, p) => s + (p.kind === "refund" ? -num(p.amount) : num(p.amount)), 0));
   return {
     inwardId: stay.id, hospitalId: stay.hospital_id, patientName: stay.patient_name, phone: stay.phone,
@@ -193,7 +193,7 @@ async function buildBill(db, stay) {
     items: items.map((i) => ({ ...i, qty: num(i.qty), unit_price: num(i.unit_price), amount: num(i.amount) })),
     labTests, labTotal: money(labTests.reduce((t, x) => t + num(x.amount), 0)),
     payments: pays.map((p) => ({ ...p, amount: num(p.amount) })),
-    itemsTotal, subtotal, discount, discountType, discountValue, taxable, cgstRate, sgstRate, cgst, sgst, total, paid, balance: money(total - paid),
+    itemsTotal, pharmacyTotal, subtotal, discount, discountType, discountValue, taxable, cgstRate, sgstRate, cgst, sgst, total, paid, balance: money(total - paid),
   };
 }
 
@@ -235,7 +235,7 @@ router.get("/summary", requireAuth, staff, async (req, res) => {
          SELECT ip.id, ip.patient_name, ip.phone, ip.ward, ip.bed_number, ip.status, ip.discharged_at, ip.bill_discount, ip.discount_type, ip.cgst_rate, ip.sgst_rate,
                 CASE WHEN EXISTS (SELECT 1 FROM ipd_transfers tt WHERE tt.inward_id=ip.id) THEN COALESCE((SELECT SUM(g.seg_rate * g.seg_days) FROM ipd_bed_segments(ip.id) g), 0) ELSE COALESCE(ip.bed_rate, (SELECT w.daily_rate FROM wards w WHERE w.hospital_id=ip.hospital_id AND w.name=ip.ward LIMIT 1), 0)
                 * (((COALESCE(ip.discharged_at, now()) AT TIME ZONE 'Asia/Kolkata')::date - (ip.admitted_at AT TIME ZONE 'Asia/Kolkata')::date) + 1) END AS bed,
-                COALESCE((SELECT SUM(amount) FROM ipd_bill_items i WHERE i.inward_id=ip.id), 0) AS items,
+                COALESCE((SELECT SUM(amount) FROM ipd_bill_items i WHERE i.inward_id=ip.id AND i.rx_id IS NULL), 0) AS items, COALESCE((SELECT SUM(amount) FROM ipd_bill_items i WHERE i.inward_id=ip.id AND i.rx_id IS NOT NULL), 0) AS pharm,
                 COALESCE((SELECT SUM(CASE WHEN p.kind='refund' THEN -p.amount ELSE p.amount END) FROM ipd_payments p WHERE p.inward_id=ip.id), 0) AS paid
            FROM inward_patients ip WHERE ip.hospital_id=$1),
        b AS (SELECT s.*, (bed + items) AS sub,
@@ -244,7 +244,7 @@ router.get("/summary", requireAuth, staff, async (req, res) => {
                          ELSE LEAST(bill_discount, bed + items) END AS disc
                FROM s),
        f AS (SELECT b.*, (sub - disc) + ROUND((sub - disc) * cgst_rate / 100, 2)
-                              + ROUND((sub - disc) * sgst_rate / 100, 2) AS tot
+                              + ROUND((sub - disc) * sgst_rate / 100, 2) + pharm AS tot
                FROM b)
        SELECT id, patient_name, phone, ward, bed_number, status, discharged_at, tot AS total, paid, tot - paid AS balance FROM f WHERE tot - paid > 0
         ORDER BY (status='discharged') DESC, 10 DESC LIMIT 50`, [hid]);
@@ -409,7 +409,11 @@ router.delete("/:inwardId/items/:itemId", requireAuth, staff, async (req, res) =
   try {
     const stay = await loadStay(pool, req.params.inwardId, hospitalOf(req));
     if (!stay) return res.status(404).json({ error: "Admission not found" });
-    if (!(await guardEdit(req, res, stay, "item_remove", { itemId: req.params.itemId }))) return;
+    const rxRow = await pool.query("SELECT rx_id FROM ipd_bill_items WHERE id=$1 AND inward_id=$2", [req.params.itemId, stay.id]);
+  const isRx = !!(rxRow.rows[0] && rxRow.rows[0].rx_id);
+  if (isRx && req.user.role !== "hospital_admin" && req.user.role !== "admin")
+    return res.status(403).json({ error: "Only the hospital admin can remove a pharmacy charge" });
+  if (!(await guardEdit(req, res, stay, "item_remove", { itemId: req.params.itemId, pharmacy: isRx }, { always: isRx }))) return;
     await pool.query("DELETE FROM ipd_bill_items WHERE id=$1 AND inward_id=$2", [req.params.itemId, stay.id]);
     res.json(await buildBill(pool, stay));
   } catch (e) { res.status(500).json({ error: e.message }); }

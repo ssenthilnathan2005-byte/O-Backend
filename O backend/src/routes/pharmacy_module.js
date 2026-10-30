@@ -131,7 +131,7 @@ router.get("/revenue", guard, async (req, res) => {
     const { rows } = await pool.query(
       "SELECT id, bill_amount, payment_mode, dispensed_items, tablets_sold, " +
       "to_char((handed_over_at AT TIME ZONE 'Asia/Kolkata')::date,'YYYY-MM-DD') AS day " +
-      "FROM prescriptions WHERE " + HANDED_WHERE, [req.hid, rg[0], rg[1]]);
+      "FROM prescriptions WHERE " + HANDED_WHERE + " AND ip_billed=false", [req.hid, rg[0], rg[1]]);
     let gross = 0, cost = 0, tablets = 0;
     const byPayment = { cash: 0, upi: 0, insurance: 0 };
     const byDay = {};
@@ -515,7 +515,7 @@ router.get("/dispensing-log", guard, async (req, res) => {
     let extra = "";
     if (q) { params.push("%" + q + "%"); extra = " AND patient_name ILIKE $4"; }
     const { rows } = await pool.query(
-      "SELECT id, patient_id, patient_name, doctor_name, items, dispensed_items, status, bill_amount, payment_mode, " +
+      "SELECT id, patient_id, patient_name, doctor_name, items, dispensed_items, status, bill_amount, payment_mode, ip_billed, " +
       "COALESCE(handed_over_at, packed_at, created_at) AS ts FROM prescriptions " +
       "WHERE hospital_id=$1 AND status IN ('packed','ready','handed_over') " +
       "AND (COALESCE(handed_over_at, packed_at, created_at) AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $2::date AND $3::date" +
@@ -530,7 +530,7 @@ router.get("/dispensing-log", guard, async (req, res) => {
       return {
         prescriptionId: r.id, patientId: r.patient_id, patientName: r.patient_name, doctorName: r.doctor_name,
         medicines: meds, billAmount: r.bill_amount == null ? null : Number(r.bill_amount),
-        paymentMode: r.payment_mode || null,
+        paymentMode: r.ip_billed ? null : (r.payment_mode || null), chargedToIpBill: r.ip_billed === true,
         billStatus: r.status === "handed_over" ? "Billed" : "Pending",
         status: r.status, timestamp: r.ts,
       };

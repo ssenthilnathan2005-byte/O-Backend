@@ -43,14 +43,14 @@ router.get("/", requireAuth, async (req, res) => {
 
     const tot = (await pool.query(
       "SELECT COUNT(DISTINCT patient_id) AS patients, COUNT(*) AS prescriptions, " +
-      "COALESCE(SUM(tablets_sold), 0) AS tablets, COALESCE(SUM(bill_amount), 0) AS revenue " +
+      "COALESCE(SUM(tablets_sold), 0) AS tablets, COALESCE(SUM(bill_amount) FILTER (WHERE ip_billed = false), 0) AS revenue " +
       "FROM prescriptions WHERE " + where,
       [hospitalId, from, to]
     )).rows[0];
 
     const perDay = (await pool.query(
       "SELECT to_char((handed_over_at AT TIME ZONE 'Asia/Kolkata')::date, 'YYYY-MM-DD') AS day, " +
-      "COALESCE(SUM(bill_amount), 0) AS revenue, COUNT(DISTINCT patient_id) AS patients, " +
+      "COALESCE(SUM(bill_amount) FILTER (WHERE ip_billed = false), 0) AS revenue, COUNT(DISTINCT patient_id) AS patients, " +
       "COALESCE(SUM(tablets_sold), 0) AS tablets " +
       "FROM prescriptions WHERE " + where + " GROUP BY 1 ORDER BY 1",
       [hospitalId, from, to]
