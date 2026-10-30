@@ -369,7 +369,7 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
       }
       let lines = [];
       try { lines = p.dispensed_items ? JSON.parse(p.dispensed_items) : []; } catch (_) {}
-      const rawAmt = req.body.billAmount;
+      const bm = String(req.body.billingMode || "").toUpperCase(); if (bm !== "COUNTER" && bm !== "IP_BILL") { await client.query("ROLLBACK"); return res.status(400).json({ error: "Choose how this is billed: Paid at Pharmacy Counter or Charge to IP Main Bill" }); } if (bm === "COUNTER" && !["cash", "upi", "insurance"].includes(String(req.body.paymentMode || "").toLowerCase())) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Select the payment mode collected at the counter" }); } req.body.chargeToIpBill = bm === "IP_BILL"; const rawAmt = req.body.billAmount;
       billAmount = (rawAmt === undefined || rawAmt === null || String(rawAmt).trim() === "")
         ? NaN : Math.round(Number(rawAmt) * 100) / 100;
       if (!Number.isFinite(billAmount) || billAmount < 0 || billAmount > 10000000) {
@@ -483,7 +483,7 @@ router.patch("/prescriptions/:id/status", requirePharmacyOrAdmin, async (req, re
       vals.push(tabletsSold); setClause += `, tablets_sold=$${vals.length}`; if (req.body.chargeToIpBill === true) setClause += ", ip_billed=true";
       if (manualJson) { vals.push(manualJson); setClause += `, manual_items=$${vals.length}`; }
       { const pm = String(req.body.paymentMode || "cash").toLowerCase();
-        vals.push(["cash", "upi", "insurance"].includes(pm) ? pm : "cash"); setClause += `, payment_mode=$${vals.length}`; }
+        vals.push(req.body.chargeToIpBill === true ? null : (["cash", "upi", "insurance"].includes(pm) ? pm : "cash")); setClause += `, payment_mode=$${vals.length}`; }
     }
     if (status === "handed_over" && !p.bill_no) {
       await billReady;
