@@ -95,19 +95,9 @@ router.post("/", requireAuth, async (req, res) => {
     const diagnosisCode = typeof req.body.diagnosisCode === "string" ? (req.body.diagnosisCode.trim().slice(0, 50) || null) : null;
     if (!bookingId || !doctorId || !hospitalId)
       return res.status(400).json({ error: "bookingId, doctorId, hospitalId required" });
-    // IP if the patient is currently admitted in this hospital (matched on last 10 digits of phone), else OP
-    let patientType = "OP", inwardId = null;
-    try {
-      const bk = await pool.query("SELECT phone FROM bookings WHERE id=$1", [bookingId]);
-      const ph = String((bk.rows[0] && bk.rows[0].phone) || "").replace(/\D/g, "").slice(-10);
-      if (ph.length === 10) {
-        const ip = await pool.query(
-          "SELECT id FROM inward_patients WHERE hospital_id=$1 AND status='admitted' AND RIGHT(regexp_replace(COALESCE(phone,''), '\\D', '', 'g'), 10)=$2 ORDER BY admitted_at DESC LIMIT 1",
-          [hospitalId, ph]
-        );
-        if (ip.rows.length) { patientType = "IP"; inwardId = ip.rows[0].id; }
-      }
-    } catch (_) {}    const id = "rx_" + Date.now() + "_" + Math.random().toString(36).substring(2, 8);
+    // Doctor Login prescriptions are always OP. IP prescriptions come only from Nurse Login (Beds & Wards) via POST /inward/:inwardId.
+    const patientType = "OP", inwardId = null;
+    const id = "rx_" + Date.now() + "_" + Math.random().toString(36).substring(2, 8);
     const { rows } = await pool.query(
       `INSERT INTO prescriptions
         (id, booking_id, doctor_id, doctor_name, patient_id, patient_name,
