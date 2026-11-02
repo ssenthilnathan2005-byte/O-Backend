@@ -418,6 +418,7 @@ router.post("/patient/google", async (req, res) => {
         [id, email, name, hash]
       );
 
+      await pool.query("UPDATE users SET password_set=0 WHERE id=$1", [id]);
       const { rows: newUserRows } = await pool.query("SELECT * FROM users WHERE id=$1", [id]);
       user = newUserRows[0];
     }
@@ -932,6 +933,67 @@ router.post("/lab/set-password", async (req, res) => {
   } catch (err) {
     console.error("[auth lab/set-password]", err.message);
     return res.status(500).json({ error: err.message });
+  }
+});
+
+// -- Patient: set password (Google accounts that have none yet) --
+router.post("/patient/set-password", requireAuth, async (req, res) => {
+  try {
+    if (req.user.role !== "patient") return res.status(403).json({ error: "Patients only" });
+    const newPassword = String(req.body.newPassword || "");
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters." });
+    }
+    const { rows } = await pool.query(
+      "SELECT id, password_set FROM users WHERE id=$1 AND role='patient'",
+      [req.user.id]
+    );
+    const u = rows[0];
+    if (!u) return res.status(404).json({ error: "Account not found." });
+    if (Number(u.password_set) !== 0) {
+      return res.status(409).json({ error: "You already have a password. Use Change Password instead." });
+    }
+    const hash = await bcrypt.hash(newPassword, 10);
+    await pool.query("UPDATE users SET password=$1, password_set=1 WHERE id=$2", [hash, u.id]);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("[auth patient/set-password]", err.message);
+    return res.status(500).json({ error: "Could not set password. Please try again." });
+  }
+});
+
+// -- Patient: change password (requires current password) --
+router.post("/patient/change-password", requireAuth, async (req, res) => {
+  try {
+    if (req.user.role !== "patient") return res.status(403).json({ error: "Patients only" });
+    const currentPassword = String(req.body.currentPassword || "");
+    const newPassword = String(req.body.newPassword || "");
+    if (!currentPassword || !newPassword) {
+      return res.status(400).json({ error: "currentPassword and newPassword are required." });
+    }
+    if (newPassword.length < 6) {
+      return res.status(400).json({ error: "Password must be at least 6 characters." });
+    }
+    if (newPassword === currentPassword) {
+      return res.status(400).json({ error: "New password must be different from the current one." });
+    }
+    const { rows } = await pool.query(
+      "SELECT id, password, password_set FROM users WHERE id=$1 AND role='patient'",
+      [req.user.id]
+    );
+    const u = rows[0];
+    if (!u) return res.status(404).json({ error: "Account not found." });
+    if (Number(u.password_set) === 0) {
+      return res.status(409).json({ error: "You have not set a password yet. Use Set Password." });
+    }
+    const ok = await bcrypt.compare(currentPassword, u.password || "");
+    if (!ok) return res.status(401).json({ error: "Current password is incorrect." });
+    const hash = await bcrypt.hash(newPassword, 10);
+    await pool.query("UPDATE users SET password=$1 WHERE id=$2", [hash, u.id]);
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("[auth patient/change-password]", err.message);
+    return res.status(500).json({ error: "Could not change password. Please try again." });
   }
 });
 

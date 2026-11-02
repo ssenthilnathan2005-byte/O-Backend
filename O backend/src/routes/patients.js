@@ -66,7 +66,7 @@ router.get("/profile", requireAuth, async (req, res) => {
     return res.status(403).json({ error: "Patients only" });
   try {
     const { rows } = await pool.query(
-      "SELECT name, phone, age, year_of_birth, preferred_language, uhid FROM users WHERE id=$1",
+      "SELECT name, phone, age, year_of_birth, preferred_language, uhid, password_set FROM users WHERE id=$1",
       [req.user.id]
     );
     const u = rows[0] || {};
@@ -79,6 +79,7 @@ router.get("/profile", requireAuth, async (req, res) => {
       age: liveAge != null ? String(liveAge) : "",
       yearOfBirth: u.year_of_birth ? String(u.year_of_birth) : "",
       uhid: u.uhid || "",
+      hasPassword: Number(u.password_set ?? 1) !== 0,
       preferredLanguage: u.preferred_language === "ta" ? "ta" : "en",
       isComplete,
     });
