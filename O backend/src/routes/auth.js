@@ -17,6 +17,9 @@ if (!resend) {
 
 const router = express.Router();
 
+// UHID format: DB01, DB02 ... (DB100 and up after DB99)
+const UHID_RE = /^DB\d{2,}$/i;
+
 const SECRET = require("../utils/secrets").JWT_SECRET;
 const EXPIRES = process.env.JWT_EXPIRES_IN || "7d";
 const ADMIN_CODE = process.env.ADMIN_CODE || "ADMIN-001";
@@ -140,8 +143,8 @@ router.post(
         const user = userRows[0];
         console.log(`[TIMING signup] db work: ${Date.now() - tDbStart}ms | TOTAL: ${Date.now() - t0}ms`);
         return res.json({
-          token: sign({ id: user.id, name: user.name, phone: normPhone, role: "patient" }),
-          user:  { id: user.id, name: user.name, phone: normPhone, role: "patient" },
+          token: sign({ id: user.id, name: user.name, phone: normPhone, role: "patient", uhid: user.uhid }),
+          user:  { id: user.id, name: user.name, phone: normPhone, role: "patient", uhid: user.uhid },
           message: "Account created successfully.",
         });
       }
@@ -168,13 +171,16 @@ router.post(
       const user = userRows[0];
       console.log(`[TIMING signup] db work: ${Date.now() - tDbStart}ms | TOTAL: ${Date.now() - t0}ms`);
       return res.json({
-        token: sign({ id: user.id, email: user.email, name: user.name, role: "patient" }),
-        user:  { id: user.id, email: user.email, name: user.name, role: "patient" },
+        token: sign({ id: user.id, email: user.email, name: user.name, role: "patient", uhid: user.uhid }),
+        user:  { id: user.id, email: user.email, name: user.name, role: "patient", uhid: user.uhid },
         message: "Account created successfully.",
       });
 
     } catch (err) {
       console.error("[auth signup]", err.message);
+      if (err.code === "23505") {
+        return res.status(409).json({ error: "This phone number or email is already registered. Please log in." });
+      }
       return res.status(500).json({ error: err.message || "Signup failed." });
     }
   }
@@ -189,7 +195,7 @@ router.post(
     body("identifier").optional().trim(),
     body().custom((v) => {
       const id = String(v.email || v.identifier || "").trim();
-      if (!id) throw new Error("Email is required");
+      if (!id) throw new Error("Email or phone number is required");
       return true;
     }),
   ],
@@ -203,7 +209,13 @@ router.post(
 
       let user = null;
 
-      if (isLikelyEmail(identifier)) {
+      if (UHID_RE.test(identifier)) {
+        const { rows } = await pool.query(
+          "SELECT * FROM users WHERE uhid=$1 AND role='patient'",
+          [identifier.toUpperCase()]
+        );
+        user = rows[0] || null;
+      } else if (isLikelyEmail(identifier)) {
         const { rows } = await pool.query(
           "SELECT * FROM users WHERE email=$1 AND role='patient'",
           [identifier.toLowerCase()]
@@ -224,7 +236,7 @@ router.post(
       const tDbEnd = Date.now();
 
       if (!user) {
-        return res.status(401).json({ error: "No account found with this email." });
+        return res.status(401).json({ error: "No account found with these details." });
       }
       const tCompareStart = Date.now();
       const ok = await bcrypt.compare(password, user.password);
@@ -235,8 +247,8 @@ router.post(
       }
 
       return res.json({
-        token: sign({ id: user.id, email: user.email, name: user.name, role: "patient" }),
-        user: { id: user.id, email: user.email, name: user.name, role: "patient" },
+        token: sign({ id: user.id, email: user.email, name: user.name, role: "patient", uhid: user.uhid }),
+        user: { id: user.id, email: user.email, name: user.name, role: "patient", uhid: user.uhid },
       });
     } catch (err) {
       console.error("[auth login]", err.message);
@@ -298,8 +310,8 @@ router.post("/patient/verify-otp", async (req, res) => {
       const { rows: userRows } = await pool.query("SELECT * FROM users WHERE id=$1", [id]);
       const user = userRows[0];
       return res.json({
-        token: sign({ id: user.id, name: user.name, phone: pending.phone, role: "patient" }),
-        user: { id: user.id, name: user.name, phone: pending.phone, role: "patient" },
+        token: sign({ id: user.id, name: user.name, phone: pending.phone, role: "patient", uhid: user.uhid }),
+        user: { id: user.id, name: user.name, phone: pending.phone, role: "patient", uhid: user.uhid },
       });
     }
 
@@ -309,8 +321,8 @@ router.post("/patient/verify-otp", async (req, res) => {
       if (!user) return res.status(404).json({ error: "Account not found." });
 
       return res.json({
-        token: sign({ id: user.id, email: user.email, name: user.name, role: "patient" }),
-        user: { id: user.id, email: user.email, name: user.name, role: "patient" },
+        token: sign({ id: user.id, email: user.email, name: user.name, role: "patient", uhid: user.uhid }),
+        user: { id: user.id, email: user.email, name: user.name, role: "patient", uhid: user.uhid },
       });
     }
 
@@ -325,8 +337,8 @@ router.post("/patient/verify-otp", async (req, res) => {
       );
 
       return res.json({
-        token: sign({ id: user.id, email: user.email, name: user.name, role: "patient" }),
-        user: { id: user.id, email: user.email, name: user.name, role: "patient" },
+        token: sign({ id: user.id, email: user.email, name: user.name, role: "patient", uhid: user.uhid }),
+        user: { id: user.id, email: user.email, name: user.name, role: "patient", uhid: user.uhid },
       });
     }
 
@@ -411,8 +423,8 @@ router.post("/patient/google", async (req, res) => {
     }
 
     return res.json({
-      token: sign({ id: user.id, email: user.email, name: user.name, role: "patient" }),
-      user: { id: user.id, email: user.email, name: user.name, role: "patient" },
+      token: sign({ id: user.id, email: user.email, name: user.name, role: "patient", uhid: user.uhid }),
+      user: { id: user.id, email: user.email, name: user.name, role: "patient", uhid: user.uhid },
     });
   } catch (err) {
     console.error("[auth google]", err.message);
