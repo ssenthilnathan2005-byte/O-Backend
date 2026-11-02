@@ -17,7 +17,7 @@ if (!resend) {
 
 const router = express.Router();
 
-const SECRET = process.env.JWT_SECRET || "fallback_dev_secret";
+const SECRET = require("../utils/secrets").JWT_SECRET;
 const EXPIRES = process.env.JWT_EXPIRES_IN || "7d";
 const ADMIN_CODE = process.env.ADMIN_CODE || "ADMIN-001";
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || "";
@@ -189,7 +189,7 @@ router.post(
     body("identifier").optional().trim(),
     body().custom((v) => {
       const id = String(v.email || v.identifier || "").trim();
-      if (!id) throw new Error("Email is required");
+      if (!id) throw new Error("Email or phone number is required");
       return true;
     }),
   ],
@@ -224,7 +224,7 @@ router.post(
       const tDbEnd = Date.now();
 
       if (!user) {
-        return res.status(401).json({ error: "No account found with this email." });
+        return res.status(401).json({ error: "No account found with this email or phone number." });
       }
       const tCompareStart = Date.now();
       const ok = await bcrypt.compare(password, user.password);
