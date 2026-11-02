@@ -236,7 +236,7 @@ router.post(
       const tDbEnd = Date.now();
 
       if (!user) {
-        return res.status(401).json({ error: "No account found with these details." });
+        return res.status(401).json({ error: "No account found with this email or phone number." });
       }
       const tCompareStart = Date.now();
       const ok = await bcrypt.compare(password, user.password);
