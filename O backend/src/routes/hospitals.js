@@ -4,6 +4,8 @@ const cache = require("../utils/cache");
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
+const { requireFounderOrAdmin } = require("../middleware/hospitalDeleteAccess");
+const { deleteHospital } = require("../services/hospitalDelete");
 const multer  = require("multer");
 
 const router = express.Router();
@@ -430,14 +432,15 @@ router.post("/:id/photo-base64", requireAdmin, async (req, res) => {
 });
 
 // ── DELETE hospital ───────────────────────────────────────────────────────────
-router.delete("/:id", requireAdmin, async (req, res) => {
+router.delete("/:id", requireFounderOrAdmin, async (req, res) => {
+  const hid = req.params.id;
   try {
-    const { rows } = await pool.query("SELECT COUNT(*) as c FROM doctors WHERE hospital_id=$1", [req.params.id]);
-    const count = Number(rows[0].c);
-    if (count > 0)
-      return res.status(409).json({ error: "Cannot delete hospital with assigned doctors. Remove doctors first." });
-
-    await pool.query("DELETE FROM hospitals WHERE id=$1", [req.params.id]);
+    const result = await deleteHospital(pool, hid);
+    if (!result.ok) {
+      console.log("[hospitals DELETE] refused", result.status, result.error, "role=" + (req.user && req.user.role));
+      return res.status(result.status).json({ error: result.error });
+    }
+    photoMem.delete(String(hid));
     invalidateHospitalCache();
     res.json({ success: true });
   } catch (err) {
