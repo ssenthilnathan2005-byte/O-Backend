@@ -1,12 +1,16 @@
+const staticCache = require("../utils/staticCache");
 "use strict";
 const cache = require("../utils/cache");
 "use strict";
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
+const { TYPES, isValidType, F: INTAKE_F, getIntakeConfig } = require("../utils/intakeTypes");
+const HM = require("../utils/hospitalModules");
 const multer  = require("multer");
 
 const router = express.Router();
+router.use(staticCache);
 const crypto = require("crypto");
 
 // Photos live as base64 text in hospitals.photo_data. Lists never read that column;
@@ -84,6 +88,7 @@ async function row2hospital(r, req, includePhoto = true) {
     photoUrl,
     isFree: r.is_free === 1,
     hasPharmacy: r.has_pharmacy === 1,
+    ...(r.hospital_type ? { hospitalType: r.hospital_type } : {}),
     website: r.website || "",
     plan: r.plan || "premium",
     ratePerToken: r.rate_per_token != null ? Number(r.rate_per_token) : 15,
@@ -115,7 +120,7 @@ router.get("/", async (req, res) => {
     }
 
     const { rows } = await pool.query(
-      "SELECT id, name, area, address, phone, rating, gradient, photo_url, " + PHOTO_COLS + ", is_free, has_pharmacy, plan, rate_per_token, website FROM hospitals ORDER BY name ASC"
+      "SELECT id, name, area, address, phone, rating, gradient, photo_url, " + PHOTO_COLS + ", is_free, has_pharmacy, hospital_type, plan, rate_per_token, website FROM hospitals ORDER BY name ASC"
     );
 
     // Batch doctor counts in ONE query instead of one query per hospital (fixes N+1)
@@ -145,6 +150,7 @@ router.get("/", async (req, res) => {
         photoUrl,
         isFree: r.is_free === 1,
         hasPharmacy: r.has_pharmacy === 1,
+    ...(r.hospital_type ? { hospitalType: r.hospital_type } : {}),
         website: r.website || "",
         plan: r.plan || "premium",
         ratePerToken: r.rate_per_token != null ? Number(r.rate_per_token) : 15,
@@ -192,7 +198,7 @@ router.get("/:id/photo", async (req, res) => {
 
 router.get("/:id", async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT id, name, area, address, phone, rating, gradient, photo_url, " + PHOTO_COLS + ", is_free, has_pharmacy, plan, rate_per_token, website FROM hospitals WHERE id=$1", [req.params.id]);
+    const { rows } = await pool.query("SELECT id, name, area, address, phone, rating, gradient, photo_url, " + PHOTO_COLS + ", is_free, has_pharmacy, hospital_type, plan, rate_per_token, website FROM hospitals WHERE id=$1", [req.params.id]);
     if (!rows[0]) return res.status(404).json({ error: "Hospital not found" });
     res.json(await row2hospital(rows[0], req, true));
   } catch (err) {
@@ -364,6 +370,92 @@ router.patch("/:id/pharmacy-toggle", requireAdminOrHospitalAdmin, async (req, re
   }
 });
 
+// ── intake config (hospital type + which front desk fields are on) ───────────
+router.get("/:id/intake-config", requireAdminOrHospitalAdmin, async (req, res) => {
+  try {
+    if (req.user.role === "hospital_admin" && req.user.hospitalId !== req.params.id)
+      return res.status(403).json({ error: "You can only view your own hospital" });
+    const { rows } = await pool.query("SELECT hospital_type, intake_fields FROM hospitals WHERE id=$1", [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: "Hospital not found" });
+    const cfg = getIntakeConfig(rows[0].hospital_type, rows[0].intake_fields);
+    res.json({
+      type: cfg.type, label: cfg.label, fields: cfg.fields, allFields: cfg.allFields,
+      customised: Array.isArray(rows[0].intake_fields),
+      types: Object.keys(TYPES).map((k) => ({ key: k, label: TYPES[k].label, fields: TYPES[k].fields })),
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.patch("/:id/intake-config", requireAdminOrHospitalAdmin, async (req, res) => {
+  try {
+    if (req.user.role === "hospital_admin" && req.user.hospitalId !== req.params.id)
+      return res.status(403).json({ error: "You can only update your own hospital" });
+    const { rows } = await pool.query("SELECT hospital_type, intake_fields FROM hospitals WHERE id=$1", [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: "Hospital not found" });
+    const { hospitalType, fields } = req.body || {};
+    let newType = rows[0].hospital_type || "general";
+    let newFields = rows[0].intake_fields === undefined ? null : rows[0].intake_fields;
+    if (hospitalType !== undefined) {
+      if (!isValidType(hospitalType)) return res.status(400).json({ error: "Unknown hospital type" });
+      if (hospitalType !== newType && fields === undefined) newFields = null; // new type: back to its defaults
+      newType = hospitalType;
+    }
+    if (fields !== undefined) {
+      if (fields === null) newFields = null; // reset to type defaults
+      else if (Array.isArray(fields)) {
+        newFields = fields.filter((k) => typeof k === "string" && INTAKE_F[k]);
+        if (!newFields.length) return res.status(400).json({ error: "Keep at least one field on" });
+      } else return res.status(400).json({ error: "fields must be a list or null" });
+    }
+    await pool.query("UPDATE hospitals SET hospital_type=$1, intake_fields=$2::jsonb WHERE id=$3",
+      [newType, newFields === null ? null : JSON.stringify(newFields), req.params.id]);
+    if (rows[0].hospital_type !== newType) {
+      await pool.query("UPDATE hospitals SET modules=NULL WHERE id=$1", [req.params.id]);
+    }
+    HM.clearModulesCache(req.params.id);
+    invalidateHospitalCache();
+    const cfg = getIntakeConfig(newType, newFields);
+    res.json({ success: true, type: cfg.type, label: cfg.label, fields: cfg.fields, customised: Array.isArray(newFields) });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── modules (which optional parts of the hospital console are on) ─────────────
+router.get("/:id/modules", requireAdminOrHospitalAdmin, async (req, res) => {
+  try {
+    if (req.user.role === "hospital_admin" && req.user.hospitalId !== req.params.id)
+      return res.status(403).json({ error: "You can only view your own hospital" });
+    const { rows } = await pool.query("SELECT hospital_type, modules FROM hospitals WHERE id=$1", [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: "Hospital not found" });
+    const type = isValidType(rows[0].hospital_type) ? rows[0].hospital_type : "general";
+    res.json({
+      type,
+      modules: HM.resolveModules(type, rows[0].modules),
+      customised: Array.isArray(rows[0].modules),
+      catalog: Object.keys(HM.MODULES).map((k) => ({ key: k, label: HM.MODULES[k].label })),
+      defaults: HM.TYPE_MODULES,
+    });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+router.patch("/:id/modules", requireAdminOrHospitalAdmin, async (req, res) => {
+  try {
+    if (req.user.role === "hospital_admin" && req.user.hospitalId !== req.params.id)
+      return res.status(403).json({ error: "You can only update your own hospital" });
+    const { rows } = await pool.query("SELECT hospital_type FROM hospitals WHERE id=$1", [req.params.id]);
+    if (!rows[0]) return res.status(404).json({ error: "Hospital not found" });
+    const { modules } = req.body || {};
+    let val = null;
+    if (modules === null) val = null;
+    else if (Array.isArray(modules)) val = JSON.stringify(modules.filter((k) => typeof k === "string" && HM.MODULES[k]));
+    else return res.status(400).json({ error: "modules must be a list or null" });
+    await pool.query("UPDATE hospitals SET modules=$1::jsonb WHERE id=$2", [val, req.params.id]);
+    HM.clearModulesCache(req.params.id);
+    invalidateHospitalCache();
+    const type = isValidType(rows[0].hospital_type) ? rows[0].hospital_type : "general";
+    res.json({ success: true, type, modules: HM.resolveModules(type, val === null ? null : JSON.parse(val)), customised: val !== null });
+  } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
 // PATCH hospital website (hospital-admin can edit own hospital only)
 router.patch("/:id/website", requireAdminOrHospitalAdmin, async (req, res) => {
   try {
@@ -431,13 +523,31 @@ router.post("/:id/photo-base64", requireAdmin, async (req, res) => {
 
 // ── DELETE hospital ───────────────────────────────────────────────────────────
 router.delete("/:id", requireAdmin, async (req, res) => {
+  const hid = req.params.id;
   try {
-    const { rows } = await pool.query("SELECT COUNT(*) as c FROM doctors WHERE hospital_id=$1", [req.params.id]);
-    const count = Number(rows[0].c);
-    if (count > 0)
+    const { rows } = await pool.query("SELECT COUNT(*) as c FROM doctors WHERE hospital_id=$1", [hid]);
+    if (Number(rows[0].c) > 0)
       return res.status(409).json({ error: "Cannot delete hospital with assigned doctors. Remove doctors first." });
 
-    await pool.query("DELETE FROM hospitals WHERE id=$1", [req.params.id]);
+    // Delete all related data in order
+    await pool.query("DELETE FROM pharmacy_gst_profile WHERE hospital_id=$1", [hid]);
+    await pool.query("DELETE FROM pharmacy_bill_counters WHERE hospital_id=$1", [hid]);
+    await pool.query("DELETE FROM pharmacy_invoice_counter WHERE hospital_id=$1", [hid]);
+    await pool.query("DELETE FROM pharmacy_invoice_register WHERE hospital_id=$1", [hid]);
+    await pool.query("DELETE FROM pharmacy_bill_invoice WHERE hospital_id=$1", [hid]);
+    await pool.query("DELETE FROM pharmacy_imports WHERE hospital_id=$1", [hid]);
+    await pool.query("DELETE FROM pharmacy_med_categories WHERE hospital_id=$1", [hid]);
+    await pool.query("DELETE FROM hr_salary_paid WHERE hospital_id=$1", [hid]);
+    await pool.query("DELETE FROM hr_events WHERE hospital_id=$1", [hid]);
+    await pool.query("DELETE FROM front_office_staff WHERE hospital_id=$1", [hid]);
+    await pool.query("DELETE FROM hospital_integrations WHERE hospital_id=$1", [hid]);
+    await pool.query("DELETE FROM bookings WHERE hospital_id=$1", [hid]);
+    await pool.query("DELETE FROM inward_patients WHERE hospital_id=$1", [hid]);
+    await pool.query("UPDATE users SET walkin_hospital_id=NULL WHERE walkin_hospital_id=$1", [hid]);
+    // Clear photo from memory
+    photoMem.delete(String(hid));
+    // Finally delete the hospital
+    await pool.query("DELETE FROM hospitals WHERE id=$1", [hid]);
     invalidateHospitalCache();
     res.json({ success: true });
   } catch (err) {
