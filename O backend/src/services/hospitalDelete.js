@@ -38,7 +38,7 @@ async function deleteHospital(pool, hid) {
 
     // 2) doctors_bd blocks deleting doctors that still have prescriptions or bookings, so clear them first.
     await client.query("DELETE FROM prescriptions WHERE hospital_id=$1 OR doctor_id IN (SELECT id FROM doctors WHERE hospital_id=$1)", [hid]);
-    await client.query("DELETE FROM bookings WHERE doctor_id IN (SELECT id FROM doctors WHERE hospital_id=$1)", [hid]);
+    await client.query("DELETE FROM bookings WHERE hospital_id=$1 OR doctor_id IN (SELECT id FROM doctors WHERE hospital_id=$1)", [hid]);
 
     for (const t of RELATED_TABLES) {
       if (await hasColumn(client, t, "hospital_id"))
