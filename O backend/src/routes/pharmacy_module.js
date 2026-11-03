@@ -1,3 +1,4 @@
+const respCache = require("../utils/respCache");
 "use strict";
 const express = require("express");
 const { pool } = require("../db/init");
@@ -7,6 +8,7 @@ const { broadcast } = require("../services/ws");
 const { randomBytes } = require("crypto");
 const { ready: batchesReady, takeFromBatches, addBatch } = require("../services/batches");
 const router = express.Router();
+router.use(respCache);
 
 pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_no TEXT")
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS expiry_date DATE"))
@@ -841,9 +843,15 @@ router.get("/my-invoice/:id", __patientAuth, async (req, res) => {
 });
 
 // ── GST Invoice: sales grouped by medicine + batch for a date range ──
-const ensureGstTable = () => pool.query(
-  "CREATE TABLE IF NOT EXISTS pharmacy_gst_profile (hospital_id TEXT PRIMARY KEY, gstin TEXT, address TEXT, drug_licence TEXT, default_hsn TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now()); ALTER TABLE pharmacy_gst_profile ADD COLUMN IF NOT EXISTS gst_type TEXT"
-);
+const ensureGstTable = (() => {
+  let done = null;
+  return () => {
+    if (!done) done = pool.query(
+      "CREATE TABLE IF NOT EXISTS pharmacy_gst_profile (hospital_id TEXT PRIMARY KEY, gstin TEXT, address TEXT, drug_licence TEXT, default_hsn TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now()); ALTER TABLE pharmacy_gst_profile ADD COLUMN IF NOT EXISTS gst_type TEXT; ALTER TABLE pharmacy_gst_profile ADD COLUMN IF NOT EXISTS company_name TEXT"
+    ).catch(err => { done = null; throw err; });
+    return done;
+  };
+})();
 ensureGstTable().catch(err => console.warn("[pharmacy] gst profile table:", err.message));
 
 async function gstProfileFor(hid) {
