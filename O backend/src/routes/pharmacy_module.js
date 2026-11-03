@@ -1,3 +1,4 @@
+const respCache = require("../utils/respCache");
 "use strict";
 const express = require("express");
 const { pool } = require("../db/init");
@@ -7,6 +8,7 @@ const { broadcast } = require("../services/ws");
 const { randomBytes } = require("crypto");
 const { ready: batchesReady, takeFromBatches, addBatch } = require("../services/batches");
 const router = express.Router();
+router.use(respCache);
 
 pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_no TEXT")
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS expiry_date DATE"))
@@ -16,6 +18,7 @@ pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_no TEXT")
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS strips_per_box INTEGER"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS schedule TEXT"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS gst_percent REAL"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS hsn_code TEXT"))
   .then(() => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_med_categories (hospital_id TEXT NOT NULL, name TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (hospital_id, name))"))
   .then(() => pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS payment_mode TEXT"))
   .catch(e => console.warn("[pharmacy_module] migration:", e.message));
@@ -130,7 +133,7 @@ router.get("/revenue", guard, async (req, res) => {
     const { rows } = await pool.query(
       "SELECT id, bill_amount, payment_mode, dispensed_items, tablets_sold, " +
       "to_char((handed_over_at AT TIME ZONE 'Asia/Kolkata')::date,'YYYY-MM-DD') AS day " +
-      "FROM prescriptions WHERE " + HANDED_WHERE, [req.hid, rg[0], rg[1]]);
+      "FROM prescriptions WHERE " + HANDED_WHERE + " AND ip_billed=false", [req.hid, rg[0], rg[1]]);
     let gross = 0, cost = 0, tablets = 0;
     const byPayment = { cash: 0, upi: 0, insurance: 0 };
     const byDay = {};
@@ -162,7 +165,7 @@ router.get("/inventory", guard, async (req, res) => {
     const t = await todayIST();
     const soon = addDays(t, 30);
     const { rows } = await pool.query(
-      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, pack_unit, schedule, gst_percent, " +
+      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, pack_unit, schedule, gst_percent, hsn_code, " +
       "to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, updated_at " +
       "FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC", [req.hid]);
     const bq = await pool.query(
@@ -187,7 +190,7 @@ router.get("/inventory", guard, async (req, res) => {
       return {
         id: r.id, name: r.name, unit: r.unit, quantity: qty, packSize: pack, packUnit: r.pack_unit || null,
         tabletsAvailable: total, reorderLevel: Number(r.min_quantity),
-        purchasePrice: r.purchase_price, sellingPrice: r.selling_price, stripsPerBox: r.strips_per_box, tabletsPerBox: r.strips_per_box ? r.strips_per_box * pack : null, schedule: r.schedule || "none", gstPercent: r.gst_percent, breakdown: breakdownOf(qty * pack, pack, r.strips_per_box),
+        purchasePrice: r.purchase_price, sellingPrice: r.selling_price, stripsPerBox: r.strips_per_box, tabletsPerBox: r.strips_per_box ? r.strips_per_box * pack : null, schedule: r.schedule || "none", gstPercent: r.gst_percent, hsnCode: r.hsn_code || null, breakdown: breakdownOf(qty * pack, pack, r.strips_per_box),
         supplier: r.supplier, location: r.location, batchNo: r.batch_no, medCategory: r.med_category || null,
         expiryDate: dated.length ? dated[0].expiryDate : r.expiry_date, batches, status,
         updatedAt: r.updated_at,
@@ -415,6 +418,13 @@ router.post("/inventory/:id/packing", guard, async (req, res) => {
       reorder = Number(b.reorderLevel);
       if (!(reorder >= 0 && reorder <= 10000000)) return res.status(400).json({ error: "Reorder level must be 0 or more" });
     }
+    let hsnGiven = false, hsn = null;
+    if (b.hsnCode !== undefined) {
+      hsnGiven = true;
+      const h = String(b.hsnCode === null ? "" : b.hsnCode).replace(/[\s.]/g, "");
+      if (h !== "" && !/^[0-9]{4,8}$/.test(h)) return res.status(400).json({ error: "HSN code must be 4 to 8 digits" });
+      hsn = h === "" ? null : h;
+    }
     let gst = null;
     if (has(b.gstPercent)) {
       gst = Number(b.gstPercent);
@@ -430,9 +440,9 @@ router.post("/inventory/:id/packing", guard, async (req, res) => {
     const newQty = Math.round((tablets / tps) * 1000000) / 1000000;
     await client.query(
       "UPDATE inventory_items SET pack_size=$1, strips_per_box=$2, quantity=$3, selling_price=$4, " +
-      "purchase_price=COALESCE($5,purchase_price), schedule=COALESCE($6,schedule), gst_percent=COALESCE($7,gst_percent), min_quantity=COALESCE($8,min_quantity), updated_at=now() " +
+      "purchase_price=COALESCE($5,purchase_price), schedule=COALESCE($6,schedule), gst_percent=COALESCE($7,gst_percent), min_quantity=COALESCE($8,min_quantity), hsn_code=CASE WHEN $11::boolean THEN $12::text ELSE hsn_code END, updated_at=now() " +
       "WHERE id=$9 AND hospital_id=$10",
-      [tps, spb, newQty, mrp, pp, sched, gst, reorder, req.params.id, req.hid]);
+      [tps, spb, newQty, mrp, pp, sched, gst, reorder, req.params.id, req.hid, hsnGiven, hsn]);
     await client.query("COMMIT");
     try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
     res.json({ ok: true, tabletsAvailable: tablets, breakdown: breakdownOf(tablets, tps, spb) });
@@ -507,7 +517,7 @@ router.get("/dispensing-log", guard, async (req, res) => {
     let extra = "";
     if (q) { params.push("%" + q + "%"); extra = " AND patient_name ILIKE $4"; }
     const { rows } = await pool.query(
-      "SELECT id, patient_id, patient_name, doctor_name, items, dispensed_items, status, bill_amount, payment_mode, " +
+      "SELECT id, patient_id, patient_name, doctor_name, items, dispensed_items, status, bill_amount, payment_mode, ip_billed, " +
       "COALESCE(handed_over_at, packed_at, created_at) AS ts FROM prescriptions " +
       "WHERE hospital_id=$1 AND status IN ('packed','ready','handed_over') " +
       "AND (COALESCE(handed_over_at, packed_at, created_at) AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $2::date AND $3::date" +
@@ -522,7 +532,7 @@ router.get("/dispensing-log", guard, async (req, res) => {
       return {
         prescriptionId: r.id, patientId: r.patient_id, patientName: r.patient_name, doctorName: r.doctor_name,
         medicines: meds, billAmount: r.bill_amount == null ? null : Number(r.bill_amount),
-        paymentMode: r.payment_mode || null,
+        paymentMode: r.ip_billed ? null : (r.payment_mode || null), chargedToIpBill: r.ip_billed === true,
         billStatus: r.status === "handed_over" ? "Billed" : "Pending",
         status: r.status, timestamp: r.ts,
       };
@@ -685,6 +695,44 @@ router.post("/stock-deduct", guard, async (req, res) => {
   } finally { client.release(); }
 });
 
+// Medicines bought outside stock, saved by the pharmacist at hand over (name, qty, rate).
+function manualLinesOf(rx) {
+  let arr = [];
+  try { arr = rx.manual_items ? JSON.parse(rx.manual_items) : []; } catch (_) {}
+  if (!Array.isArray(arr)) return [];
+  return arr.map(m => {
+    const q = Number(m.quantity) || 0, pr = Number(m.unitPrice) || 0;
+    return { name: String(m.name || "Medicine"), tablets: q, unitPrice: r2(pr), amount: r2(q * pr), priceSource: "manual" };
+  });
+}
+
+// Late stock deductions (Stock Update) only move stock. They must never change the patient's bill.
+function billRx(rx) {
+  const all = parse(rx.dispensed_items);
+  if (!all.some(l => l && l.lateDeduct)) return rx;
+  const rest = all.filter(l => !(l && l.lateDeduct));
+  let hasManual = false;
+  try { hasManual = JSON.parse(rx.manual_items || "[]").length > 0; } catch (_) {}
+  if (!rest.length && !hasManual) return rx;
+  return Object.assign({}, rx, { dispensed_items: JSON.stringify(rest) });
+}
+
+// Invoice lines, each with the dosage / timing note the doctor wrote for that medicine.
+function invoiceLines(rx, inv) {
+  const src = billRx(rx);
+  const dl = parse(src.dispensed_items);
+  let items = [];
+  try { items = JSON.parse(rx.items || "[]"); } catch (_) {}
+  if (!Array.isArray(items)) items = [];
+  const noteOf = it => it ? [it.dosage, String(it.instructions || "").trim(), it.duration].filter(Boolean).join(" \u00b7 ") : "";
+  const stock = lineAmounts(src, inv).map((l, i) => {
+    const ix = dl[i] && dl[i].index;
+    return Object.assign({}, l, { note: (ix === undefined || ix === null) ? "" : noteOf(items[Number(ix)]) });
+  });
+  const manual = manualLinesOf(rx).map(m => Object.assign({}, m, { note: noteOf(items.find(x => x && x.name === m.name)) }));
+  return stock.concat(manual);
+}
+
 // Makes invoice lines add up to the saved bill total by adding one adjustment line.
 function withAdjustment(lines, billAmount) {
   if (billAmount == null || billAmount === "") return lines;
@@ -699,18 +747,62 @@ function withAdjustment(lines, billAmount) {
   }]);
 }
 
+// Tax-invoice data for pharmacy bills: per-medicine HSN and GST %, seller details and a once-per-bill invoice number.
+const __normName = s => String(s || "").toLowerCase().replace(/\s+/g, " ").trim();
+const __baseName = s => __normName(s).replace(/\s*\(.*$/, "");
+const ensureBillInvTable = () => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_bill_invoice (hospital_id TEXT NOT NULL, rx_id TEXT NOT NULL, invoice_no TEXT NOT NULL, issued_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (hospital_id, rx_id), UNIQUE (hospital_id, invoice_no))");
+async function billInvoiceNo(hid, rxId) {
+  await ensureInvTables(); await ensureBillInvTable();
+  const c = await pool.connect();
+  try {
+    await c.query("BEGIN");
+    await c.query("SELECT pg_advisory_xact_lock(hashtext($1))", [hid + ":" + rxId]);
+    const ex = await c.query("SELECT invoice_no FROM pharmacy_bill_invoice WHERE hospital_id=$1 AND rx_id=$2", [hid, rxId]);
+    if (ex.rows[0]) { await c.query("COMMIT"); return ex.rows[0].invoice_no; }
+    const fy = invFy();
+    const n = await c.query("INSERT INTO pharmacy_invoice_counter (hospital_id, fy, last_seq) VALUES ($1,$2,1) ON CONFLICT (hospital_id, fy) DO UPDATE SET last_seq = pharmacy_invoice_counter.last_seq + 1 RETURNING last_seq", [hid, fy]);
+    const no = "INV/" + fy + "/" + String(n.rows[0].last_seq).padStart(5, "0");
+    await c.query("INSERT INTO pharmacy_bill_invoice (hospital_id, rx_id, invoice_no) VALUES ($1,$2,$3)", [hid, rxId, no]);
+    await c.query("COMMIT");
+    return no;
+  } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; } finally { c.release(); }
+}
+async function sendTax(rx, res, obj) {
+  try {
+    const hid = rx.hospital_id;
+    const prof = await gstProfileFor(hid);
+    obj.gstType = prof.gstType || "";
+    obj.seller = { name: prof.name || "", address: prof.address || "", gstin: prof.gstin || "", drugLicence: prof.drugLicence || "" };
+    if (prof.gstType === "registered") {
+      const it = await pool.query("SELECT name, hsn_code, gst_percent FROM inventory_items WHERE hospital_id=$1", [hid]);
+      const byName = new Map(), byBase = new Map();
+      const put = (m, k, r) => { const o = m.get(k); if (!o || (!o.hsn_code && r.hsn_code)) m.set(k, r); };
+      for (const r of it.rows) { put(byName, __normName(r.name), r); put(byBase, __baseName(r.name), r); }
+      obj.lines = (obj.lines || []).map(l => {
+        if (l.name === "Other / manual charges" || l.name === "Discount / adjustment") return Object.assign({}, l, { adjustment: true, hsn: null, gstPercent: 0 });
+        const m = byName.get(__normName(l.name)) || byBase.get(__baseName(l.name));
+        return Object.assign({}, l, { hsn: m && m.hsn_code ? String(m.hsn_code) : null, gstPercent: m && m.gst_percent != null ? Number(m.gst_percent) : null });
+      });
+      const complete = obj.lines.every(l => l.adjustment || (l.hsn && l.gstPercent != null));
+      const legacy = (Number(obj.cgstPct) || 0) + (Number(obj.sgstPct) || 0) > 0;
+      if (complete && !legacy && prof.gstin && rx.status === "handed_over" && rx.bill_no != null && obj.lines.length) obj.taxInvoiceNo = await billInvoiceNo(hid, String(rx.id));
+    }
+  } catch (e) { console.warn("[pharmacy] tax invoice data:", e.message); }
+  res.json(obj);
+}
+
 router.get("/invoice/:id", guard, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM prescriptions WHERE id=$1 AND hospital_id=$2", [req.params.id, req.hid]);
     if (!rows.length) return res.status(404).json({ error: "Prescription not found" });
     const rx = rows[0];
-    const lines = lineAmounts(rx, await invMap(req.hid));
-    res.json({
+    const lines = invoiceLines(rx, await invMap(req.hid));
+    await sendTax(rx, res, {
       billNo: rx.bill_no == null ? null : Number(rx.bill_no),
       invoiceNo: rx.bill_no == null ? "Bill pending" : "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
       patientId: rx.patient_id, patientName: rx.patient_name, doctorName: rx.doctor_name,
       issuedAt: rx.handed_over_at, paymentMode: rx.payment_mode || null,
-      lines: withAdjustment(lines, rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
+      lines: withAdjustment(lines, rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount, manual: l.priceSource === "manual", note: l.note || "" })),
       total: rx.bill_amount == null ? null : Number(rx.bill_amount),
       subtotal: rx.bill_subtotal == null ? null : Number(rx.bill_subtotal),
       discountPct: Number(rx.discount_pct) || 0, discountAmount: Number(rx.discount_amount) || 0,
@@ -732,14 +824,14 @@ router.get("/my-invoice/:id", __patientAuth, async (req, res) => {
       [req.params.id, req.user.id]);
     if (!rows.length || rows[0].bill_no == null) return res.status(404).json({ error: "Bill not available yet" });
     const rx = rows[0];
-    const lines = lineAmounts(rx, await invMap(rx.hospital_id));
+    const lines = invoiceLines(rx, await invMap(rx.hospital_id));
     res.set("Cache-Control", "no-store");
-    res.json({
+    await sendTax(rx, res, {
       billNo: Number(rx.bill_no),
       invoiceNo: "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
       patientId: rx.patient_id, patientName: rx.patient_name, doctorName: rx.doctor_name,
       issuedAt: rx.handed_over_at, paymentMode: rx.payment_mode || null,
-      lines: withAdjustment(lines, rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount })),
+      lines: withAdjustment(lines, rx.bill_subtotal != null ? rx.bill_subtotal : rx.bill_amount).map(l => ({ name: l.name, tablets: l.tablets, unitPrice: l.unitPrice, amount: l.amount, manual: l.priceSource === "manual", note: l.note || "" })),
       total: rx.bill_amount == null ? null : Number(rx.bill_amount),
       subtotal: rx.bill_subtotal == null ? null : Number(rx.bill_subtotal),
       discountPct: Number(rx.discount_pct) || 0, discountAmount: Number(rx.discount_amount) || 0,
@@ -751,22 +843,38 @@ router.get("/my-invoice/:id", __patientAuth, async (req, res) => {
 });
 
 // ── GST Invoice: sales grouped by medicine + batch for a date range ──
-const ensureGstTable = () => pool.query(
-  "CREATE TABLE IF NOT EXISTS pharmacy_gst_profile (hospital_id TEXT PRIMARY KEY, gstin TEXT, address TEXT, drug_licence TEXT, default_hsn TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now())"
-);
+const ensureGstTable = (() => {
+  let done = null;
+  return () => {
+    if (!done) done = pool.query(
+      "CREATE TABLE IF NOT EXISTS pharmacy_gst_profile (hospital_id TEXT PRIMARY KEY, gstin TEXT, address TEXT, drug_licence TEXT, default_hsn TEXT, updated_at TIMESTAMPTZ NOT NULL DEFAULT now()); ALTER TABLE pharmacy_gst_profile ADD COLUMN IF NOT EXISTS gst_type TEXT; ALTER TABLE pharmacy_gst_profile ADD COLUMN IF NOT EXISTS company_name TEXT"
+    ).catch(err => { done = null; throw err; });
+    return done;
+  };
+})();
 ensureGstTable().catch(err => console.warn("[pharmacy] gst profile table:", err.message));
 
 async function gstProfileFor(hid) {
   await ensureGstTable();
   const h = await pool.query("SELECT name, address, phone FROM hospitals WHERE id=$1", [hid]);
-  const p = await pool.query("SELECT gstin, address, drug_licence, default_hsn FROM pharmacy_gst_profile WHERE hospital_id=$1", [hid]);
+  const p = await pool.query("SELECT gstin, address, drug_licence, default_hsn, gst_type, company_name FROM pharmacy_gst_profile WHERE hospital_id=$1", [hid]);
   const hr = h.rows[0] || {}, pr = p.rows[0] || {};
-  return { name: hr.name || "", address: pr.address || hr.address || "", phone: hr.phone || "",
-           gstin: pr.gstin || "", drugLicence: pr.drug_licence || "", defaultHsn: pr.default_hsn || "3004" };
+  return { name: pr.company_name || hr.name || "", companyName: pr.company_name || "", address: pr.address || hr.address || "", phone: hr.phone || "",
+           gstin: pr.gstin || "", drugLicence: pr.drug_licence || "", defaultHsn: pr.default_hsn || "3004", gstType: pr.gst_type || (pr.gstin ? "registered" : "") };
 }
 
 router.get("/gst-profile", guard, async (req, res) => {
   try { res.json(await gstProfileFor(req.hid)); } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+router.put("/gst-type", guard, async (req, res) => {
+  try {
+    await ensureGstTable();
+    const t = String((req.body || {}).gstType || "");
+    if (t !== "registered" && t !== "none") return res.status(400).json({ error: "gstType must be registered or none" });
+    await pool.query("INSERT INTO pharmacy_gst_profile (hospital_id, gst_type, updated_at) VALUES ($1,$2,now()) ON CONFLICT (hospital_id) DO UPDATE SET gst_type=EXCLUDED.gst_type, updated_at=now()", [req.hid, t]);
+    res.json(await gstProfileFor(req.hid));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 router.put("/gst-profile", guard, async (req, res) => {
@@ -779,10 +887,38 @@ router.put("/gst-profile", guard, async (req, res) => {
       return res.status(400).json({ error: "GSTIN must be 15 characters, like 29ABCDE1234F1Z5" });
     if (hsn && !/^[0-9]{4,8}$/.test(hsn)) return res.status(400).json({ error: "HSN code must be 4 to 8 digits" });
     await pool.query(
-      "INSERT INTO pharmacy_gst_profile (hospital_id, gstin, address, drug_licence, default_hsn, updated_at) VALUES ($1,$2,$3,$4,$5,now()) " +
-      "ON CONFLICT (hospital_id) DO UPDATE SET gstin=EXCLUDED.gstin, address=EXCLUDED.address, drug_licence=EXCLUDED.drug_licence, default_hsn=EXCLUDED.default_hsn, updated_at=now()",
-      [req.hid, gstin || null, String(b.address || "").trim() || null, String(b.drugLicence || "").trim() || null, hsn || null]);
+      "INSERT INTO pharmacy_gst_profile (hospital_id, gstin, address, drug_licence, default_hsn, company_name, updated_at) VALUES ($1,$2,$3,$4,$5,$6,now()) " +
+      "ON CONFLICT (hospital_id) DO UPDATE SET gstin=EXCLUDED.gstin, address=EXCLUDED.address, drug_licence=EXCLUDED.drug_licence, default_hsn=EXCLUDED.default_hsn, company_name=COALESCE(EXCLUDED.company_name, pharmacy_gst_profile.company_name), updated_at=now()",
+      [req.hid, gstin || null, String(b.address || "").trim() || null, String(b.drugLicence || "").trim() || null, hsn || null, String(b.companyName || "").trim().slice(0, 120) || null]);
     res.json(await gstProfileFor(req.hid));
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Sequential tax-invoice numbers: INV/<fy>/<5 digits>, consecutive per hospital, restarting each April.
+const invFy = () => { const d = new Date(Date.now() + 5.5 * 3600 * 1000); const y = d.getUTCFullYear(); const s = d.getUTCMonth() >= 3 ? y : y - 1; return String(s).slice(2) + "-" + String(s + 1).slice(2); };
+const ensureInvTables = () => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_invoice_counter (hospital_id TEXT NOT NULL, fy TEXT NOT NULL, last_seq INTEGER NOT NULL DEFAULT 0, PRIMARY KEY (hospital_id, fy))")
+  .then(() => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_invoice_register (hospital_id TEXT NOT NULL, invoice_no TEXT NOT NULL, from_date DATE NOT NULL, to_date DATE NOT NULL, bills INTEGER, total NUMERIC(14,2), issued_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (hospital_id, invoice_no))"));
+router.post("/gst-invoice-no", guard, async (req, res) => {
+  const b = req.body || {};
+  if (!DATE_RE.test(String(b.from || "")) || !DATE_RE.test(String(b.to || ""))) return res.status(400).json({ error: "Invalid from/to dates" });
+  const total = Number(b.total), bills = Number(b.bills);
+  if (!isFinite(total)) return res.status(400).json({ error: "Invalid total" });
+  const billsN = isFinite(bills) ? Math.round(bills) : -1;
+  try {
+    await ensureInvTables();
+    const ex = await pool.query("SELECT invoice_no FROM pharmacy_invoice_register WHERE hospital_id=$1 AND from_date=$2 AND to_date=$3 AND total=$4 AND COALESCE(bills,-1)=$5 ORDER BY issued_at DESC LIMIT 1",
+      [req.hid, b.from, b.to, total.toFixed(2), billsN]);
+    if (ex.rows[0]) return res.json({ invoiceNo: ex.rows[0].invoice_no, reused: true });
+    const fy = invFy();
+    const c = await pool.connect();
+    try {
+      await c.query("BEGIN");
+      const n = await c.query("INSERT INTO pharmacy_invoice_counter (hospital_id, fy, last_seq) VALUES ($1,$2,1) ON CONFLICT (hospital_id, fy) DO UPDATE SET last_seq = pharmacy_invoice_counter.last_seq + 1 RETURNING last_seq", [req.hid, fy]);
+      const no = "INV/" + fy + "/" + String(n.rows[0].last_seq).padStart(5, "0");
+      await c.query("INSERT INTO pharmacy_invoice_register (hospital_id, invoice_no, from_date, to_date, bills, total) VALUES ($1,$2,$3,$4,$5,$6)", [req.hid, no, b.from, b.to, billsN < 0 ? null : billsN, total.toFixed(2)]);
+      await c.query("COMMIT");
+      res.json({ invoiceNo: no, reused: false });
+    } catch (e) { await c.query("ROLLBACK").catch(() => {}); throw e; } finally { c.release(); }
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
@@ -795,7 +931,7 @@ router.get("/gst-report", guard, async (req, res) => {
       "AND (handed_over_at AT TIME ZONE 'Asia/Kolkata')::date BETWEEN $2::date AND $3::date ORDER BY handed_over_at ASC LIMIT 5000",
       [req.hid, rg[0], rg[1]]);
     const items = await pool.query(
-      "SELECT id, name, selling_price, purchase_price, supplier, pack_size, med_category, pack_unit FROM inventory_items WHERE hospital_id=$1", [req.hid]);
+      "SELECT id, name, selling_price, purchase_price, supplier, pack_size, med_category, pack_unit, hsn_code, gst_percent FROM inventory_items WHERE hospital_id=$1", [req.hid]);
     const gbq = await pool.query("SELECT item_id, batch_no, supplier, to_char(received_at,'YYYY-MM-DD') AS received FROM inventory_batches WHERE hospital_id=$1 ORDER BY received_at ASC", [req.hid]);
     const bInfo = {};
     for (const x of gbq.rows) bInfo[x.item_id + "|" + x.batch_no] = x;
@@ -829,7 +965,7 @@ router.get("/gst-report", guard, async (req, res) => {
           const amt = last ? leftA : r2(a.amount * Number(b.tablets) / psum);
           leftT = r2(leftT - t); leftA = r2(leftA - amt);
           const key = [l.inventoryItemId || a.name, b.batchNo || "", b.expiry || ""].join("|");
-          const g = groups.get(key) || { name: a.name, batchNo: b.batchNo || null, expiryDate: b.expiry || null, unit, qty: 0, billed: 0, billDisc: 0, mrpValue: 0, bills: new Set(), purchUnit: (Number(it.purchase_price) > 0 ? (Number(it.purchase_price) / pack) * div : 0), info: bInfo[(l.inventoryItemId || "") + "|" + (b.batchNo || "")] || {} };
+          const g = groups.get(key) || { name: a.name, hsn: it.hsn_code || null, gstPct: it.gst_percent == null ? null : Number(it.gst_percent), batchNo: b.batchNo || null, expiryDate: b.expiry || null, unit, qty: 0, billed: 0, billDisc: 0, mrpValue: 0, bills: new Set(), purchUnit: (Number(it.purchase_price) > 0 ? (Number(it.purchase_price) / pack) * div : 0), info: bInfo[(l.inventoryItemId || "") + "|" + (b.batchNo || "")] || {} };
           if (rx.bill_no != null) g.bills.add(Number(rx.bill_no));
           const q = t / div;
           g.qty += q; g.billed += amt; g.billDisc += r2(amt * dPct / 100);
@@ -841,7 +977,7 @@ router.get("/gst-report", guard, async (req, res) => {
     const out = Array.from(groups.values()).map(g => {
       const taxable = r2(g.billed - g.billDisc);
       const gross = r2(g.mrpValue);
-      return { name: g.name, batchNo: g.batchNo, expiryDate: g.expiryDate, unit: g.unit,
+      return { name: g.name, hsn: g.hsn, gstPercent: g.gstPct, batchNo: g.batchNo, expiryDate: g.expiryDate, unit: g.unit,
                qty: Math.round(g.qty * 1000) / 1000, mrp: g.qty > 0 ? r2(gross / g.qty) : 0,
                gross, discount: r2(gross - taxable), taxable, billNos: Array.from(g.bills).sort((x, y) => x - y), supplier: g.info.supplier || null, purchasedOn: g.info.received || null, purchaseRate: r2(g.purchUnit) };
     }).sort((x, y) => x.name.localeCompare(y.name) || String(x.expiryDate || "").localeCompare(String(y.expiryDate || "")));
