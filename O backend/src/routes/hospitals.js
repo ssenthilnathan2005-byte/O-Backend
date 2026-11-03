@@ -5,6 +5,8 @@ const cache = require("../utils/cache");
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
+const { requireFounderOrAdmin } = require("../middleware/hospitalDeleteAccess");
+const { deleteHospital } = require("../services/hospitalDelete");
 const { TYPES, isValidType, F: INTAKE_F, getIntakeConfig } = require("../utils/intakeTypes");
 const HM = require("../utils/hospitalModules");
 const multer  = require("multer");
@@ -522,32 +524,15 @@ router.post("/:id/photo-base64", requireAdmin, async (req, res) => {
 });
 
 // ── DELETE hospital ───────────────────────────────────────────────────────────
-router.delete("/:id", requireAdmin, async (req, res) => {
+router.delete("/:id", requireFounderOrAdmin, async (req, res) => {
   const hid = req.params.id;
   try {
-    const { rows } = await pool.query("SELECT COUNT(*) as c FROM doctors WHERE hospital_id=$1", [hid]);
-    if (Number(rows[0].c) > 0)
-      return res.status(409).json({ error: "Cannot delete hospital with assigned doctors. Remove doctors first." });
-
-    // Delete all related data in order
-    await pool.query("DELETE FROM pharmacy_gst_profile WHERE hospital_id=$1", [hid]);
-    await pool.query("DELETE FROM pharmacy_bill_counters WHERE hospital_id=$1", [hid]);
-    await pool.query("DELETE FROM pharmacy_invoice_counter WHERE hospital_id=$1", [hid]);
-    await pool.query("DELETE FROM pharmacy_invoice_register WHERE hospital_id=$1", [hid]);
-    await pool.query("DELETE FROM pharmacy_bill_invoice WHERE hospital_id=$1", [hid]);
-    await pool.query("DELETE FROM pharmacy_imports WHERE hospital_id=$1", [hid]);
-    await pool.query("DELETE FROM pharmacy_med_categories WHERE hospital_id=$1", [hid]);
-    await pool.query("DELETE FROM hr_salary_paid WHERE hospital_id=$1", [hid]);
-    await pool.query("DELETE FROM hr_events WHERE hospital_id=$1", [hid]);
-    await pool.query("DELETE FROM front_office_staff WHERE hospital_id=$1", [hid]);
-    await pool.query("DELETE FROM hospital_integrations WHERE hospital_id=$1", [hid]);
-    await pool.query("DELETE FROM bookings WHERE hospital_id=$1", [hid]);
-    await pool.query("DELETE FROM inward_patients WHERE hospital_id=$1", [hid]);
-    await pool.query("UPDATE users SET walkin_hospital_id=NULL WHERE walkin_hospital_id=$1", [hid]);
-    // Clear photo from memory
+    const result = await deleteHospital(pool, hid);
+    if (!result.ok) {
+      console.log("[hospitals DELETE] refused", result.status, result.error, "role=" + (req.user && req.user.role));
+      return res.status(result.status).json({ error: result.error });
+    }
     photoMem.delete(String(hid));
-    // Finally delete the hospital
-    await pool.query("DELETE FROM hospitals WHERE id=$1", [hid]);
     invalidateHospitalCache();
     res.json({ success: true });
   } catch (err) {
