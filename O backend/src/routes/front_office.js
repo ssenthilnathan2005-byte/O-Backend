@@ -140,7 +140,7 @@ router.get("/today", fo, async (req, res) => {
     const q = String(req.query.date || "");
     const date = /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : todayIST();
     const { rows } = await pool.query(
-      "SELECT b.id, b.patient_name, b.patient_age, b.phone, b.complaint, b.doctor_id, b.doctor_name, b.date, b.session, b.token_number, b.payment_done, b.status, b.booking_source, b.checked_in_at, b.vitals, b.vitals_at, b.fee_amount, b.fee_mode, b.fee_paid_at, d.doctor_fee, (SELECT pr.status FROM prescriptions pr WHERE pr.booking_id=b.id ORDER BY pr.created_at DESC LIMIT 1) AS rx_status " +
+      "SELECT b.id, b.patient_name, b.patient_age, b.patient_area, b.phone, b.complaint, b.doctor_id, b.doctor_name, b.date, b.session, b.token_number, b.payment_done, b.status, b.booking_source, b.checked_in_at, b.vitals, b.vitals_at, b.fee_amount, b.fee_mode, b.fee_paid_at, d.doctor_fee, (SELECT pr.status FROM prescriptions pr WHERE pr.booking_id=b.id ORDER BY pr.created_at DESC LIMIT 1) AS rx_status " +
       "FROM bookings b JOIN doctors d ON d.id=b.doctor_id WHERE d.hospital_id=$1 AND b.date=$2 AND b.status<>'cancelled' AND b.archived = FALSE " +
       "ORDER BY CASE b.session WHEN 'morning' THEN 0 WHEN 'afternoon' THEN 1 ELSE 2 END, b.doctor_name ASC, b.token_number ASC",
       [req.user.hospitalId, date]);
