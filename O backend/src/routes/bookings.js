@@ -198,7 +198,7 @@ router.post("/", requireAuth, async (req, res) => {
         `INSERT INTO bookings
           (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name,
            date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, patient_year_of_birth, patient_area, rate_per_token)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,$15)`,
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,$15,$16)`,
         [
           id, req.user.id, (submittedName || patient?.name || "Unknown"),
           doctorId, doctor.name, hospital?.name || "Unknown",
