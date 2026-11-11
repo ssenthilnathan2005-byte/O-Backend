@@ -13,3 +13,5 @@ src/exports/
 *.db-wal
 data/
 uploads/
+.env*
+*.pre-*
