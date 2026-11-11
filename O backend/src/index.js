@@ -199,7 +199,6 @@ app.use("/api/voice", require("./routes/voice"));
 app.use("/api/front-office", require("./routes/front_office"));
 app.use("/api/permissions", require("./routes/permissions"));
 app.use("/api", require("./routes/maternity"));
-app.use("/api/cto", require("./routes/cto"));
 app.use("/api/enquiries", require("./routes/enquiries"));
 
 // ── Health check ──────────────────────────────────────────────────────────────
