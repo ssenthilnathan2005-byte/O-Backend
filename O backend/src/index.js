@@ -85,6 +85,7 @@ const corsOptions = {
   methods: ["GET","POST","PATCH","PUT","DELETE","OPTIONS"],
   allowedHeaders: ["Content-Type","Authorization","X-Requested-With"],
   optionsSuccessStatus: 200,
+  maxAge: 7200,
 };
 app.use(cors(corsOptions));
 app.options("*", cors(corsOptions));
@@ -127,6 +128,16 @@ app.use("/api/payments/", rateLimit({
   max: 30,
   message: { error: "Too many payment requests — please slow down." },
   skip: (req) => req.method === "OPTIONS",
+  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip || "unknown",
+}));
+
+// Staff logins: only failed attempts count
+app.use(["/api/front-office/login", "/api/hospital-lab-staff/login", "/api/pharmacy-owner/login"], rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 30,
+  skipSuccessfulRequests: true,
+  message: { error: "Too many login attempts — try again in 15 minutes." },
+  skip: (req) => req.method !== "POST",
   keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip || "unknown",
 }));
 
