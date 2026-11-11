@@ -12,7 +12,8 @@ const pool = new Pool({
   connectionString: DATABASE_URL,
   ssl: { rejectUnauthorized: false },
   max: Number(process.env.PG_POOL_MAX) || 10,
-  idleTimeoutMillis: 30000,
+  idleTimeoutMillis: 300000,
+  keepAlive: true,
   connectionTimeoutMillis: 10000,
 });
 
