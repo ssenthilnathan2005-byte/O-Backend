@@ -23,7 +23,7 @@ router.patch("/profile", requireAuth, async (req, res) => {
   if (req.user.role !== "patient")
     return res.status(403).json({ error: "Patients only" });
 
-  const { name, phone, yearOfBirth, age } = req.body;
+  const { name, phone, yearOfBirth, age, area, bloodGroup } = req.body;
   const thisYear = new Date().getFullYear();
   let yob = null;
   let calcAge = null;
@@ -35,6 +35,11 @@ router.patch("/profile", requireAuth, async (req, res) => {
   } else {
     calcAge = age ?? null;
   }
+  const areaVal = typeof area === "string" && area.trim() ? area.trim().slice(0, 60) : null;
+  const BLOOD_GROUPS = ["A+", "A-", "B+", "B-", "AB+", "AB-", "O+", "O-", "Unknown"];
+  if (bloodGroup && !BLOOD_GROUPS.includes(bloodGroup))
+    return res.status(400).json({ error: "Invalid blood group" });
+  const bgVal = bloodGroup || null;
   if (!phone || !name)
     return res.status(400).json({ error: "name and phone are required" });
 
@@ -44,8 +49,8 @@ router.patch("/profile", requireAuth, async (req, res) => {
 
   try {
     await pool.query(
-      "UPDATE users SET name=$1, phone=$2, age=$3, year_of_birth=COALESCE($4, year_of_birth) WHERE id=$5",
-      [name.trim(), normalised, calcAge, yob, req.user.id]
+      "UPDATE users SET name=$1, phone=$2, age=$3, year_of_birth=COALESCE($4, year_of_birth), area=COALESCE($6, area), blood_group=COALESCE($7, blood_group) WHERE id=$5",
+      [name.trim(), normalised, calcAge, yob, req.user.id, areaVal, bgVal]
     );
     // Also patch bookings so future queries pick up the right name
     await pool.query(
@@ -66,7 +71,7 @@ router.get("/profile", requireAuth, async (req, res) => {
     return res.status(403).json({ error: "Patients only" });
   try {
     const { rows } = await pool.query(
-      "SELECT name, phone, age, year_of_birth, preferred_language, uhid, password_set FROM users WHERE id=$1",
+      "SELECT name, phone, age, year_of_birth, preferred_language, uhid, password_set, area, blood_group FROM users WHERE id=$1",
       [req.user.id]
     );
     const u = rows[0] || {};
@@ -79,6 +84,8 @@ router.get("/profile", requireAuth, async (req, res) => {
       age: liveAge != null ? String(liveAge) : "",
       yearOfBirth: u.year_of_birth ? String(u.year_of_birth) : "",
       uhid: u.uhid || "",
+      area: u.area || "",
+      bloodGroup: u.blood_group || "",
       hasPassword: Number(u.password_set ?? 1) !== 0,
       preferredLanguage: u.preferred_language === "ta" ? "ta" : "en",
       isComplete,
