@@ -305,8 +305,8 @@ router.post("/walkin", fo, async (req, res) => {
     const bookingId = "b_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
 
     await client.query(
-      "INSERT INTO bookings (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, rate_per_token, booking_source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,'front_desk')",
-      [bookingId, patientId, name, doctor.id, doctor.name, hospital ? hospital.name : "Unknown", date, session, token, sessionId, phone, String(b.complaint || ""), age, hospital ? hospital.rate_per_token : null]);
+      "INSERT INTO bookings (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, patient_area, rate_per_token, booking_source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,$15,'front_desk')",
+      [bookingId, patientId, name, doctor.id, doctor.name, hospital ? hospital.name : "Unknown", date, session, token, sessionId, phone, String(b.complaint || ""), age, b.patientArea || null, hospital ? hospital.rate_per_token : null]);
 
     const ts = await client.query("SELECT token_statuses FROM token_states WHERE session_id=$1", [sessionId]);
     if (ts.rows.length) {
