@@ -43,7 +43,7 @@ function row2booking(r) {
     doctorId: r.doctor_id, doctorName: r.doctor_name, hospitalName: r.hospital_name,
     date: r.date, session: r.session, tokenNumber: r.token_number,
     sessionId: r.session_id, paymentDone: r.payment_done === 1, status: r.status,
-    phone: r.phone || "", complaint: r.complaint || "", patientAge: r.patient_age ?? null,
+    phone: r.phone || "", complaint: r.complaint || "", patientAge: r.patient_age ?? null, patientArea: r.patient_area ?? null,
     closeReason: r.close_reason || null,
     lateFlag: r.late_flag === 1,
     lateEtaMinutes: r.late_eta_minutes ?? null,
@@ -69,10 +69,10 @@ router.get("/", requireAuth, async (req, res) => {
 
     let rows;
     if (req.user.role === "admin") {
-      ({ rows } = await pool.query("SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE archived = FALSE ORDER BY created_at DESC LIMIT 200"));
+      ({ rows } = await pool.query("SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, patient_area, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE archived = FALSE ORDER BY created_at DESC LIMIT 200"));
     } else if (req.user.role === "doctor") {
       ({ rows } = await pool.query(
-        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE doctor_id=$1 AND archived_doctor = FALSE ORDER BY date DESC, session ASC, token_number ASC LIMIT 5000",
+        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, patient_area, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE doctor_id=$1 AND archived_doctor = FALSE ORDER BY date DESC, session ASC, token_number ASC LIMIT 5000",
         [req.user.doctorId]
       ));
     } else if (req.user.role === "hospital_admin") {
@@ -97,7 +97,7 @@ router.get("/", requireAuth, async (req, res) => {
       ));
     } else {
       ({ rows } = await pool.query(
-        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE patient_id=$1 AND archived = FALSE ORDER BY created_at DESC",
+        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, patient_area, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE patient_id=$1 AND archived = FALSE ORDER BY created_at DESC",
         [req.user.id]
       ));
     }
@@ -112,7 +112,7 @@ router.get("/", requireAuth, async (req, res) => {
 router.get("/session/:sessionId", requireAuth, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE session_id=$1 AND status!='cancelled' AND archived = FALSE ORDER BY token_number ASC",
+      "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, patient_area, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE session_id=$1 AND status!='cancelled' AND archived = FALSE ORDER BY token_number ASC",
       [req.params.sessionId]
     );
     res.json(rows.map(row2booking));
@@ -127,7 +127,7 @@ router.post("/", requireAuth, async (req, res) => {
   if (req.user.role !== "patient")
     return res.status(403).json({ error: "Only patients can create bookings" });
 
-  const { doctorId, date, session, complaint = "", phone, patientName: submittedName = "", patientAge = null } = req.body;
+  const { doctorId, date, session, complaint = "", phone, patientName: submittedName = "", patientAge = null, patientArea = null } = req.body;
   if (!doctorId || !date || !session)
     return res.status(400).json({ error: "doctorId, date, and session are required" });
 
@@ -197,7 +197,7 @@ router.post("/", requireAuth, async (req, res) => {
       await client.query(
         `INSERT INTO bookings
           (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name,
-           date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, patient_year_of_birth, rate_per_token)
+           date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, patient_year_of_birth, patient_area, rate_per_token)
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,$15)`,
         [
           id, req.user.id, (submittedName || patient?.name || "Unknown"),
@@ -205,6 +205,7 @@ router.post("/", requireAuth, async (req, res) => {
           date, session, finalTokenNumber, sessionId, phoneValidation.phone, complaint,
           bookingYobAge != null ? bookingYobAge : (patientAge != null && patientAge !== "" ? Number(patientAge) : null),
           bookingYob,
+          patientArea,
           hospital.rate_per_token,
         ]
       );
