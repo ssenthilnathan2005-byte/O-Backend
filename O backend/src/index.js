@@ -175,6 +175,7 @@ app.use("/api/doctor", doctorHistoryRoutes);
 app.use("/api/abdm", require("./abdm/optin")({ pool, requireAuth: require("./middleware/auth").requireAuth }));
 // ABDM FHIR export (read-only)
 app.use("/api/abdm", require("./abdm/fhir-route"));
+app.use("/api/abdm", require("./abdm/abha-route"));
 const hospitalExportRoutes = require("./routes/hospital_exports");
 const pharmacyRoutes = require("./routes/pharmacy");
 const inwardRoutes   = require("./routes/inward");
