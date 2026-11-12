@@ -52,7 +52,21 @@ function requireAuth(req, res, next) {
     const decoded = jwt.verify(token, JWT_SECRET);
     // Single-purpose tokens (e.g. password-reset links) must never work as login sessions.
     if (decoded && decoded.purpose) return res.status(401).json({ error: "Invalid token. Please log in again." });
-    req.user = decoded;
+    // Blacklist check
+    const crypto = require("crypto");
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    const { pool } = require("../db/init");
+    pool.query("SELECT 1 FROM token_blacklist WHERE token_hash=\ AND expires_at > now()", [tokenHash]).then(r => {
+      if (r.rows.length) return res.status(401).json({ error: "Session ended. Please log in again." });
+      req.user = decoded;
+      req.tokenHash = tokenHash;
+      doctorActiveCheck(req, res, () => staffActiveCheck(req, res, next));
+    }).catch(() => {
+      req.user = decoded;
+      req.tokenHash = tokenHash;
+      doctorActiveCheck(req, res, () => staffActiveCheck(req, res, next));
+    });
+    return;
     doctorActiveCheck(req, res, () => staffActiveCheck(req, res, next));
   } catch (err) {
     if (err.name === "TokenExpiredError")

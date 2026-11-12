@@ -1003,3 +1003,21 @@ router.post("/patient/change-password", requireAuth, async (req, res) => {
 });
 
 module.exports = router;
+
+// ── Logout (blacklist token) ──────────────────────────────────────────────────
+router.post("/logout", async (req, res) => {
+  try {
+    const header = req.headers.authorization || "";
+    const token = header.startsWith("Bearer ") ? header.slice(7).trim() : null;
+    const crypto = require("crypto");
+    const { pool } = require("../db/init");
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    const decoded = require("jsonwebtoken").decode(token);
+    const expiresAt = decoded && decoded.exp ? new Date(decoded.exp * 1000).toISOString() : new Date(Date.now() + 8*3600*1000).toISOString();
+    await pool.query(
+      "INSERT INTO token_blacklist (token_hash, expires_at) VALUES ($1, $2) ON CONFLICT DO NOTHING",
+      [tokenHash, expiresAt]
+    );
+    res.json({ success: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
