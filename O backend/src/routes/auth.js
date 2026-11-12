@@ -31,7 +31,7 @@ const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : nul
 function sign(payload) {
   const tok = jwt.sign(payload, SECRET, { expiresIn: EXPIRES });
   try { require("../db/init").pool.query(
-    `INSERT INTO data_access_audit (id,actor_id,actor_role,hospital_id,action,ip) VALUES (gen_random_uuid(),,,,'auth.login',)`,
+    `INSERT INTO data_access_audit (id,actor_id,actor_role,hospital_id,action,ip) VALUES (gen_random_uuid(),$1,$2,$3,'auth.login',$4)`,
     [payload.id||null, payload.role||null, payload.hospitalId||null, null]
   ).catch(()=>{}); } catch(_){}
   return tok;
