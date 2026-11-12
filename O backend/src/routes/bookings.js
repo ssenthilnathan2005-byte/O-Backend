@@ -210,6 +210,7 @@ router.post("/", requireAuth, async (req, res) => {
         ]
       );
 
+      audit(req, "booking.created", "booking", id, req.user.id);
       // Update or create token state
       const { rows: existingRows } = await client.query(
         "SELECT * FROM token_states WHERE session_id=$1",
