@@ -210,7 +210,7 @@ router.post("/", requireAuth, async (req, res) => {
         ]
       );
 
-      audit(req, "booking.created", "booking", id, req.user.id);
+      logAccess(req, { action: "booking.created", resourceType: "booking", resourceId: id, patientId: req.user.id });
       // Update or create token state
       const { rows: existingRows } = await client.query(
         "SELECT * FROM token_states WHERE session_id=$1",
@@ -271,6 +271,7 @@ router.patch("/:id/status", requireDoctorOrAdmin, async (req, res) => {
       return res.status(404).json({ error: "Booking not found" });
 
     const { rows } = await pool.query("SELECT * FROM bookings WHERE id=$1", [req.params.id]);
+    logAccess(req, { action: "booking.status_changed", resourceType: "booking", resourceId: req.params.id, meta: { status } });
     res.json(row2booking(rows[0]));
   } catch (err) {
     console.error("[bookings PATCH]", err.message);
