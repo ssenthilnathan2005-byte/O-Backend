@@ -1021,3 +1021,11 @@ router.post("/logout", async (req, res) => {
     res.json({ success: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+
+// Clean up expired blacklist tokens every hour
+setInterval(async () => {
+  try {
+    const { pool } = require('../db/init');
+    await pool.query('DELETE FROM token_blacklist WHERE expires_at < now()');
+  } catch(_) {}
+}, 60 * 60 * 1000);
