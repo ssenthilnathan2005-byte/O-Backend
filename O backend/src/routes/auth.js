@@ -29,7 +29,12 @@ const FRONTEND_URL = process.env.FRONTEND_URL || "http://localhost:5173";
 const googleClient = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
 
 function sign(payload) {
-  return jwt.sign(payload, SECRET, { expiresIn: EXPIRES });
+  const tok = jwt.sign(payload, SECRET, { expiresIn: EXPIRES });
+  try { require("../db/init").pool.query(
+    `INSERT INTO data_access_audit (id,actor_id,actor_role,hospital_id,action,ip) VALUES (gen_random_uuid(),,,,'auth.login',)`,
+    [payload.id||null, payload.role||null, payload.hospitalId||null, null]
+  ).catch(()=>{}); } catch(_){}
+  return tok;
 }
 
 function validate(req, res) {
