@@ -305,7 +305,7 @@ router.post("/walkin", fo, async (req, res) => {
     await ready;
     const b = req.body || {};
     const hid = req.user.hospitalId;
-    const name = String(b.patientName || "").trim();
+    let name = String(b.patientName || "").trim();
     if (!name) return res.status(400).json({ error: "Patient name is required" });
     const rawPhone = String(b.phone || "").replace(/\D/g, "");
     const phone = rawPhone ? rawPhone.slice(-10) : null;
@@ -329,14 +329,21 @@ router.post("/walkin", fo, async (req, res) => {
     await client.query("BEGIN"); began = true;
     await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [sessionId]);
 
-    let patientId = null;
-    if (phone) {
-      const ex = await client.query("SELECT b.patient_id FROM bookings b JOIN users u ON u.id=b.patient_id WHERE u.walkin_hospital_id=$1 AND b.phone=$2 AND lower(b.patient_name)=lower($3) LIMIT 1", [hid, phone, name]);
-      if (ex.rows.length) patientId = ex.rows[0].patient_id;
-    }
-    if (!patientId) {
+    // Identity: an account is chosen by UHID or created new. Never reused by name and phone.
+    let patientId = null, uhid = null;
+    if (b.uhid) {
+      const acc = await findPatientByUhid(client, b.uhid, phone, hid);
+      if (!acc) throw bad(404, "No patient found. Check the UHID and phone number.");
+      patientId = acc.id; uhid = acc.uhid; name = acc.name || name;
+    } else {
+      if (phone && !b.confirmNew) {
+        const sim = await client.query("SELECT u.uhid FROM bookings b JOIN users u ON u.id=b.patient_id WHERE u.walkin_hospital_id=$1 AND b.phone=$2 AND lower(b.patient_name)=lower($3) LIMIT 1", [hid, phone, name]);
+        if (sim.rows.length) throw bad(409, "A patient with this name and phone is already registered" + (sim.rows[0].uhid ? " (UHID " + sim.rows[0].uhid + ")" : "") + ". Register as a different person?");
+      }
       patientId = "u_walkin_" + randomBytes(6).toString("hex");
-      await client.query("INSERT INTO users (id, name, role, walkin_hospital_id) VALUES ($1,$2,'patient',$3)", [patientId, name, hid]);
+      await client.query("INSERT INTO users (id, name, role, walkin_hospital_id, age, gender) VALUES ($1,$2,'patient',$3,$4,$5)", [patientId, name, hid, age, ["Male", "Female", "Other"].includes(b.patientGender) ? b.patientGender : null]);
+      const nu = await client.query("SELECT uhid FROM users WHERE id=$1", [patientId]);
+      uhid = nu.rows[0] ? nu.rows[0].uhid : null;
     }
 
     const dup = await client.query("SELECT 1 FROM bookings WHERE session_id=$1 AND patient_id=$2 AND status<>'cancelled' LIMIT 1", [sessionId, patientId]);
@@ -361,7 +368,7 @@ router.post("/walkin", fo, async (req, res) => {
     }
     await client.query("COMMIT");
     try { broadcast(sessionId, { type: "token_booked", tokenNumber: token, sessionId }); } catch (_) {}
-    res.status(201).json({ ok: true, bookingId, tokenNumber: token, doctorName: doctor.name, session, date, patientName: name });
+    res.status(201).json({ ok: true, bookingId, tokenNumber: token, doctorName: doctor.name, session, date, patientName: name, uhid, newAccount: !b.uhid });
   } catch (e) {
     if (began) { try { await client.query("ROLLBACK"); } catch (_) {} }
     res.status(e.status || 500).json({ error: e.message });
