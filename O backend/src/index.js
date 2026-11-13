@@ -66,6 +66,9 @@ const ALLOWED_ORIGINS = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(",").map(o => o.trim())
   : null; // allow all in dev when env var is not set
 
+const isVercelPreview = (origin = "") =>
+  /^https:\/\/current-frontend-[a-z0-9]+-sn472390bme26-archs-projects\.vercel\.app$/i.test(origin);
+
 const isCodespacesOrigin = (origin = "") => {
   // Example: https://my-space-4000.app.github.dev
   return /^https:\/\/[a-z0-9-]+-\d+\.app\.github\.dev$/i.test(origin);
@@ -76,7 +79,7 @@ const corsOptions = {
     // Allow server-to-server/health checks without Origin header.
     if (!origin) return callback(null, true);
     if (!ALLOWED_ORIGINS) return callback(null, true);
-    if (ALLOWED_ORIGINS.includes(origin) || isCodespacesOrigin(origin)) {
+    if (ALLOWED_ORIGINS.includes(origin) || isCodespacesOrigin(origin) || isVercelPreview(origin)) {
       return callback(null, true);
     }
     console.log("[CORS] blocked origin:", origin);
