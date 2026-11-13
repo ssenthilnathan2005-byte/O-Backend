@@ -192,9 +192,32 @@ router.get("/beds", fo, async (req, res) => {
 });
 router.get("/inward", fo, async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT id, patient_name, phone, age, gender, ward, bed_number, admitting_doctor_name, diagnosis, admitted_at FROM inward_patients WHERE hospital_id=$1 AND status='admitted' ORDER BY admitted_at DESC", [req.user.hospitalId]);
+    const { rows } = await pool.query("SELECT id, patient_name, phone, age, gender, ward, bed_number, admitting_doctor_name, diagnosis, admitted_at, (SELECT uhid FROM users WHERE users.id=inward_patients.patient_user_id) AS uhid FROM inward_patients WHERE hospital_id=$1 AND status='admitted' ORDER BY admitted_at DESC", [req.user.hospitalId]);
     res.set("Cache-Control", "no-store");
     res.json(rows);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+// Finds a patient account by UHID. The phone must match too (UHIDs are guessable),
+// except for accounts the same hospital created at its own desk.
+async function findPatientByUhid(db, uhidRaw, phoneRaw, hid) {
+  const u = String(uhidRaw || "").trim().toUpperCase();
+  const p = String(phoneRaw || "").replace(/\D/g, "").slice(-10);
+  if (!u || u.length > 20) return null;
+  const { rows } = await db.query("SELECT id, name, phone, gender, age, year_of_birth, uhid, walkin_hospital_id FROM users WHERE role='patient' AND upper(uhid)=$1", [u]);
+  const r = rows[0];
+  if (!r) return null;
+  const accPhone = String(r.phone || "").replace(/\D/g, "").slice(-10);
+  const ok = (p.length === 10 && accPhone === p) || (r.walkin_hospital_id && r.walkin_hospital_id === hid);
+  if (!ok) return null;
+  const age = r.year_of_birth ? new Date().getFullYear() - Number(r.year_of_birth) : (r.age !== null && r.age !== undefined && r.age !== "" ? Number(r.age) : null);
+  return { id: r.id, name: r.name, phone: accPhone || p || null, gender: r.gender || null, age, uhid: r.uhid };
+}
+router.get("/patient-lookup", fo, async (req, res) => {
+  try {
+    const acc = await findPatientByUhid(pool, req.query.uhid, req.query.phone, req.user.hospitalId);
+    if (!acc) return res.status(404).json({ error: "No patient found. Check the UHID and phone number." });
+    res.set("Cache-Control", "no-store");
+    res.json({ name: acc.name, gender: acc.gender, age: acc.age, uhid: acc.uhid });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 router.post("/admit", fo, async (req, res) => {
@@ -216,9 +239,29 @@ router.post("/admit", fo, async (req, res) => {
     if (!bedR.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Bed not found" }); }
     const bed = bedR.rows[0];
     if (bed.status !== "available" || bed.reserved_booking_id) { await client.query("ROLLBACK"); return res.status(409).json({ error: "That bed is not available now. Choose another bed." }); }
-    if (phone) {
-      const dup = await client.query("SELECT 1 FROM inward_patients WHERE hospital_id=$1 AND status='admitted' AND phone=$2 AND lower(patient_name)=lower($3) LIMIT 1", [hid, phone, name]);
-      if (dup.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "This patient is already admitted." }); }
+    // Identity: tie the admission to an account ID, never to name or phone
+    let patientUserId = null, uhid = null;
+    let admitName = name, admitPhone = phone, admitGender = b.gender || null, admitAge = age;
+    if (b.uhid) {
+      const acc = await findPatientByUhid(client, b.uhid, phone, hid);
+      if (!acc) { await client.query("ROLLBACK"); return res.status(404).json({ error: "No patient found. Check the UHID and phone number." }); }
+      const dupAcc = await client.query("SELECT 1 FROM inward_patients WHERE hospital_id=$1 AND status='admitted' AND patient_user_id=$2 LIMIT 1", [hid, acc.id]);
+      if (dupAcc.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "This patient is already admitted." }); }
+      patientUserId = acc.id; uhid = acc.uhid;
+      admitName = acc.name || name; admitPhone = acc.phone || phone;
+      admitGender = acc.gender || admitGender; admitAge = acc.age !== null ? acc.age : admitAge;
+    } else {
+      if (phone && !b.confirmNew) {
+        const sim = await client.query("SELECT ip.bed_number, u.uhid FROM inward_patients ip LEFT JOIN users u ON u.id=ip.patient_user_id WHERE ip.hospital_id=$1 AND ip.status='admitted' AND ip.phone=$2 AND lower(ip.patient_name)=lower($3) LIMIT 1", [hid, phone, name]);
+        if (sim.rows.length) {
+          await client.query("ROLLBACK");
+          return res.status(409).json({ error: "A patient with this name and phone is already admitted (bed " + sim.rows[0].bed_number + (sim.rows[0].uhid ? ", UHID " + sim.rows[0].uhid : "") + "). Admit as a different person?" });
+        }
+      }
+      patientUserId = "u_walkin_" + randomBytes(6).toString("hex");
+      await client.query("INSERT INTO users (id, name, role, walkin_hospital_id, age, gender) VALUES ($1,$2,'patient',$3,$4,$5)", [patientUserId, name, hid, age, b.gender || null]);
+      const nu = await client.query("SELECT uhid FROM users WHERE id=$1", [patientUserId]);
+      uhid = nu.rows[0] ? nu.rows[0].uhid : null;
     }
     let docId = null, docName = null;
     if (b.admittingDoctorId) {
@@ -228,11 +271,11 @@ router.post("/admit", fo, async (req, res) => {
     }
     const inwardId = "inward_" + randomBytes(5).toString("hex");
     await client.query(
-      "INSERT INTO inward_patients (id, hospital_id, patient_name, phone, age, gender, ward, bed_number, admitting_doctor_id, admitting_doctor_name, diagnosis, notes) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)",
-      [inwardId, hid, name, phone, age, b.gender || null, bed.ward_name, bed.bed_number, docId, docName, b.diagnosis || null, b.notes || null]);
-    await client.query("UPDATE beds SET status='occupied', patient_name=$1, inward_id=$2, cleaning_started_at=NULL, cleaning_ends_at=NULL, cleaning_duration_minutes=NULL, updated_at=now() WHERE id=$3", [name, inwardId, bed.id]);
+      "INSERT INTO inward_patients (id, hospital_id, patient_name, phone, age, gender, ward, bed_number, admitting_doctor_id, admitting_doctor_name, diagnosis, notes, patient_user_id) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)",
+      [inwardId, hid, admitName, admitPhone, admitAge, admitGender, bed.ward_name, bed.bed_number, docId, docName, b.diagnosis || null, b.notes || null, patientUserId]);
+    await client.query("UPDATE beds SET status='occupied', patient_name=$1, inward_id=$2, cleaning_started_at=NULL, cleaning_ends_at=NULL, cleaning_duration_minutes=NULL, updated_at=now() WHERE id=$3", [admitName, inwardId, bed.id]);
     await client.query("COMMIT");
-    res.status(201).json({ ok: true, inwardId, ward: bed.ward_name, bed: bed.bed_number });
+    res.status(201).json({ ok: true, inwardId, ward: bed.ward_name, bed: bed.bed_number, uhid, patientName: admitName, newAccount: !b.uhid });
   } catch (e) {
     if (began) { try { await client.query("ROLLBACK"); } catch (_) {} }
     res.status(500).json({ error: e.message });
