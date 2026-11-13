@@ -79,6 +79,7 @@ const corsOptions = {
     if (ALLOWED_ORIGINS.includes(origin) || isCodespacesOrigin(origin)) {
       return callback(null, true);
     }
+    console.log("[CORS] blocked origin:", origin);
     return callback(new Error("CORS origin not allowed"));
   },
   credentials: true,
@@ -117,6 +118,7 @@ app.use("/api/", rateLimit({
 app.use("/api/auth/", rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 20,
+  skipSuccessfulRequests: true,
   message: { error: "Too many login attempts — try again in 15 minutes." },
   skip: (req) => req.method === "OPTIONS",
   keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip || "unknown",

@@ -9,9 +9,16 @@ const { requireAuth, requireAdminOrHospitalAdmin } = require("../middleware/auth
 function nanoid(n = 10) { return randomBytes(n).toString("hex").slice(0, n); }
 
 const JWT_SECRET = require("../utils/secrets").JWT_SECRET;
+const ambRateLimit = require("express-rate-limit");
+const ambLimiter = ambRateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 10,
+  message: { error: "Too many requests from this network. In an emergency please call 108 directly." },
+  keyGenerator: (req) => req.headers["cf-connecting-ip"] || req.ip || "unknown",
+});
 
 // POST /api/ambulance — book an ambulance (guests allowed, login optional)
-router.post("/", async (req, res) => {
+router.post("/", ambLimiter, async (req, res) => {
   try {
     const {
       patientName, phone, pickupAddress, landmark,
@@ -21,6 +28,9 @@ router.post("/", async (req, res) => {
 
     if (!patientName || !phone || !pickupAddress) {
       return res.status(400).json({ error: "patientName, phone and pickupAddress are required" });
+    }
+    if (String(patientName).length > 100 || String(phone).length > 20 || String(pickupAddress).length > 500 || String(notes || "").length > 1000) {
+      return res.status(400).json({ error: "One of the fields is too long" });
     }
 
     let patientId = null;

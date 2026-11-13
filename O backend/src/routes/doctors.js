@@ -95,7 +95,6 @@ function row2doctor(r) {
     walkInInterval: r.walk_in_interval ?? 5,
     sessions: r.sessions ? r.sessions.split(",") : ["morning","afternoon"],
     sessionTimings: r.session_timings ? JSON.parse(r.session_timings) : null,
-    scheduleConfig: r.schedule_config ? JSON.parse(r.schedule_config) : null,
     isAvailable: r.is_available === 1 && r.is_active !== 0,
     yearsOfExperience: r.years_of_experience || "",
     education: r.education || "",

@@ -56,18 +56,18 @@ function requireAuth(req, res, next) {
     const crypto = require("crypto");
     const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
     const { pool } = require("../db/init");
-    pool.query("SELECT 1 FROM token_blacklist WHERE token_hash=\ AND expires_at > now()", [tokenHash]).then(r => {
+    pool.query("SELECT 1 FROM token_blacklist WHERE token_hash=$1 AND expires_at > now()", [tokenHash]).then(r => {
       if (r.rows.length) return res.status(401).json({ error: "Session ended. Please log in again." });
       req.user = decoded;
       req.tokenHash = tokenHash;
       doctorActiveCheck(req, res, () => staffActiveCheck(req, res, next));
-    }).catch(() => {
+    }).catch((e) => {
+      console.warn("[auth] blacklist check failed:", e.message);
       req.user = decoded;
       req.tokenHash = tokenHash;
       doctorActiveCheck(req, res, () => staffActiveCheck(req, res, next));
     });
     return;
-    doctorActiveCheck(req, res, () => staffActiveCheck(req, res, next));
   } catch (err) {
     if (err.name === "TokenExpiredError")
       return res.status(401).json({ error: "Session expired. Please log in again." });
