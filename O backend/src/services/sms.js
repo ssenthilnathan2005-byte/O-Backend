@@ -5,7 +5,7 @@ const INTEGRATED_NUM = "918072966876";
 const WA_API_URL = "https://api.msg91.com/api/v5/whatsapp/whatsapp-outbound-message/bulk/";
 
 function generateOTP() {
-  return String(Math.floor(Math.random() * 900000) + 100000);
+  return String(require("crypto").randomInt(100000, 1000000));
 }
 
 function normalisePhone(raw) {

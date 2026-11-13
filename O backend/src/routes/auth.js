@@ -230,9 +230,12 @@ router.post(
         try {
           const normPhone = normalisePhone(identifier);
           const { rows } = await pool.query(
-            "SELECT * FROM users WHERE phone=$1 AND role='patient'",
+            "SELECT * FROM users WHERE phone=$1 AND role='patient' LIMIT 2",
             [normPhone]
           );
+          if (rows.length > 1) {
+            return res.status(409).json({ error: "More than one account uses this phone number. Log in with your UHID or email instead." });
+          }
           user = rows[0] || null;
         } catch {
           user = null;
@@ -242,6 +245,9 @@ router.post(
 
       if (!user) {
         return res.status(401).json({ error: "No account found with this email or phone number." });
+      }
+      if (!user.password) {
+        return res.status(401).json({ error: "This account has no password yet. Use the claim code from your hospital slip, or the sign-in method you registered with." });
       }
       const tCompareStart = Date.now();
       const ok = await bcrypt.compare(password, user.password);
