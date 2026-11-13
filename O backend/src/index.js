@@ -172,6 +172,7 @@ app.use("/api/doctor", doctorExportRoutes);
 const doctorHistoryRoutes = require("./routes/doctor_history");
 app.use("/api/doctor", doctorHistoryRoutes);
 // ABDM opt-in (off by default per hospital)
+app.use("/api/abdm", require("./abdm/callback"));
 app.use("/api/abdm", require("./abdm/optin")({ pool, requireAuth: require("./middleware/auth").requireAuth }));
 // ABDM FHIR export (read-only)
 app.use("/api/abdm", require("./abdm/fhir-route"));
