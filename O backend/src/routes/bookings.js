@@ -1,5 +1,6 @@
 "use strict";
 const express = require("express");
+const { logAccess } = require("../services/audit");
 const { pool } = require("../db/init");
 const { requireAuth, requireAdmin, requireDoctorOrAdmin } = require("../middleware/auth");
 const { broadcast } = require("../services/ws");
