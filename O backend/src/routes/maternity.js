@@ -160,14 +160,10 @@ function buildAlerts(o, v) {
 
 // ---------- Patient access to their OWN admission (same match rule as /bed-bookings/my-stays) ----------
 async function loadOwnStay(req) {
-  const { rows: u } = await pool.query("SELECT phone FROM users WHERE id=$1", [req.user.id]);
-  const last10 = String((u[0] && u[0].phone) || req.user.phone || "").replace(/\D/g, "").slice(-10);
   const { rows } = await pool.query(
     `SELECT ip.* FROM inward_patients ip
-      WHERE ip.id=$1
-        AND (ip.patient_user_id=$2
-          OR ($3::text <> '' AND right(regexp_replace(COALESCE(ip.phone,''), '\\D', '', 'g'), 10) = $3))`,
-    [req.params.inwardId, req.user.id, last10]);
+      WHERE ip.id=$1 AND ip.patient_user_id=$2`,
+    [req.params.inwardId, req.user.id]);
   const p = rows[0];
   if (!p) throw Object.assign(new Error("Admission not found"), { status: 404 });
   if (!(await isMaternityWard(p)))
@@ -182,15 +178,11 @@ const staffOrOwnPatient = (...perms) => {
 // ---------- Which admissions are in a maternity-type ward ----------
 router.get("/maternity-eligible", requireAuth, staffOrOwnPatient("all_patients", "beds_wards", "ipd", "vitals"), handle(async (req, res) => {
   if (req.user.role === "patient") {
-    const { rows: u } = await pool.query("SELECT phone FROM users WHERE id=$1", [req.user.id]);
-    const last10 = String((u[0] && u[0].phone) || req.user.phone || "").replace(/\D/g, "").slice(-10);
     const { rows: mine } = await pool.query(
       `SELECT i.id FROM inward_patients i
          JOIN wards w ON w.hospital_id = i.hospital_id AND lower(trim(w.name)) = lower(trim(i.ward))
-        WHERE w.type='maternity'
-          AND (i.patient_user_id=$1
-            OR ($2::text <> '' AND right(regexp_replace(COALESCE(i.phone,''), '\\D', '', 'g'), 10) = $2))`,
-      [req.user.id, last10]);
+        WHERE w.type='maternity' AND i.patient_user_id=$1`,
+      [req.user.id]);
     return res.json({ ids: mine.map((r) => r.id) });
   }
   const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;

@@ -200,17 +200,12 @@ router.post("/inward/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd"
 router.get("/my", requireAuth, async (req, res) => {
   try {
     const patientId = req.user.id;
-    const { rows: u } = await pool.query("SELECT phone FROM users WHERE id=$1", [patientId]);
-    const last10 = String((u[0] && u[0].phone) || "").replace(/\D/g, "").slice(-10);
     const { rows } = await pool.query(
       `SELECT * FROM prescriptions
         WHERE patient_id=$1
-           OR inward_id IN (
-                SELECT ip.id FROM inward_patients ip
-                 WHERE ip.patient_user_id=$1
-                    OR ($2::text <> '' AND right(regexp_replace(COALESCE(ip.phone,''), '\\D', '', 'g'), 10) = $2))
+           OR inward_id IN (SELECT ip.id FROM inward_patients ip WHERE ip.patient_user_id=$1)
         ORDER BY created_at DESC`,
-      [patientId, last10]
+      [patientId]
     );
     res.json(rows.map(r => ({ ...r, items: JSON.parse(r.items || "[]") })));
   } catch (err) {

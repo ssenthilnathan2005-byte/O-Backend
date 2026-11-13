@@ -303,13 +303,10 @@ router.get("/report", requireAuth, staff, async (req, res) => {
 router.get("/my/:inwardId", requireAuth, async (req, res) => {
   if (req.user.role !== "patient") return res.status(403).json({ error: "Forbidden" });
   try {
-    const { rows: u } = await pool.query("SELECT phone FROM users WHERE id=$1", [req.user.id]);
-    const last10 = String((u[0] && u[0].phone) || req.user.phone || "").replace(/\D/g, "").slice(-10);
     const { rows } = await pool.query(
       `SELECT id, hospital_id FROM inward_patients
-        WHERE id=$1 AND (patient_user_id=$2
-           OR ($3::text <> '' AND right(regexp_replace(COALESCE(phone,''), '\\D', '', 'g'), 10) = $3))`,
-      [req.params.inwardId, req.user.id, last10]);
+        WHERE id=$1 AND patient_user_id=$2`,
+      [req.params.inwardId, req.user.id]);
     if (!rows.length) return res.status(404).json({ error: "Bill not found" });
     const stay = await loadStay(pool, rows[0].id, rows[0].hospital_id);
     res.set("Cache-Control", "no-store");
