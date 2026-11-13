@@ -1008,6 +1008,84 @@ router.post("/patient/change-password", requireAuth, async (req, res) => {
   }
 });
 
+// ── Claim a desk-created account: UHID + claim code + OTP ────────────────────
+const nodeCrypto = require("crypto");
+const CLAIM_GENERIC = "Invalid or expired claim code. Ask the hospital desk for a new one.";
+const normClaimCode = (v) => String(v || "").toUpperCase().replace(/[^A-Z0-9]/g, "");
+const hashClaimOtp = (claimId, otp) => nodeCrypto.createHash("sha256").update(claimId + ":" + otp).digest("hex");
+
+router.post("/patient/claim/start", async (req, res) => {
+  try {
+    const uhid = String(req.body.uhid || "").trim().toUpperCase();
+    const code = normClaimCode(req.body.code);
+    if (!UHID_RE.test(uhid) || code.length !== 8) return res.status(400).json({ error: CLAIM_GENERIC });
+    const { rows } = await pool.query(
+      `SELECT c.* FROM patient_claims c JOIN users u ON u.id = c.user_id
+        WHERE upper(u.uhid)=$1 AND u.role='patient' AND u.password IS NULL
+          AND c.used_at IS NULL AND c.expires_at > now()
+        ORDER BY c.created_at DESC LIMIT 1`, [uhid]);
+    const c = rows[0];
+    if (!c || c.attempts >= 5) return res.status(400).json({ error: CLAIM_GENERIC });
+    if (!(await bcrypt.compare(code, c.code_hash))) {
+      await pool.query("UPDATE patient_claims SET attempts = attempts + 1 WHERE id=$1", [c.id]);
+      return res.status(400).json({ error: CLAIM_GENERIC });
+    }
+    if (c.otp_sent_at && Date.now() - new Date(c.otp_sent_at).getTime() < 60000)
+      return res.status(429).json({ error: "Please wait a minute before asking for another OTP." });
+    if (c.otp_sent_count >= 5)
+      return res.status(429).json({ error: "Too many OTP requests. Ask the hospital desk for a new claim code." });
+    const otp = generateOTP();
+    await pool.query(
+      "UPDATE patient_claims SET otp_hash=$1, otp_expires_at = now() + interval '10 minutes', otp_attempts=0, otp_sent_at=now(), otp_sent_count = otp_sent_count + 1 WHERE id=$2",
+      [hashClaimOtp(c.id, otp), c.id]);
+    await sendOTP(c.phone, otp);
+    return res.json({ success: true, claimId: c.id, phoneHint: "******" + String(c.phone).slice(-2) });
+  } catch (err) {
+    console.error("[auth claim start]", err.message);
+    return res.status(500).json({ error: "Could not start the claim. Please try again." });
+  }
+});
+
+router.post("/patient/claim/finish", async (req, res) => {
+  try {
+    const claimId = String(req.body.claimId || "");
+    const otp = String(req.body.otp || "").trim();
+    const password = String(req.body.password || "");
+    if (password.length < 6) return res.status(400).json({ error: "Password must be at least 6 chars" });
+    if (!claimId || !/^\d{6}$/.test(otp)) return res.status(400).json({ error: "Enter the 6-digit OTP." });
+    const { rows } = await pool.query("SELECT * FROM patient_claims WHERE id=$1 AND used_at IS NULL AND expires_at > now()", [claimId]);
+    const c = rows[0];
+    if (!c || !c.otp_hash || !c.otp_expires_at || new Date(c.otp_expires_at) < new Date())
+      return res.status(400).json({ error: "OTP expired. Start again with your UHID and claim code." });
+    if (c.otp_attempts >= 5) return res.status(429).json({ error: "Too many wrong OTP attempts. Start again to get a new OTP." });
+    if (hashClaimOtp(c.id, otp) !== c.otp_hash) {
+      await pool.query("UPDATE patient_claims SET otp_attempts = otp_attempts + 1 WHERE id=$1", [c.id]);
+      return res.status(400).json({ error: "Incorrect OTP." });
+    }
+    const hash = await bcrypt.hash(password, 10);
+    const client = await pool.connect();
+    let user = null;
+    try {
+      await client.query("BEGIN");
+      const up = await client.query(
+        "UPDATE users SET password=$1, phone=$2, phone_verified=1, password_set=1 WHERE id=$3 AND password IS NULL RETURNING *",
+        [hash, c.phone, c.user_id]);
+      if (!up.rows.length) { await client.query("ROLLBACK"); return res.status(400).json({ error: CLAIM_GENERIC }); }
+      user = up.rows[0];
+      await client.query("UPDATE patient_claims SET used_at=now(), otp_hash=NULL, code_hash='' WHERE id=$1", [c.id]);
+      await client.query("COMMIT");
+    } catch (e) { try { await client.query("ROLLBACK"); } catch (_) {} throw e; }
+    finally { client.release(); }
+    return res.json({
+      token: sign({ id: user.id, email: user.email, name: user.name, role: "patient", uhid: user.uhid }),
+      user: { id: user.id, email: user.email, name: user.name, role: "patient", uhid: user.uhid },
+    });
+  } catch (err) {
+    console.error("[auth claim finish]", err.message);
+    return res.status(500).json({ error: "Could not finish the claim. Please try again." });
+  }
+});
+
 module.exports = router;
 
 // ── Logout (blacklist token) ──────────────────────────────────────────────────

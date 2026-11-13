@@ -375,6 +375,32 @@ router.post("/walkin", fo, async (req, res) => {
   } finally { client.release(); }
 });
 
+// ---- claim code: lets a desk-registered patient open their own login ----
+router.post("/claim-code", fo, async (req, res) => {
+  try {
+    await ready;
+    const hid = req.user.hospitalId;
+    const uhid = String((req.body || {}).uhid || "").trim().toUpperCase();
+    const rawPhone = String((req.body || {}).phone || "").replace(/\D/g, "").slice(-10);
+    if (!/^DB\d{2,}$/.test(uhid)) return res.status(400).json({ error: "Enter a valid UHID" });
+    if (rawPhone.length !== 10) return res.status(400).json({ error: "Enter the patient's 10-digit phone number" });
+    const { rows } = await pool.query("SELECT id, name FROM users WHERE role='patient' AND upper(uhid)=$1 AND walkin_hospital_id=$2 AND password IS NULL", [uhid, hid]);
+    if (!rows.length) return res.status(404).json({ error: "No unclaimed patient from this hospital has that UHID." });
+    const crypto = require("crypto");
+    const alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+    const code = Array.from({ length: 8 }, () => alphabet[crypto.randomInt(alphabet.length)]).join("");
+    const hash = await require("bcrypt").hash(code, 10);
+    const phone = require("../services/sms").normalisePhone(rawPhone);
+    await pool.query("DELETE FROM patient_claims WHERE user_id=$1 AND used_at IS NULL", [rows[0].id]);
+    const id = "clm_" + randomBytes(8).toString("hex");
+    const ins = await pool.query(
+      "INSERT INTO patient_claims (id, user_id, hospital_id, phone, code_hash, expires_at, created_by) VALUES ($1,$2,$3,$4,$5, now() + interval '7 days', $6) RETURNING expires_at",
+      [id, rows[0].id, hid, phone, hash, req.user.frontOfficeStaffId || req.user.id || null]);
+    res.set("Cache-Control", "no-store");
+    res.json({ uhid, patientName: rows[0].name, code: code.slice(0, 4) + "-" + code.slice(4), expiresAt: ins.rows[0].expires_at });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ---- vitals (optional, after check-in) ----
 const num = (v, lo, hi) => { if (v === undefined || v === null || v === "") return null; const n = Number(v); return Number.isFinite(n) && n >= lo && n <= hi ? n : NaN; };
 router.post("/bookings/:bid/vitals", fo, async (req, res) => {
