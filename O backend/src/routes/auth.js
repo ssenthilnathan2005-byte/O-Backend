@@ -195,7 +195,7 @@ router.post(
 router.post(
   "/patient/login",
   [
-    body("password").notEmpty().withMessage("Password is required"),
+    body("password").optional(),
     body("email").optional().trim(),
     body("identifier").optional().trim(),
     body().custom((v) => {
@@ -247,7 +247,7 @@ router.post(
         return res.status(401).json({ error: "No account found with this email or phone number." });
       }
       if (!user.password) {
-        return res.status(401).json({ error: "This account has no password yet. Use the claim code from your hospital slip, or the sign-in method you registered with." });
+        return res.json({ needsPassword: true, uhid: user.uhid });
       }
       const tCompareStart = Date.now();
       const ok = await bcrypt.compare(password, user.password);
@@ -743,6 +743,29 @@ router.post(
 );
 
 // ── Reset Password via signed token link ─────────────────────────────────────
+router.post("/patient/setup-password",
+  [body("uhid").trim().notEmpty(), body("password").notEmpty()],
+  async (req, res) => {
+    if (!validate(req, res)) return;
+    const uhid = String(req.body.uhid).trim().toUpperCase();
+    const password = String(req.body.password);
+    if (password.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+    try {
+      const { rows } = await pool.query("SELECT * FROM users WHERE uhid=$1 AND role='patient'", [uhid]);
+      const user = rows[0];
+      if (!user) return res.status(404).json({ error: "Patient not found" });
+      if (user.password) return res.status(409).json({ error: "This account already has a password. Use login instead." });
+      const hash = await bcrypt.hash(password, 10);
+      await pool.query("UPDATE users SET password=$1 WHERE id=$2", [hash, user.id]);
+      const token = jwt.sign({ id: user.id, role: "patient" }, process.env.JWT_SECRET, { expiresIn: "30d" });
+      return res.json({ token, user: { id: user.id, name: user.name, uhid: user.uhid } });
+    } catch (err) {
+      console.error("[auth patient/setup-password]", err.message);
+      return res.status(500).json({ error: "Server error" });
+    }
+  }
+);
+
 router.post("/patient/reset-password-by-token", async (req, res) => {
   try {
     const { token, newPassword } = req.body;
