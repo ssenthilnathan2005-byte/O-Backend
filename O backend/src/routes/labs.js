@@ -190,7 +190,7 @@ router.post("/bookings", async (req, res) => {
   try {
     const {
       patientName, phone, labId, testId, slotDate, slotTime,
-      collectionType = "home", address, notes,
+      collectionType = "home", address, notes, patientGender,
     } = req.body;
 
     if (!patientName || !phone || !labId || !testId || !slotDate || !slotTime) {
@@ -242,9 +242,9 @@ router.post("/bookings", async (req, res) => {
       const tokenNumber = tk[0].n;
       await client.query(
         `INSERT INTO lab_bookings
-          (id, patient_id, patient_name, phone, lab_id, test_id, slot_date, slot_time, collection_type, address, price, notes, token_number)
-         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-        [id, patientId, patientName, phone, labId, testId, slotDate, slotTime, collectionType, address || null, price, notes || null, tokenNumber]
+          (id, patient_id, patient_name, phone, lab_id, test_id, slot_date, slot_time, collection_type, address, price, notes, token_number, patient_gender)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+        [id, patientId, patientName, phone, labId, testId, slotDate, slotTime, collectionType, address || null, price, notes || null, tokenNumber, ["Male", "Female", "Other"].includes(patientGender) ? patientGender : null]
       );
       await client.query(
         "INSERT INTO lab_test_sessions (session_id, lab_id, test_id, date) VALUES ($1,$2,$3,$4) ON CONFLICT (session_id) DO NOTHING",

@@ -140,7 +140,7 @@ router.get("/today", fo, async (req, res) => {
     const q = String(req.query.date || "");
     const date = /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : todayIST();
     const { rows } = await pool.query(
-      "SELECT b.id, b.patient_name, b.patient_age, b.patient_area, b.phone, b.complaint, b.doctor_id, b.doctor_name, b.date, b.session, b.token_number, b.payment_done, b.status, b.booking_source, b.checked_in_at, b.vitals, b.vitals_at, b.fee_amount, b.fee_mode, b.fee_paid_at, d.doctor_fee, (SELECT pr.status FROM prescriptions pr WHERE pr.booking_id=b.id ORDER BY pr.created_at DESC LIMIT 1) AS rx_status " +
+      "SELECT b.id, b.patient_name, b.patient_age, b.patient_area, b.patient_gender, b.patient_blood_group, b.phone, b.complaint, b.doctor_id, b.doctor_name, b.date, b.session, b.token_number, b.payment_done, b.status, b.booking_source, b.checked_in_at, b.vitals, b.vitals_at, b.fee_amount, b.fee_mode, b.fee_paid_at, d.doctor_fee, (SELECT pr.status FROM prescriptions pr WHERE pr.booking_id=b.id ORDER BY pr.created_at DESC LIMIT 1) AS rx_status " +
       "FROM bookings b JOIN doctors d ON d.id=b.doctor_id WHERE d.hospital_id=$1 AND b.date=$2 AND b.status<>'cancelled' AND b.archived = FALSE " +
       "ORDER BY CASE b.session WHEN 'morning' THEN 0 WHEN 'afternoon' THEN 1 ELSE 2 END, b.doctor_name ASC, b.token_number ASC",
       [req.user.hospitalId, date]);
@@ -305,8 +305,8 @@ router.post("/walkin", fo, async (req, res) => {
     const bookingId = "b_" + Date.now() + "_" + Math.random().toString(36).slice(2, 7);
 
     await client.query(
-      "INSERT INTO bookings (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, patient_area, rate_per_token, booking_source) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,$15,'front_desk')",
-      [bookingId, patientId, name, doctor.id, doctor.name, hospital ? hospital.name : "Unknown", date, session, token, sessionId, phone, String(b.complaint || ""), age, b.patientArea || null, hospital ? hospital.rate_per_token : null]);
+      "INSERT INTO bookings (id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, patient_area, rate_per_token, booking_source, patient_gender, patient_blood_group) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,1,'confirmed',$11,$12,$13,$14,$15,'front_desk',$16,$17)",
+      [bookingId, patientId, name, doctor.id, doctor.name, hospital ? hospital.name : "Unknown", date, session, token, sessionId, phone, String(b.complaint || ""), age, b.patientArea || null, hospital ? hospital.rate_per_token : null, ["Male", "Female", "Other"].includes(b.patientGender) ? b.patientGender : null, b.patientBloodGroup || null]);
 
     const ts = await client.query("SELECT token_statuses FROM token_states WHERE session_id=$1", [sessionId]);
     if (ts.rows.length) {

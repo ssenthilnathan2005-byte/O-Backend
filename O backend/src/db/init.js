@@ -397,6 +397,7 @@ const MIGRATIONS = [
   "CREATE INDEX IF NOT EXISTS idx_lab_bookings_status ON lab_bookings(status)",
   "CREATE INDEX IF NOT EXISTS idx_lab_test_offerings_lab ON lab_test_offerings(lab_id)",
   "ALTER TABLE lab_bookings ADD COLUMN IF NOT EXISTS token_number INTEGER",
+  "ALTER TABLE lab_bookings ADD COLUMN IF NOT EXISTS patient_gender TEXT",
   "ALTER TABLE lab_bookings ADD COLUMN IF NOT EXISTS late_flag BOOLEAN NOT NULL DEFAULT FALSE",
   "ALTER TABLE lab_bookings ADD COLUMN IF NOT EXISTS late_eta_minutes INTEGER",
   "ALTER TABLE lab_bookings ADD COLUMN IF NOT EXISTS late_marked_at TIMESTAMPTZ",
