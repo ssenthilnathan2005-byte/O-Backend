@@ -247,7 +247,12 @@ router.post(
         return res.status(401).json({ error: "No account found with this email or phone number." });
       }
       if (!user.password) {
-        return res.json({ needsPassword: true, uhid: user.uhid });
+        return res.json({
+          needsPassword: true,
+          uhid: user.uhid,
+          name: user.name ? String(user.name).trim().split(/\s+/)[0] : "",
+          phoneHint: user.phone ? "XXXXXX" + String(user.phone).slice(-4) : ""
+        });
       }
       const tCompareStart = Date.now();
       const ok = await bcrypt.compare(password, user.password);
