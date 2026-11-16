@@ -155,6 +155,11 @@ router.get("/", async (req, res) => {
         out.push({ type, role: t.label, id: r.id, name: r.name, loginId: r.login_code,
           status: r.first_login === 1 ? "Pending first login" : "Active" });
     }
+    // Forget the encrypted password of any account that is no longer live (deleted / archived / inactive in HR).
+    const keys = out.map(u => u.type + ":" + u.id);
+    await pool.query(
+      "DELETE FROM password_vault WHERE hospital_id=$1 AND NOT ((login_type || ':' || login_id) = ANY($2::text[]))",
+      [hid, keys]).catch(e => console.warn("[password-mgmt] vault cleanup:", e.message));
     res.json({ vaultEnabled: !!KEY, users: out });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
