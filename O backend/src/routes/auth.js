@@ -1,4 +1,5 @@
 "use strict";
+const { logAccess } = require("../services/audit");
 
 const express = require("express");
 const bcrypt = require("bcrypt");
@@ -538,6 +539,7 @@ router.post(
         role: "doctor",
       };
 
+      logAccess(req, { action: "login.doctor", resourceType: "doctor", resourceId: String(doctor.id) });
       return res.json({ token: sign(payload), user: payload });
     } catch (err) {
       console.error("[auth doctor/login]", err.message);
@@ -588,6 +590,7 @@ router.post(
       }
 
       const payload = pharmacyPayload(staff);
+      logAccess(req, { action: "login.pharmacy", resourceType: "pharmacy_staff", resourceId: String(staff.id) });
       return res.json({ token: sign(payload), user: payload });
     } catch (err) {
       console.error("[auth pharmacy/login]", err.message);
@@ -643,6 +646,7 @@ router.post(
       const ADMIN_PW = process.env.ADMIN_PASSWORD || "";
       if (ADMIN_PW && password === ADMIN_PW) {
         const payload = { id: "admin_1", role: "admin" };
+        logAccess(req, { action: "login.admin", resourceType: "user", resourceId: "admin_1" });
         return res.json({ token: sign(payload), user: payload });
       }
 
@@ -677,6 +681,7 @@ router.post(
         return res.status(401).json({ error: "Invalid CTO credentials" });
       }
       const payload = { id: "cto_1", role: "cto" };
+      logAccess(req, { action: "login.cto", resourceType: "user", resourceId: "cto_1" });
       return res.json({ token: sign(payload), user: payload });
     } catch (err) {
       console.error("[auth cto/login]", err.message);
@@ -894,6 +899,7 @@ router.post("/hospital/login", async (req, res) => {
     if (!ok) return res.status(401).json({ error: "Incorrect password" });
 
     const payload = { id: user.id, role: "hospital_admin", hospitalId: hospital.id, hospitalName: hospital.name };
+    logAccess(req, { action: "login.hospital_admin", resourceType: "hospital", resourceId: String(hospital.id) });
     return res.json({ token: sign(payload), user: payload });
   } catch (err) {
     console.error("[auth hospital/login]", err.message);
