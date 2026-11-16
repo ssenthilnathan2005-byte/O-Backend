@@ -1,4 +1,5 @@
 "use strict";
+const { logAccess } = require("../services/audit");
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
@@ -134,6 +135,7 @@ router.post("/", requireAuth, adminOnly, async (req, res) => {
        employeeId||null, address||null, dateOfBirth||null, idProofNumber||null, bloodGroup||null,
        emergencyContactName||null, emergencyContactPhone||null]
     );
+    logAccess(req, { action: "hr.staff_created", resourceType: "staff", resourceId: String(rows[0].id) });
     res.status(201).json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -164,6 +166,7 @@ router.patch("/:id", requireAuth, adminOnly, async (req, res) => {
     );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
     if (isActive !== undefined && rows[0].removed_at == null) await syncLogin(pool, rows[0].login_type, rows[0].login_id, rows[0].is_active === 1);
+    logAccess(req, { action: "hr.staff_updated", resourceType: "staff", resourceId: req.params.id });
     res.json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -175,6 +178,7 @@ router.delete("/:id", requireAuth, adminOnly, async (req, res) => {
     if (_lr) await syncLogin(pool, _lr.login_type, _lr.login_id, false);
     await pool.query(`UPDATE hospital_staff SET is_active=0, removed_at=now() WHERE id=$1 AND hospital_id=$2 AND login_id IS NOT NULL`, [req.params.id, hospitalId]);
     await pool.query(`DELETE FROM hospital_staff WHERE id=$1 AND hospital_id=$2 AND login_id IS NULL`, [req.params.id, hospitalId]);
+    logAccess(req, { action: "hr.staff_deleted", resourceType: "staff", resourceId: req.params.id });
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

@@ -1,4 +1,5 @@
 "use strict";
+const { logAccess } = require("../services/audit");
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
@@ -74,6 +75,7 @@ router.post("/tests", requireAuth, adminOnly, async (req, res) => {
       `INSERT INTO hospital_lab_tests (id, hospital_id, name, category, sample_type, report_hours, price)
        VALUES ($1,$2,$3,$4,$5,$6,$7) RETURNING *`,
       [id, hospitalId, name, category||"general", sampleType||"blood", reportHours||24, price||0]);
+    logAccess(req, { action: "lab.test_created", resourceType: "lab_test", resourceId: String(rows[0].id) });
     res.status(201).json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -111,6 +113,7 @@ router.post("/orders", requireAuth, requirePerm("lab"), async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
       [id, hospitalId, patientName, patientId||null, doctorId||null, doctorName||null,
        bookingId||null, testId, testName, priority||"normal", notes||null]);
+    logAccess(req, { action: "lab.order_created", resourceType: "lab_order", resourceId: String(rows[0].id) });
     res.status(201).json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

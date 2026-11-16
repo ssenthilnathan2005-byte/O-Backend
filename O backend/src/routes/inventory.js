@@ -1,4 +1,5 @@
 "use strict";
+const { logAccess } = require("../services/audit");
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
@@ -80,6 +81,7 @@ router.post("/", requireAuth, adminOnly, async (req, res) => {
       await pool.query("UPDATE inventory_items SET pack_size=$1 WHERE id=$2", [ps, id]);
       rows[0].pack_size = ps;
     }
+    logAccess(req, { action: "inventory.item_created", resourceType: "inventory_item", resourceId: String(rows[0].id) });
     res.status(201).json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
@@ -117,6 +119,7 @@ router.patch("/:id", requireAuth, adminOnly, async (req, res) => {
        req.params.id, hospitalId]
     );
     if (!rows.length) return res.status(404).json({ error: "Not found" });
+    logAccess(req, { action: "inventory.item_updated", resourceType: "inventory_item", resourceId: req.params.id });
     res.json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

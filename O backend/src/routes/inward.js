@@ -1,4 +1,5 @@
 "use strict";
+const { logAccess } = require("../services/audit");
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
@@ -261,6 +262,7 @@ router.patch("/:id/discharge", requireAuth, requirePerm("ipd"), async (req, res)
         data: { tag: "bed-booking", link: "/patient/admission" },
       }).catch(() => {});
     }
+    logAccess(req, { action: "ipd.discharged", resourceType: "inward", resourceId: req.params.id });
     res.json(rows[0]);
   } catch (err) {
     await client.query("ROLLBACK").catch(() => {});

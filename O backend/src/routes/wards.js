@@ -1,4 +1,5 @@
 "use strict";
+const { logAccess } = require("../services/audit");
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
@@ -362,6 +363,7 @@ router.patch("/:wardId/beds/:bedId/vacate", requireAuth, requirePerm("beds_wards
     );
 
     await client.query("COMMIT");
+    logAccess(req, { action: "ward.bed_occupied", resourceType: "bed", resourceId: req.params.bedId });
     res.json(updated[0]);
   } catch (err) {
     await client.query("ROLLBACK");
