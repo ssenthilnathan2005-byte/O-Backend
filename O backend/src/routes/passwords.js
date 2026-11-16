@@ -218,3 +218,4 @@ router.post("/:type/:id/change", async (req, res) => {
 module.exports = router;
 // Shared with the doctor self-service route so both write the same encrypted copy.
 module.exports.vaultSave = vaultSave;
+module.exports.vaultGet = vaultGet;

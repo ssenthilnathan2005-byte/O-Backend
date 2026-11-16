@@ -7,7 +7,7 @@ const express = require("express");
 const bcrypt = require("bcrypt");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
-const { vaultSave } = require("./passwords");
+const { vaultSave, vaultGet } = require("./passwords");
 
 const router = express.Router();
 
@@ -57,6 +57,28 @@ router.post("/password", async (req, res) => {
   } catch (err) {
     console.error("[doctor-account password]", err.message);
     res.status(500).json({ error: "Could not change password. Please try again." });
+  }
+});
+
+// Doctor taps "Show" on their own profile: returns their own current password (from the encrypted copy).
+router.post("/password/show", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
+  try {
+    const id = req.user.doctorId;
+    const d = (await pool.query("SELECT id, hospital_id, code, password, phone, is_active FROM doctors WHERE id=$1", [id])).rows[0];
+    if (!d || d.is_active === 0) return res.status(404).json({ error: "Doctor account not found" });
+    const stored = String(d.password || "").trim();
+    let pw = null;
+    if (!stored) pw = String(d.phone || "").trim() || null;          // no password set: phone number is the password
+    else if (!stored.startsWith("$2")) pw = stored;                    // old plain value
+    else pw = await vaultGet("doctor", d.id, d.hospital_id);           // bcrypt hash: read the encrypted copy
+    if (!pw) return res.status(404).json({ error: "Can't be shown yet. Use Change Password once, then it can be shown." });
+    pool.query("INSERT INTO password_audit (hospital_id, actor_id, login_type, login_id, action) VALUES ($1,$2,'doctor',$3,'self-show')",
+      [d.hospital_id, "doc_" + d.code, d.id]).catch(() => {});
+    res.json({ password: pw });
+  } catch (err) {
+    console.error("[doctor-account show]", err.message);
+    res.status(500).json({ error: "Could not show password. Please try again." });
   }
 });
 
