@@ -1,7 +1,6 @@
 "use strict";
 // Hospital Admin → Password Management
-// One place for the hospital admin to list every login of THEIR hospital and
-// Show / Change / Reset passwords.
+// Lists every ACTIVE login of THEIR hospital and lets the admin Show / Change passwords.
 //
 // Login keeps using the existing bcrypt hashes. A separate AES-256-GCM encrypted
 // copy is kept in password_vault so "Show Current Password" can work.
@@ -83,7 +82,7 @@ const audit = (req, type, id, action) =>
     [req.user.hospitalId, req.user.id || null, type, id, action]).catch(() => {});
 
 // ── Role definitions ────────────────────────────────────────────────────────
-// first: value of first_login to set after an admin change/reset (null = column does not exist)
+// first: value of first_login to set after an admin change (null = column does not exist)
 const TABLES = {
   doctor:       { label: "Doctor",       table: "doctors",            code: "code",       first: null },
   nurse:        { label: "Nurse",        table: "nurses",             code: "nurse_code", first: 1 },
@@ -92,11 +91,25 @@ const TABLES = {
   pharmacy:     { label: "Pharmacy",     table: "pharmacy_staff",     code: "code",       first: 0 },
 };
 const ADMIN_LABEL = "Hospital Admin";
-const PW_CHARS = "ABCDEFGHJKMNPQRSTUVWXYZabcdefghjkmnpqrstuvwxyz23456789";
-const tempPassword = (n = 10) => Array.from({ length: n }, () => PW_CHARS[crypto.randomInt(PW_CHARS.length)]).join("");
 
 async function ensureAdminOf(hospitalId, userId) {
   const { rows } = await pool.query("SELECT 1 FROM hospitals WHERE id=$1 AND admin_user_id=$2", [hospitalId, userId]);
+  return !!rows[0];
+}
+
+// An account is "live" only if it is active, not archived (~ code) and HR has not removed or deactivated it.
+// Evaluated against the database on every request - nothing is cached.
+function liveSql(type, alias) {
+  const t = TABLES[type];
+  return `COALESCE(${alias}.is_active,1)=1 AND ${alias}.${t.code} NOT LIKE '%~%' AND NOT EXISTS (
+    SELECT 1 FROM hospital_staff hs WHERE hs.login_type='${type}' AND hs.login_id=${alias}.id
+      AND (hs.removed_at IS NOT NULL OR COALESCE(hs.is_active,1)=0))`;
+}
+async function isLive(type, id, hospitalId) {
+  if (type === "hospital_admin") return ensureAdminOf(hospitalId, id);
+  if (!TABLES[type]) return false;
+  const t = TABLES[type];
+  const { rows } = await pool.query(`SELECT 1 FROM ${t.table} x WHERE x.id=$1 AND x.hospital_id=$2 AND ${liveSql(type, "x")}`, [id, hospitalId]);
   return !!rows[0];
 }
 
@@ -123,6 +136,7 @@ async function applyPassword(type, id, hospitalId, plain) {
 
 // ── GET / : every login of this hospital ────────────────────────────────────
 router.get("/", async (req, res) => {
+  res.setHeader("Cache-Control", "no-store");
   try {
     const hid = req.user.hospitalId;
     const out = [];
@@ -135,11 +149,11 @@ router.get("/", async (req, res) => {
 
     for (const [type, t] of Object.entries(TABLES)) {
       const { rows } = await pool.query(
-        `SELECT id, name, ${t.code} AS login_code, is_active, ${t.first === null ? "NULL::int" : "first_login"} AS first_login
-           FROM ${t.table} WHERE hospital_id=$1 AND ${t.code} NOT LIKE '%~%' ORDER BY name ASC`, [hid]);
+        `SELECT x.id, x.name, x.${t.code} AS login_code, ${t.first === null ? "NULL::int" : "x.first_login"} AS first_login
+           FROM ${t.table} x WHERE x.hospital_id=$1 AND ${liveSql(type, "x")} ORDER BY x.name ASC`, [hid]);
       for (const r of rows)
         out.push({ type, role: t.label, id: r.id, name: r.name, loginId: r.login_code,
-          status: r.is_active === 0 ? "Inactive" : (r.first_login === 1 ? "Pending first login" : "Active") });
+          status: r.first_login === 1 ? "Pending first login" : "Active" });
     }
     res.json({ vaultEnabled: !!KEY, users: out });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -154,6 +168,8 @@ router.post("/:type/:id/show", async (req, res) => {
     if (!adminPw) return res.status(400).json({ error: "Enter your own admin password to view this" });
     const me = (await pool.query("SELECT password FROM users WHERE id=$1", [req.user.id])).rows[0];
     if (!me || !(await bcrypt.compare(adminPw, me.password || ""))) return res.status(401).json({ error: "Your admin password is incorrect" });
+
+    if (!(await isLive(type, id, hid))) return res.status(404).json({ error: "This account no longer exists or is inactive" });
 
     let note = null;
     if (type === "doctor") {
@@ -173,7 +189,7 @@ router.post("/:type/:id/show", async (req, res) => {
 
     if (!KEY) return res.status(503).json({ error: "Password vault is not configured on the server (PASSWORD_VAULT_KEY)" });
     const pw = await vaultGet(type, id, hid);
-    if (!pw) return res.status(404).json({ error: "Not available yet. This password was set before Password Management existed - use Reset or Change once, then it can be shown." });
+    if (!pw) return res.status(404).json({ error: "Not available yet. This password was set before Password Management existed - use Change once, then it can be shown." });
     await audit(req, type, id, "show");
     res.json({ password: pw, note });
   } catch (err) { res.status(500).json({ error: err.message }); }
@@ -184,21 +200,12 @@ router.post("/:type/:id/change", async (req, res) => {
   try {
     const pw = String((req.body || {}).password || "").trim();
     if (pw.length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
+    if (!(await isLive(req.params.type, req.params.id, req.user.hospitalId)))
+      return res.status(404).json({ error: "This account no longer exists or is inactive" });
     const ok = await applyPassword(req.params.type, req.params.id, req.user.hospitalId, pw);
     if (!ok) return res.status(404).json({ error: "User not found" });
     await audit(req, req.params.type, req.params.id, "change");
     res.json({ success: true });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// ── POST /:type/:id/reset : server makes a temporary password ───────────────
-router.post("/:type/:id/reset", async (req, res) => {
-  try {
-    const pw = tempPassword(10);
-    const ok = await applyPassword(req.params.type, req.params.id, req.user.hospitalId, pw);
-    if (!ok) return res.status(404).json({ error: "User not found" });
-    await audit(req, req.params.type, req.params.id, "reset");
-    res.json({ success: true, tempPassword: pw });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
