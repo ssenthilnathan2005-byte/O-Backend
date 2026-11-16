@@ -87,7 +87,7 @@ function row2doctor(r) {
   return {
     id: r.id, hospitalId: r.hospital_id, code: r.code,
     name: r.name, specialty: r.specialty,
-    phone: r.phone || "", contactPhone: r.phone || "", password: r.password || "",
+    phone: r.phone || "", contactPhone: r.phone || "", password: String(r.password || "").startsWith("$2") ? "" : (r.password || ""),
     bio: r.bio || "", photo: r.photo || null,
     price: r.price, consultationFee: r.consultation_fee, doctorFee: r.doctor_fee ?? null,
     tokensPerSession: r.tokens_per_session,
@@ -252,6 +252,15 @@ router.patch("/:id", async (req, res, next) => {
       return res.status(403).json({ error: "Only admins can change doctor codes" });
     }
 
+    // Phone and login password are separate. Validate a phone the doctor typed.
+    const _typedPhone = String(contactPhone || phone || "").trim();
+    if (req.user.role === "doctor" && _typedPhone && (!/^\+?[0-9\s-]+$/.test(_typedPhone) || _typedPhone.replace(/\D/g, "").length < 10 || _typedPhone.replace(/\D/g, "").length > 15))
+      return res.status(400).json({ error: "Enter a valid phone number (10 to 15 digits)" });
+    // Older doctors who never set a password log in with their phone number. If such a doctor changes their phone,
+    // keep the old number as their password so the change does not silently alter how they log in.
+    if (req.user.role === "doctor" && _typedPhone && !String(row.password || "").trim() && String(row.phone || "").trim() && _typedPhone !== String(row.phone).trim()) {
+      await pool.query("UPDATE doctors SET password=$1 WHERE id=$2", [await require("bcrypt").hash(String(row.phone).trim(), 10), row.id]);
+    }
     // Never overwrite phone with empty string — phone is the login password
     const finalPhone = (contactPhone || phone || "").trim() || null;
     const finalCode = code === undefined ? null : cleanCode(code);

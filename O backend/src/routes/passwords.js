@@ -122,8 +122,9 @@ async function applyPassword(type, id, hospitalId, plain) {
     // first_login stays 0: the hospital-admin login skips the password check when first_login=1
     rowCount = (await pool.query("UPDATE users SET password=$1, first_login=0, password_set=1 WHERE id=$2", [hash, id])).rowCount;
   } else if (type === "doctor") {
-    // Doctor logins already store the password as typed (login accepts plain or bcrypt); keep that convention.
-    rowCount = (await pool.query("UPDATE doctors SET password=$1 WHERE id=$2 AND hospital_id=$3", [plain, id, hospitalId])).rowCount;
+    // Doctor login accepts bcrypt hashes as well as old plain values, so new passwords are stored hashed.
+    const hash = await bcrypt.hash(plain, 10);
+    rowCount = (await pool.query("UPDATE doctors SET password=$1 WHERE id=$2 AND hospital_id=$3", [hash, id, hospitalId])).rowCount;
   } else if (TABLES[type]) {
     const t = TABLES[type];
     const hash = await bcrypt.hash(plain, 10);
@@ -215,3 +216,5 @@ router.post("/:type/:id/change", async (req, res) => {
 });
 
 module.exports = router;
+// Shared with the doctor self-service route so both write the same encrypted copy.
+module.exports.vaultSave = vaultSave;
