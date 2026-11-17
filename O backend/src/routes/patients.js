@@ -64,6 +64,8 @@ router.patch("/profile", requireAuth, async (req, res) => {
     return res.json({ success: true });
   } catch (err) {
     console.error("[profile] patch error:", err.message);
+    if (err.code === "23505")
+      return res.status(409).json({ error: "This phone number is already used by another account. Use a different number." });
     return res.status(500).json({ error: "Failed to update profile" });
   }
 });
