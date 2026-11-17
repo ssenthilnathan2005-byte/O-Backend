@@ -215,7 +215,7 @@ async function findPatientByUhid(db, uhidRaw, phoneRaw, hid) {
 function patientView(r) {
   const accPhone = String(r.phone || "").replace(/\D/g, "").slice(-10);
   const age = r.year_of_birth ? new Date().getFullYear() - Number(r.year_of_birth) : (r.age !== null && r.age !== undefined && r.age !== "" ? Number(r.age) : null);
-  return { name: r.name, gender: r.gender || null, age, uhid: r.uhid, phone: accPhone || null };
+  return { name: r.name, gender: r.gender || null, age, uhid: r.uhid, phone: accPhone || null, area: r.area || null, blood_group: r.blood_group || null };
 }
 router.get("/patient-lookup", fo, async (req, res) => {
   try {
@@ -223,7 +223,7 @@ router.get("/patient-lookup", fo, async (req, res) => {
     const p = String(req.query.phone || "").replace(/\D/g, "").slice(-10);
     const hid = req.user.hospitalId;
     if (!u && p.length !== 10) return res.status(400).json({ error: "Enter a UHID or a 10-digit phone number" });
-    const cols = "id, name, phone, gender, age, year_of_birth, uhid, walkin_hospital_id";
+    const cols = "id, name, phone, gender, age, year_of_birth, uhid, walkin_hospital_id, area, blood_group";
     let rows = [];
     if (u) {
       if (u.length > 20) return res.json({ patients: [] });
