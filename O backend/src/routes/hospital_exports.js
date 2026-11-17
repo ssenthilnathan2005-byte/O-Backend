@@ -23,6 +23,7 @@ function row2booking(r) {
     sessionId: r.session_id, paymentDone: r.payment_done === 1, status: r.status,
     phone: r.phone || "", complaint: r.complaint || "", patientAge: r.patient_age ?? null,
     closeReason: r.close_reason || null,
+    uhid: r.uhid || null,
     createdAt: r.created_at,
   };
 }
@@ -32,7 +33,7 @@ router.get("/patients", requireAuth, requireAnyPerm("all_patients", "live_patien
     const hospitalId = resolveHospitalId(req);
     if (!hospitalId) return res.status(400).json({ error: "hospitalId is required" });
     const { rows } = await pool.query(
-      `SELECT b.* FROM bookings b
+      `SELECT b.*, (SELECT u.uhid FROM users u WHERE u.id = b.patient_id) AS uhid FROM bookings b
          JOIN doctors d ON d.id = b.doctor_id
         WHERE d.hospital_id = $1
         ORDER BY b.date DESC, b.session ASC, b.token_number ASC
@@ -51,7 +52,7 @@ router.get("/bookings", requireAuth, requireAnyPerm("all_patients", "live_patien
     const hospitalId = resolveHospitalId(req);
     if (!hospitalId) return res.status(400).json({ error: "hospitalId is required" });
     const { rows } = await pool.query(
-      `SELECT b.* FROM bookings b
+      `SELECT b.*, (SELECT u.uhid FROM users u WHERE u.id = b.patient_id) AS uhid FROM bookings b
          JOIN doctors d ON d.id = b.doctor_id
         WHERE d.hospital_id = $1
         ORDER BY b.date DESC, b.session ASC, b.token_number ASC

@@ -22,7 +22,8 @@ router.get("/", requireAuth, requirePerm("ipd"), async (req, res) => {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
     const { rows } = await pool.query(
-      `SELECT * FROM inward_patients WHERE hospital_id=$1 ORDER BY admitted_at DESC`,
+      `SELECT ip.*, (SELECT u.uhid FROM users u WHERE u.id = ip.patient_user_id) AS uhid
+         FROM inward_patients ip WHERE ip.hospital_id=$1 ORDER BY ip.admitted_at DESC`,
       [hospitalId]
     );
     res.json(rows);

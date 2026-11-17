@@ -47,6 +47,7 @@ function row2booking(r) {
     phone: r.phone || "", complaint: r.complaint || "", patientAge: r.patient_age ?? null, patientArea: r.patient_area ?? null,
     patientGender: r.patient_gender ?? null, patientBloodGroup: r.patient_blood_group ?? null,
     closeReason: r.close_reason || null,
+    uhid: r.uhid || null,
     lateFlag: r.late_flag === 1,
     lateEtaMinutes: r.late_eta_minutes ?? null,
     createdAt: r.created_at,
@@ -89,7 +90,8 @@ router.get("/", requireAuth, async (req, res) => {
       ({ rows } = await pool.query(
         `SELECT b.id, b.patient_id, b.patient_name, b.doctor_id, b.doctor_name, b.hospital_name,
                 b.date, b.session, b.token_number, b.session_id, b.payment_done, b.status,
-                b.phone, b.complaint, b.patient_age, b.close_reason, b.late_flag, b.late_eta_minutes, b.created_at
+                b.phone, b.complaint, b.patient_age, b.close_reason, b.late_flag, b.late_eta_minutes, b.created_at,
+                (SELECT u.uhid FROM users u WHERE u.id = b.patient_id) AS uhid
            FROM bookings b
            JOIN doctors d ON d.id = b.doctor_id
           WHERE d.hospital_id = $1
