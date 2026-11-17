@@ -38,8 +38,8 @@ function steps(orderBy) {
      END
      $do$`,
     `CREATE UNIQUE INDEX IF NOT EXISTS ux_users_uhid ON public.users (uhid) WHERE uhid IS NOT NULL`,
-    `CREATE UNIQUE INDEX IF NOT EXISTS ux_users_patient_phone ON public.users (phone)
-       WHERE role = 'patient' AND phone IS NOT NULL AND phone <> ''`,
+    `DROP INDEX IF EXISTS public.ux_users_patient_phone`,
+    `ALTER TABLE public.users ADD COLUMN IF NOT EXISTS phone_relation TEXT`,
     `CREATE UNIQUE INDEX IF NOT EXISTS ux_users_patient_email ON public.users (lower(email))
        WHERE role = 'patient' AND email IS NOT NULL AND email <> ''`,
     `ALTER TABLE public.users DROP CONSTRAINT IF EXISTS users_patient_has_uhid`,

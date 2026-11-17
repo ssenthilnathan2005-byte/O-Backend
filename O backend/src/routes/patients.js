@@ -52,6 +52,15 @@ router.patch("/profile", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Enter a valid 10-digit phone number" });
 
   try {
+    const { rows: others } = await pool.query(
+      "SELECT id, name, uhid FROM users WHERE phone=$1 AND role='patient' AND id<>$2",
+      [normalised, req.user.id]
+    );
+    const rel = typeof req.body.phoneRelation === "string" ? req.body.phoneRelation.trim() : "";
+    const RELATIONS = ["Spouse", "Child", "Parent", "Sibling", "Other family"];
+    if (others.length > 0 && !RELATIONS.includes(rel))
+      return res.status(409).json({ code: "PHONE_SHARED", error: "This phone number is already used by " + others.map(o => o.name + " (" + o.uhid + ")").join(", ") + ". Select how you are related.", relations: RELATIONS });
+    await pool.query("UPDATE users SET phone_relation=$1 WHERE id=$2", [others.length > 0 ? rel : null, req.user.id]);
     await pool.query(
       "UPDATE users SET name=$1, phone=$2, age=$3, year_of_birth=COALESCE($4, year_of_birth), area=COALESCE($6, area), blood_group=COALESCE($7, blood_group), gender=COALESCE($8, gender) WHERE id=$5",
       [name.trim(), normalised, calcAge, yob, req.user.id, areaVal, bgVal, genderVal]
