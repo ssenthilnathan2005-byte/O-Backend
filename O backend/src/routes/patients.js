@@ -25,6 +25,32 @@ function ensurePhoneReq() {
   if (!phoneReqReady) phoneReqReady = pool.query("CREATE TABLE IF NOT EXISTS phone_share_requests (id TEXT PRIMARY KEY, requester_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, phone TEXT NOT NULL, relation TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), decided_at TIMESTAMPTZ)");
   return phoneReqReady;
 }
+function famLabel(kind, gender, personIsOlder) {
+  const g = String(gender || "").toLowerCase();
+  const pick = (m, f) => g === "male" ? m : g === "female" ? f : "Other";
+  if (kind === "spouse") return "Spouse";
+  if (kind === "sibling") return pick("Brother", "Sister");
+  if (kind === "child") return personIsOlder ? pick("Father", "Mother") : pick("Son", "Daughter");
+  if (kind === "parent") return personIsOlder ? pick("Son", "Daughter") : pick("Father", "Mother");
+  return "Other";
+}
+async function linkFamily(requesterId, ownerId, relation) {
+  const { rows } = await pool.query("SELECT * FROM users WHERE id = ANY($1)", [[requesterId, ownerId]]);
+  const rq = rows.find(r => r.id === requesterId);
+  const ow = rows.find(r => r.id === ownerId);
+  if (!rq || !ow) return;
+  const kind = { Spouse: "spouse", Child: "child", Parent: "parent", Sibling: "sibling" }[relation] || "other";
+  const add = async (toUser, person, label) => {
+    const dup = await pool.query("SELECT 1 FROM family_members WHERE user_id=$1 AND lower(name)=lower($2) AND relation<>'Self' LIMIT 1", [toUser, person.name]);
+    if (dup.rows.length) return;
+    await pool.query("INSERT INTO family_members (id, user_id, relation, name, year_of_birth, gender, blood_group) VALUES ($1,$2,$3,$4,$5,$6,$7)",
+      ["fm_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8), toUser, label, person.name, person.year_of_birth || null, person.gender || null, person.blood_group || null]);
+  };
+  // Owner sees the requester; the requester is the "child/parent" the person selected.
+  await add(ownerId, rq, famLabel(kind, rq.gender, false));
+  // Requester sees the owner as the reverse relation.
+  await add(requesterId, ow, famLabel(kind, ow.gender, true));
+}
 router.get("/phone-requests", requireAuth, async (req, res) => {
   try {
     await ensurePhoneReq();
@@ -39,8 +65,9 @@ router.post("/phone-requests/:id/decide", requireAuth, async (req, res) => {
   try {
     await ensurePhoneReq();
     const approve = !!(req.body && req.body.approve === true);
-    const { rows } = await pool.query("UPDATE phone_share_requests SET status=$1, decided_at=now() WHERE id=$2 AND owner_id=$3 AND status='pending' RETURNING requester_id", [approve ? "approved" : "rejected", req.params.id, req.user.id]);
+    const { rows } = await pool.query("UPDATE phone_share_requests SET status=$1, decided_at=now() WHERE id=$2 AND owner_id=$3 AND status='pending' RETURNING requester_id, relation", [approve ? "approved" : "rejected", req.params.id, req.user.id]);
     if (!rows.length) return res.status(404).json({ error: "Request not found" });
+    if (approve) { try { await linkFamily(rows[0].requester_id, req.user.id, rows[0].relation); } catch (e) { console.error("[phone-requests] link family error:", e.message); } }
     sendPushToPatient(rows[0].requester_id, { title: approve ? "Phone number approved" : "Phone number request rejected", body: approve ? "You can now save your profile with this phone number." : "The owner did not approve this phone number.", data: { tag: "phone-request" } }).catch(() => {});
     return res.json({ success: true });
   } catch (err) {
