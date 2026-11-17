@@ -212,12 +212,32 @@ async function findPatientByUhid(db, uhidRaw, phoneRaw, hid) {
   const age = r.year_of_birth ? new Date().getFullYear() - Number(r.year_of_birth) : (r.age !== null && r.age !== undefined && r.age !== "" ? Number(r.age) : null);
   return { id: r.id, name: r.name, phone: accPhone || p || null, gender: r.gender || null, age, uhid: r.uhid };
 }
+function patientView(r) {
+  const accPhone = String(r.phone || "").replace(/\D/g, "").slice(-10);
+  const age = r.year_of_birth ? new Date().getFullYear() - Number(r.year_of_birth) : (r.age !== null && r.age !== undefined && r.age !== "" ? Number(r.age) : null);
+  return { name: r.name, gender: r.gender || null, age, uhid: r.uhid, phone: accPhone || null };
+}
 router.get("/patient-lookup", fo, async (req, res) => {
   try {
-    const acc = await findPatientByUhid(pool, req.query.uhid, req.query.phone, req.user.hospitalId);
-    if (!acc) return res.status(404).json({ error: "No patient found. Check the UHID and phone number." });
+    const u = String(req.query.uhid || "").trim().toUpperCase();
+    const p = String(req.query.phone || "").replace(/\D/g, "").slice(-10);
+    const hid = req.user.hospitalId;
+    if (!u && p.length !== 10) return res.status(400).json({ error: "Enter a UHID or a 10-digit phone number" });
+    const cols = "id, name, phone, gender, age, year_of_birth, uhid, walkin_hospital_id";
+    let rows = [];
+    if (u) {
+      if (u.length > 20) return res.json({ patients: [] });
+      const r = await pool.query("SELECT " + cols + " FROM users WHERE role='patient' AND upper(uhid)=$1", [u]);
+      rows = r.rows.filter(x => {
+        const ap = String(x.phone || "").replace(/\D/g, "").slice(-10);
+        return (p.length === 10 && ap === p) || (x.walkin_hospital_id && x.walkin_hospital_id === hid);
+      });
+    } else {
+      const r = await pool.query("SELECT " + cols + " FROM users WHERE role='patient' AND right(regexp_replace(coalesce(phone,''), '\\D', '', 'g'), 10)=$1 ORDER BY uhid LIMIT 20", [p]);
+      rows = r.rows;
+    }
     res.set("Cache-Control", "no-store");
-    res.json({ name: acc.name, gender: acc.gender, age: acc.age, uhid: acc.uhid });
+    res.json({ patients: rows.map(patientView) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 router.post("/admit", fo, async (req, res) => {
