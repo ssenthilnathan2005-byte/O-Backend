@@ -228,10 +228,7 @@ router.get("/patient-lookup", fo, async (req, res) => {
     if (u) {
       if (u.length > 20) return res.json({ patients: [] });
       const r = await pool.query("SELECT " + cols + " FROM users WHERE role='patient' AND upper(uhid)=$1", [u]);
-      rows = r.rows.filter(x => {
-        const ap = String(x.phone || "").replace(/\D/g, "").slice(-10);
-        return (p.length === 10 && ap === p) || (x.walkin_hospital_id && x.walkin_hospital_id === hid);
-      });
+      rows = r.rows;
     } else {
       const r = await pool.query("SELECT " + cols + " FROM users WHERE role='patient' AND right(regexp_replace(coalesce(phone,''), '\\D', '', 'g'), 10)=$1 ORDER BY uhid LIMIT 20", [p]);
       rows = r.rows;
