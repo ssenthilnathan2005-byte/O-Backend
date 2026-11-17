@@ -19,6 +19,35 @@ router.get("/", requireAdmin, async (req, res) => {
 
 
 // ── PATCH /api/patients/profile — save name, phone, age ──────────────────────
+const { sendPushToPatient } = require("../services/push");
+let phoneReqReady = null;
+function ensurePhoneReq() {
+  if (!phoneReqReady) phoneReqReady = pool.query("CREATE TABLE IF NOT EXISTS phone_share_requests (id TEXT PRIMARY KEY, requester_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, owner_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE, phone TEXT NOT NULL, relation TEXT, status TEXT NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT now(), decided_at TIMESTAMPTZ)");
+  return phoneReqReady;
+}
+router.get("/phone-requests", requireAuth, async (req, res) => {
+  try {
+    await ensurePhoneReq();
+    const { rows } = await pool.query("SELECT r.id, r.relation, r.created_at, u.name AS requester_name FROM phone_share_requests r JOIN users u ON u.id=r.requester_id WHERE r.owner_id=$1 AND r.status='pending' ORDER BY r.created_at DESC", [req.user.id]);
+    return res.json({ requests: rows });
+  } catch (err) {
+    console.error("[phone-requests] list error:", err.message);
+    return res.status(500).json({ error: "Failed to load requests" });
+  }
+});
+router.post("/phone-requests/:id/decide", requireAuth, async (req, res) => {
+  try {
+    await ensurePhoneReq();
+    const approve = !!(req.body && req.body.approve === true);
+    const { rows } = await pool.query("UPDATE phone_share_requests SET status=$1, decided_at=now() WHERE id=$2 AND owner_id=$3 AND status='pending' RETURNING requester_id", [approve ? "approved" : "rejected", req.params.id, req.user.id]);
+    if (!rows.length) return res.status(404).json({ error: "Request not found" });
+    sendPushToPatient(rows[0].requester_id, { title: approve ? "Phone number approved" : "Phone number request rejected", body: approve ? "You can now save your profile with this phone number." : "The owner did not approve this phone number.", data: { tag: "phone-request" } }).catch(() => {});
+    return res.json({ success: true });
+  } catch (err) {
+    console.error("[phone-requests] decide error:", err.message);
+    return res.status(500).json({ error: "Failed to save your answer" });
+  }
+});
 router.patch("/profile", requireAuth, async (req, res) => {
   if (req.user.role !== "patient")
     return res.status(403).json({ error: "Patients only" });
@@ -52,15 +81,32 @@ router.patch("/profile", requireAuth, async (req, res) => {
     return res.status(400).json({ error: "Enter a valid 10-digit phone number" });
 
   try {
+    const curRow = await pool.query("SELECT phone FROM users WHERE id=$1", [req.user.id]);
+    const unchanged = !!curRow.rows[0] && String(curRow.rows[0].phone || "").replace(/\D/g, "").slice(-10) === normalised;
     const { rows: others } = await pool.query(
       "SELECT id, name, uhid FROM users WHERE phone=$1 AND role='patient' AND id<>$2",
       [normalised, req.user.id]
     );
     const rel = typeof req.body.phoneRelation === "string" ? req.body.phoneRelation.trim() : "";
     const RELATIONS = ["Spouse", "Child", "Parent", "Sibling", "Other family"];
-    if (others.length > 0 && !RELATIONS.includes(rel))
-      return res.status(409).json({ code: "PHONE_SHARED", error: "This phone number is already used by " + others.map(o => o.name + " (" + o.uhid + ")").join(", ") + ". Select how you are related.", relations: RELATIONS });
-    await pool.query("UPDATE users SET phone_relation=$1 WHERE id=$2", [others.length > 0 ? rel : null, req.user.id]);
+    const shared = !unchanged && others.length > 0;
+    if (shared && !RELATIONS.includes(rel))
+      return res.status(409).json({ code: "PHONE_SHARED", error: "This phone number is already used by another account. Select how you are related. The owner will be asked to approve.", relations: RELATIONS });
+    if (shared) {
+      await ensurePhoneReq();
+      const ok = await pool.query("SELECT 1 FROM phone_share_requests WHERE requester_id=$1 AND phone=$2 AND status='approved' LIMIT 1", [req.user.id, normalised]);
+      if (!ok.rows.length) {
+        const pend = await pool.query("SELECT 1 FROM phone_share_requests WHERE requester_id=$1 AND phone=$2 AND status='pending' LIMIT 1", [req.user.id, normalised]);
+        if (!pend.rows.length) {
+          for (const o of others) {
+            await pool.query("INSERT INTO phone_share_requests (id, requester_id, owner_id, phone, relation) VALUES ($1,$2,$3,$4,$5)", ["psr_" + Date.now() + "_" + Math.random().toString(36).slice(2, 8), req.user.id, o.id, normalised, rel]);
+            sendPushToPatient(o.id, { title: "Phone number request", body: name.trim() + " wants to use your phone number on their account. Open the app to approve or reject.", data: { tag: "phone-request" } }).catch(() => {});
+          }
+        }
+        return res.status(409).json({ code: "PHONE_APPROVAL_PENDING", error: "Request sent to the owner of this number. You can save after they approve it in their app." });
+      }
+    }
+    if (!unchanged) await pool.query("UPDATE users SET phone_relation=$1 WHERE id=$2", [shared ? rel : null, req.user.id]);
     await pool.query(
       "UPDATE users SET name=$1, phone=$2, age=$3, year_of_birth=COALESCE($4, year_of_birth), area=COALESCE($6, area), blood_group=COALESCE($7, blood_group), gender=COALESCE($8, gender) WHERE id=$5",
       [name.trim(), normalised, calcAge, yob, req.user.id, areaVal, bgVal, genderVal]
