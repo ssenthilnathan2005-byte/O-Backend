@@ -138,6 +138,13 @@ router.patch("/profile", requireAuth, async (req, res) => {
       "UPDATE users SET name=$1, phone=$2, age=$3, year_of_birth=COALESCE($4, year_of_birth), area=COALESCE($6, area), blood_group=COALESCE($7, blood_group), gender=COALESCE($8, gender) WHERE id=$5",
       [name.trim(), normalised, calcAge, yob, req.user.id, areaVal, bgVal, genderVal]
     );
+    // Keep the "Self" family member in step with the profile
+    try {
+      await pool.query(
+        "UPDATE family_members f SET name=u.name, year_of_birth=CASE WHEN u.year_of_birth::text ~ '^[0-9]{4}$' THEN u.year_of_birth::text::int ELSE f.year_of_birth END, gender=COALESCE(NULLIF(u.gender,''), f.gender), blood_group=COALESCE(NULLIF(u.blood_group,''), f.blood_group) FROM users u WHERE u.id=$1 AND f.user_id=u.id AND f.relation='Self'",
+        [req.user.id]
+      );
+    } catch (e) { console.error("[profile] self sync error:", e.message); }
     // Also patch bookings so future queries pick up the right name
     await pool.query(
       "UPDATE bookings SET patient_name=$1, phone=$2 WHERE patient_id=$3",
