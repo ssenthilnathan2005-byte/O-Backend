@@ -358,7 +358,7 @@ router.post("/walkin", fo, async (req, res) => {
         if (sim.rows.length) throw bad(409, "A patient with this name and phone is already registered" + (sim.rows[0].uhid ? " (UHID " + sim.rows[0].uhid + ")" : "") + ". Register as a different person?");
       }
       patientId = "u_walkin_" + randomBytes(6).toString("hex");
-      await client.query("INSERT INTO users (id, name, role, walkin_hospital_id, age, gender) VALUES ($1,$2,'patient',$3,$4,$5)", [patientId, name, hid, age, ["Male", "Female", "Other"].includes(b.patientGender) ? b.patientGender : null]);
+      await client.query("INSERT INTO users (id, name, role, walkin_hospital_id, age, gender, phone) VALUES ($1,$2,'patient',$3,$4,$5,$6)", [patientId, name, hid, age, ["Male", "Female", "Other"].includes(b.patientGender) ? b.patientGender : null, phone]);
       const nu = await client.query("SELECT uhid FROM users WHERE id=$1", [patientId]);
       uhid = nu.rows[0] ? nu.rows[0].uhid : null;
     }
@@ -387,8 +387,9 @@ router.post("/walkin", fo, async (req, res) => {
     if (!b.uhid && phone && ["Spouse", "Child", "Parent", "Sibling", "Other family"].includes(b.phoneRelation)) {
       try {
         const { linkFamily } = require("./patients");
-        const ow = await pool.query("SELECT id FROM users WHERE role='patient' AND id<>$1 AND right(regexp_replace(coalesce(phone,''), '\\D', '', 'g'), 10)=$2", [patientId, phone]);
+        const ow = await pool.query("SELECT id FROM users WHERE role='patient' AND phone_relation IS NULL AND id<>$1 AND right(regexp_replace(coalesce(phone,''), '\\D', '', 'g'), 10)=$2", [patientId, phone]);
         for (const o of ow.rows) await linkFamily(patientId, o.id, b.phoneRelation);
+        await pool.query("UPDATE users SET phone_relation=$1 WHERE id=$2", [b.phoneRelation, patientId]);
       } catch (e) { console.error("[walkin] link family error:", e.message); }
     }
     try { broadcast(sessionId, { type: "token_booked", tokenNumber: token, sessionId }); } catch (_) {}
