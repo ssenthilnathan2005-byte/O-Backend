@@ -51,6 +51,7 @@ function row2booking(r) {
     lateFlag: r.late_flag === 1,
     lateEtaMinutes: r.late_eta_minutes ?? null,
     createdAt: r.created_at,
+    forUserId: r.for_user_id || null,
   };
 }
 
@@ -101,7 +102,7 @@ router.get("/", requireAuth, async (req, res) => {
       ));
     } else {
       ({ rows } = await pool.query(
-        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, patient_area, patient_gender, patient_blood_group, close_reason, late_flag, late_eta_minutes, created_at FROM bookings WHERE patient_id=$1 AND archived = FALSE ORDER BY created_at DESC",
+        "SELECT id, patient_id, patient_name, doctor_id, doctor_name, hospital_name, date, session, token_number, session_id, payment_done, status, phone, complaint, patient_age, patient_area, patient_gender, patient_blood_group, close_reason, late_flag, late_eta_minutes, created_at, for_user_id FROM bookings WHERE (patient_id=$1 OR for_user_id=$1) AND archived = FALSE ORDER BY created_at DESC",
         [req.user.id]
       ));
     }
@@ -216,6 +217,9 @@ router.post("/", requireAuth, async (req, res) => {
         ]
       );
 
+      if (req.body.familyMemberId) {
+        await client.query("UPDATE bookings SET for_user_id=(SELECT linked_user_id FROM family_members WHERE id=$1 AND user_id=$2 AND relation<>'Self') WHERE id=$3", [String(req.body.familyMemberId), req.user.id, id]);
+      }
       logAccess(req, { action: "booking.created", resourceType: "booking", resourceId: id, patientId: req.user.id });
       // Update or create token state
       const { rows: existingRows } = await client.query(
