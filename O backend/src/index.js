@@ -218,6 +218,7 @@ app.use("/api/front-office", require("./routes/front_office"));
 app.use("/api/permissions", require("./routes/permissions"));
 app.use("/api/password-management", require("./routes/passwords"));
 app.use("/api/doctor-account", require("./routes/doctor_password"));
+app.use("/api/staff-management", require("./routes/staff_management"));
 app.use("/api", require("./routes/maternity"));
 app.use("/api/enquiries", require("./routes/enquiries"));
 
