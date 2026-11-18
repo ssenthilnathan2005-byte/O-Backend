@@ -66,4 +66,12 @@ async function sendPushToPatient(patientId, { title, body, data = {} }) {
     console.error("[push] Send error:", err.message);
   }
 }
-module.exports = { sendPushToPatient };
+async function sendPushToBooking(booking, payload) {
+  if (!booking) return;
+  const ids = [booking.patient_id];
+  if (booking.for_user_id && booking.for_user_id !== booking.patient_id) ids.push(booking.for_user_id);
+  for (const id of ids) {
+    try { await sendPushToPatient(id, payload); } catch (_) {}
+  }
+}
+module.exports = { sendPushToPatient, sendPushToBooking };

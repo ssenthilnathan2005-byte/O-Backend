@@ -1,7 +1,7 @@
 "use strict";
 const { refundBooking } = require("./payments");
 const { sendTokenCalled } = require("../services/whatsapp");
-const { sendPushToPatient } = require("../services/push");
+const { sendPushToPatient, sendPushToBooking } = require("../services/push");
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireDoctorOrAdmin } = require("../middleware/auth");
@@ -144,7 +144,7 @@ router.post("/:sessionId/regulate", requireDoctorOrAdmin, async (req, res) => {
         const doc = docRows[0];
         const hosp = doc ? (await client.query("SELECT name FROM hospitals WHERE id=$1", [doc.hospital_id])).rows[0] : null;
         sendTokenCalled({ phone: booking.phone || booking.uphone, patientName: booking.patient_name, tokenNumber: clicked, doctorName: booking.doctor_name, hospitalName: hosp?.name || "" }).catch(() => {});
-        sendPushToPatient(booking.patient_id, { title: "Your turn has arrived!", body: "Token #" + clicked + " - Dr. " + booking.doctor_name + " is ready for you. Please come in now.", data: { tag: "token-orange" } }).catch(() => {});
+        sendPushToBooking(booking, { title: "Your turn has arrived!", body: "Token #" + clicked + " - Dr. " + booking.doctor_name + " is ready for you. Please come in now.", data: { tag: "token-orange" } }).catch(() => {});
       }
       if (nextRed !== null) {
         const { rows: nextBookingRows } = await client.query(
@@ -152,7 +152,7 @@ router.post("/:sessionId/regulate", requireDoctorOrAdmin, async (req, res) => {
           [req.params.sessionId, nextRed]
         );
         const nextBooking = nextBookingRows[0];
-        if (nextBooking) sendPushToPatient(nextBooking.patient_id, { title: "Get Ready!", body: "Token #" + nextRed + " - You are next. Dr. " + nextBooking.doctor_name + " will call you soon.", data: { tag: "token-yellow" } }).catch(() => {});
+        if (nextBooking) sendPushToBooking(nextBooking, { title: "Get Ready!", body: "Token #" + nextRed + " - You are next. Dr. " + nextBooking.doctor_name + " will call you soon.", data: { tag: "token-yellow" } }).catch(() => {});
       }
     } catch(_) {}
   });
