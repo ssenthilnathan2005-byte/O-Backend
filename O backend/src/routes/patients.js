@@ -35,9 +35,11 @@ function famLabel(kind, gender, personIsOlder) {
   return "Other";
 }
 async function linkFamily(requesterId, ownerId, relation) {
+  console.log("[linkFamily] start", requesterId, ownerId, relation);
   const { rows } = await pool.query("SELECT * FROM users WHERE id = ANY($1)", [[requesterId, ownerId]]);
   const rq = rows.find(r => r.id === requesterId);
   const ow = rows.find(r => r.id === ownerId);
+  console.log("[linkFamily] found users:", !!rq, !!ow);
   if (!rq || !ow) return;
   const kind = { Spouse: "spouse", Child: "child", Parent: "parent", Sibling: "sibling" }[relation] || "other";
   const add = async (toUser, person, label) => {
@@ -50,6 +52,7 @@ async function linkFamily(requesterId, ownerId, relation) {
   await add(ownerId, rq, famLabel(kind, rq.gender, false));
   // Requester sees the owner as the reverse relation.
   await add(requesterId, ow, famLabel(kind, ow.gender, true));
+  console.log("[linkFamily] done");
 }
 router.get("/phone-requests", requireAuth, async (req, res) => {
   try {
@@ -208,6 +211,7 @@ router.patch("/language", requireAuth, async (req, res) => {
   }
 });
 
+router.linkFamily = linkFamily;
 module.exports = router;
 
 // ── DELETE patient permanently ────────────────────────────────────────────────

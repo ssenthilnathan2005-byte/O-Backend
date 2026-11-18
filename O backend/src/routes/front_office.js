@@ -384,6 +384,13 @@ router.post("/walkin", fo, async (req, res) => {
       await client.query("INSERT INTO token_states (session_id, doctor_id, date, session, token_statuses) VALUES ($1,$2,$3,$4,$5)", [sessionId, doctor.id, date, session, JSON.stringify({ [token]: "red" })]);
     }
     await client.query("COMMIT");
+    if (!b.uhid && phone && ["Spouse", "Child", "Parent", "Sibling", "Other family"].includes(b.phoneRelation)) {
+      try {
+        const { linkFamily } = require("./patients");
+        const ow = await pool.query("SELECT id FROM users WHERE role='patient' AND id<>$1 AND right(regexp_replace(coalesce(phone,''), '\\D', '', 'g'), 10)=$2", [patientId, phone]);
+        for (const o of ow.rows) await linkFamily(patientId, o.id, b.phoneRelation);
+      } catch (e) { console.error("[walkin] link family error:", e.message); }
+    }
     try { broadcast(sessionId, { type: "token_booked", tokenNumber: token, sessionId }); } catch (_) {}
     res.status(201).json({ ok: true, bookingId, tokenNumber: token, doctorName: doctor.name, session, date, patientName: name, uhid, newAccount: !b.uhid });
   } catch (e) {
