@@ -106,7 +106,7 @@ router.get("/", requireAuth, async (req, res) => {
         [req.user.id]
       ));
     }
-    res.json(rows.map(row2booking));
+    res.json(rows.map(r => ({ ...row2booking(r), forMe: !!r.for_user_id && r.for_user_id === req.user.id })));
   } catch (err) {
     console.error("[bookings GET /]", err.message);
     res.status(500).json({ error: err.message });
