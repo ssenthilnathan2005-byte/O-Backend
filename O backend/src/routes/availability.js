@@ -39,10 +39,9 @@ async function pushToWaitingPatients(ev) {
   const { rows } = await pool.query(
     `SELECT b.id, b.patient_id, b.for_user_id, b.doctor_name
        FROM bookings b
-       JOIN token_states ts ON ts.session_id = b.session_id
-      WHERE b.doctor_id=$1 AND b.date=$2 AND b.status='confirmed' AND ts.is_closed=0
-        AND (ts.current_token IS NOT NULL
-             OR ts.token_statuses LIKE '%"green"%' OR ts.token_statuses LIKE '%"orange"%')
+       LEFT JOIN token_states ts ON ts.session_id = b.session_id
+      WHERE b.doctor_id=$1 AND b.date=$2 AND b.status='confirmed'
+        AND (ts.session_id IS NULL OR ts.is_closed=0)
       LIMIT 500`,
     [ev.doctorId, todayIST()]
   );
