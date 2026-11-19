@@ -229,6 +229,16 @@ router.patch("/:id", async (req, res, next) => {
     if (req.user.role === "hospital_admin" && req.user.hospitalId !== row.hospital_id)
       return res.status(403).json({ error: "You can only edit doctors in your own hospital" });
 
+    // While a break is active, the position patients see is controlled by Break Management.
+    if (req.body && req.body.statusOverride !== undefined && req.body.statusOverride !== null &&
+        req.body.statusOverride !== row.status_override) {
+      try {
+        const { rows: av } = await pool.query("SELECT status FROM doctor_availability WHERE doctor_id=$1", [req.params.id]);
+        if (av[0] && av[0].status === "on_break")
+          return res.status(409).json({ error: "You are on a break. Resume consultation before changing your current position." });
+      } catch (_) { /* never block a profile save because of this check */ }
+    }
+
     const {
       specialty, hospitalId, isAvailable, bio, sessionTimings, scheduleConfig,
       yearsOfExperience, education, languages, tokensPerSession,
@@ -389,3 +399,4 @@ router.post("/:id/reset-password", requireAdminOrHospitalAdmin, async (req, res)
 });
 
 module.exports = router;
+module.exports.invalidateDoctorCache = invalidateDoctorCache;
