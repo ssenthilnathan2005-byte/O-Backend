@@ -344,6 +344,9 @@ const MIGRATIONS = [
   "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS late_flag INTEGER NOT NULL DEFAULT 0",
   "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS late_eta_minutes INTEGER",
   "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS late_marked_at TIMESTAMPTZ",
+  "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS consult_started_at TIMESTAMPTZ",
+  "ALTER TABLE bookings ADD COLUMN IF NOT EXISTS consult_ended_at TIMESTAMPTZ",
+  "CREATE INDEX IF NOT EXISTS idx_bookings_consult_hist ON bookings(doctor_id, consult_ended_at) WHERE consult_ended_at IS NOT NULL",
   "CREATE INDEX IF NOT EXISTS idx_bookings_archived ON bookings(archived)",
   `CREATE TABLE IF NOT EXISTS labs (
     id          TEXT PRIMARY KEY,

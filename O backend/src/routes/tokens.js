@@ -10,6 +10,25 @@ const { broadcast } = require("../services/ws");
 const router = express.Router();
 const SENTINEL = "__cancelled__";
 
+// Consultation timing (used for real average-consultation-time estimates).
+// Runs inside a SAVEPOINT so a failure here can never break regulate/complete/skip.
+async function recordConsult(client, sql, params) {
+  try {
+    await client.query("SAVEPOINT consult_ts");
+    await client.query(sql, params);
+    await client.query("RELEASE SAVEPOINT consult_ts");
+  } catch (e) {
+    try { await client.query("ROLLBACK TO SAVEPOINT consult_ts"); } catch (_) {}
+    console.error("[tokens] consult timestamp skipped:", e.message);
+  }
+}
+const SQL_CONSULT_START =
+  "UPDATE bookings SET consult_started_at = COALESCE(consult_started_at, now()) WHERE session_id=$1 AND token_number=$2 AND status<>'cancelled'";
+const SQL_CONSULT_END =
+  "UPDATE bookings SET consult_ended_at = COALESCE(consult_ended_at, now()) WHERE session_id=$1 AND token_number=$2 AND consult_started_at IS NOT NULL";
+const SQL_CONSULT_CLEAR =
+  "UPDATE bookings SET consult_started_at = NULL, consult_ended_at = NULL WHERE session_id=$1 AND token_number=$2";
+
 // ── Helpers ───────────────────────────────────────────────────────────────────
 async function getState(sessionId, queryable = pool) {
   const { rows } = await queryable.query("SELECT * FROM token_states WHERE session_id=$1", [sessionId]);
@@ -112,9 +131,11 @@ router.post("/:sessionId/regulate", requireDoctorOrAdmin, async (req, res) => {
         "UPDATE bookings SET status='completed' WHERE session_id=$1 AND token_number=$2 AND status='confirmed'",
         [req.params.sessionId, currentToken]
       );
+      await recordConsult(client, SQL_CONSULT_END, [req.params.sessionId, currentToken]);
     }
 
     statuses[clicked] = "orange";
+    await recordConsult(client, SQL_CONSULT_START, [req.params.sessionId, clicked]);
     currentToken = clicked;
 
     if (nextToken !== null && statuses[nextToken] === "yellow")
@@ -180,6 +201,7 @@ router.post("/:sessionId/complete", requireDoctorOrAdmin, async (req, res) => {
         "UPDATE bookings SET status='completed' WHERE session_id=$1 AND token_number=$2 AND status='confirmed'",
         [req.params.sessionId, completedToken]
       );
+      await recordConsult(client, SQL_CONSULT_END, [req.params.sessionId, completedToken]);
     }
   });
 });
@@ -223,6 +245,7 @@ router.post("/:sessionId/skip", requireDoctorOrAdmin, async (req, res) => {
         "UPDATE bookings SET status='unvisited' WHERE session_id=$1 AND token_number=$2 AND status='confirmed'",
         [req.params.sessionId, skippedToken]
       );
+      await recordConsult(client, SQL_CONSULT_CLEAR, [req.params.sessionId, skippedToken]);
     }
   });
 });
