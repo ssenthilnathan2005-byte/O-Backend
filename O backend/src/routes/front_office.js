@@ -176,6 +176,16 @@ router.post("/bookings/:bid/no-show", fo, async (req, res) => {
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
+router.post("/bookings/:bid/reopen", fo, async (req, res) => {
+  try {
+    await ready;
+    const r = await pool.query(
+      "UPDATE bookings SET status='confirmed', no_show_at=NULL WHERE id=$1 AND status='unvisited' AND doctor_id IN (SELECT id FROM doctors WHERE hospital_id=$2) RETURNING id",
+      [req.params.bid, req.user.hospitalId]);
+    if (!r.rowCount) return res.status(409).json({ error: "Cannot reopen this booking" });
+    res.json({ ok: true });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
 router.post("/bookings/:bid/undo-check-in", fo, async (req, res) => {
   try {
     await ready;
