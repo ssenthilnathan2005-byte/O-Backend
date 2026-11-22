@@ -4,7 +4,7 @@ const { sendTokenCalled } = require("../services/whatsapp");
 const { sendPushToPatient, sendPushToBooking } = require("../services/push");
 const express = require("express");
 const { pool } = require("../db/init");
-const { requireDoctorOrAdmin } = require("../middleware/auth");
+const { requireDoctorOrAdmin, requireAuth } = require("../middleware/auth");
 const { broadcast } = require("../services/ws");
 
 const router = express.Router();
