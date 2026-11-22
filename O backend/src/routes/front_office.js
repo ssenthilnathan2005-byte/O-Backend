@@ -360,6 +360,8 @@ router.post("/walkin", fo, async (req, res) => {
     const doctor = dR.rows[0];
     const fullDoc = (await client.query("SELECT * FROM doctors WHERE id=$1", [doctor.id])).rows[0];
     if (!(walkinCapacity(fullDoc, date, session) > 0)) return res.status(400).json({ error: "This doctor does not have this session on the chosen date" });
+    const closedR = await client.query("SELECT 1 FROM token_states WHERE doctor_id=$1 AND date::text=$2 AND session=$3 AND is_closed=1 LIMIT 1", [doctor.id, date, session]);
+    if (closedR.rows.length) return res.status(409).json({ error: "The doctor has ended this session. Choose another session." });
     const hR = await client.query("SELECT name, rate_per_token FROM hospitals WHERE id=$1", [hid]);
     const hospital = hR.rows[0];
     const sessionId = doctor.id + "_" + date + "_" + session;
