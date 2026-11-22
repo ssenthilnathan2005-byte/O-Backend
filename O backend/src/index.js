@@ -222,6 +222,7 @@ app.use("/api/staff-management", require("./routes/staff_management"));
 app.use("/api/availability", require("./routes/availability"));
 app.use("/api", require("./routes/maternity"));
 app.use("/api/enquiries", require("./routes/enquiries"));
+app.use('/api/app-version', require('./routes/appversion'));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
@@ -283,6 +284,7 @@ async function start() {
   server.keepAliveTimeout = 65000;
   server.headersTimeout   = 66000;
 
+  
   server.listen(PORT, "0.0.0.0", () => {
     console.log(`\n🚀  Doctor Booked API  →  http://0.0.0.0:${PORT}`);
     console.log(`📡  WebSocket          →  ws://0.0.0.0:${PORT}/ws?session=ID`);
