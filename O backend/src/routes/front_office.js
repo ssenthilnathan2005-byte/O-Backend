@@ -18,6 +18,7 @@ const todayIST = () => new Date(Date.now() + 5.5 * 3600 * 1000).toISOString().sl
 const ready = (async () => {
   await pool.query("CREATE TABLE IF NOT EXISTS front_office_staff (id TEXT PRIMARY KEY, hospital_id TEXT NOT NULL REFERENCES hospitals(id) ON DELETE CASCADE, code TEXT UNIQUE NOT NULL, name TEXT NOT NULL, phone TEXT NOT NULL, password TEXT, first_login INTEGER NOT NULL DEFAULT 1, is_active INTEGER NOT NULL DEFAULT 1, created_at TIMESTAMPTZ NOT NULL DEFAULT now())");
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS checked_in_at TIMESTAMPTZ");
+  await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS no_show_at TIMESTAMPTZ");
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS checked_in_by TEXT");
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS vitals JSONB");
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS vitals_at TIMESTAMPTZ");
@@ -140,7 +141,7 @@ router.get("/today", fo, async (req, res) => {
     const q = String(req.query.date || "");
     const date = /^\d{4}-\d{2}-\d{2}$/.test(q) ? q : todayIST();
     const { rows } = await pool.query(
-      "SELECT b.id, b.patient_name, b.patient_age, b.patient_area, b.patient_gender, b.patient_blood_group, b.phone, b.complaint, b.doctor_id, b.doctor_name, b.date, b.session, b.token_number, b.payment_done, b.status, b.booking_source, b.checked_in_at, b.vitals, b.vitals_at, b.fee_amount, b.fee_mode, b.fee_paid_at, d.doctor_fee, (SELECT pr.status FROM prescriptions pr WHERE pr.booking_id=b.id ORDER BY pr.created_at DESC LIMIT 1) AS rx_status " +
+      "SELECT b.id, b.patient_name, b.patient_age, b.patient_area, b.patient_gender, b.patient_blood_group, b.phone, b.complaint, b.doctor_id, b.doctor_name, b.date, b.session, b.token_number, b.payment_done, b.status, b.booking_source, b.checked_in_at, b.no_show_at, b.vitals, b.vitals_at, b.fee_amount, b.fee_mode, b.fee_paid_at, d.doctor_fee, (SELECT pr.status FROM prescriptions pr WHERE pr.booking_id=b.id ORDER BY pr.created_at DESC LIMIT 1) AS rx_status " +
       "FROM bookings b JOIN doctors d ON d.id=b.doctor_id WHERE d.hospital_id=$1 AND b.date=$2 AND b.status<>'cancelled' AND b.archived = FALSE " +
       "ORDER BY CASE b.session WHEN 'morning' THEN 0 WHEN 'afternoon' THEN 1 ELSE 2 END, b.doctor_name ASC, b.token_number ASC",
       [req.user.hospitalId, date]);
@@ -163,6 +164,16 @@ router.post("/bookings/:bid/check-in", fo, async (req, res) => {
       "UPDATE bookings SET checked_in_at=COALESCE(checked_in_at, now()), checked_in_by=COALESCE(checked_in_by,$2), phone=COALESCE($3,phone), patient_age=COALESCE($4,patient_age), complaint=COALESCE($5,complaint) WHERE id=$1 RETURNING id, checked_in_at, phone, patient_age, complaint",
       [req.params.bid, req.user.frontOfficeStaffId || req.user.id || null, phone, age, complaint]);
     res.json(rows[0]);
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+router.post("/bookings/:bid/no-show", fo, async (req, res) => {
+  try {
+    await ready;
+    const r = await pool.query(
+      "UPDATE bookings SET status='unvisited', no_show_at=now() WHERE id=$1 AND status='confirmed' AND NOT EXISTS (SELECT 1 FROM prescriptions pr WHERE pr.booking_id=bookings.id) AND doctor_id IN (SELECT id FROM doctors WHERE hospital_id=$2) RETURNING id",
+      [req.params.bid, req.user.hospitalId]);
+    if (!r.rowCount) return res.status(409).json({ error: "Cannot mark as no-show (already started or not found)" });
+    res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 router.post("/bookings/:bid/undo-check-in", fo, async (req, res) => {
