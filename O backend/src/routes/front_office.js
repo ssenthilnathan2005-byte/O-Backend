@@ -20,6 +20,7 @@ const ready = (async () => {
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS checked_in_at TIMESTAMPTZ");
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS no_show_at TIMESTAMPTZ");
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS checked_in_by TEXT");
+  await pool.query("UPDATE bookings SET checked_in_at=now() WHERE booking_source='front_desk' AND status='confirmed' AND checked_in_at IS NULL");
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS vitals JSONB");
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS vitals_at TIMESTAMPTZ");
   await pool.query("ALTER TABLE bookings ADD COLUMN IF NOT EXISTS vitals_by TEXT");
