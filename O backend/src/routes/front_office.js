@@ -331,7 +331,8 @@ function walkinCapacity(doc, date, session) {
 router.get("/walkin/doctors", fo, async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT * FROM doctors WHERE hospital_id=$1 AND COALESCE(is_active,1)<>0 ORDER BY name", [req.user.hospitalId]);
-    res.json({ doctors: rows.map((r) => ({ id: r.id, name: r.name, specialty: r.specialty, schedule_config: r.schedule_config, tokens_per_session: r.tokens_per_session, session_timings: r.session_timings || r.sessionTimings || null, sessions: r.sessions ?? null })) });
+    const closedRows = (await pool.query("SELECT doctor_id, date::text AS date, session FROM token_states WHERE is_closed=1 AND date::text >= $1 AND doctor_id = ANY($2)", [todayIST(), rows.map((r) => r.id)])).rows;
+    res.json({ doctors: rows.map((r) => ({ closed: closedRows.filter((c) => c.doctor_id === r.id).map((c) => String(c.date).slice(0, 10) + "|" + c.session), id: r.id, name: r.name, specialty: r.specialty, schedule_config: r.schedule_config, tokens_per_session: r.tokens_per_session, session_timings: r.session_timings || r.sessionTimings || null, sessions: r.sessions ?? null })) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
