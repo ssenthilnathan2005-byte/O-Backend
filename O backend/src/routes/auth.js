@@ -1120,8 +1120,6 @@ router.post("/patient/claim/finish", async (req, res) => {
   }
 });
 
-module.exports = router;
-
 // ── Logout (blacklist token) ──────────────────────────────────────────────────
 router.post("/logout", async (req, res) => {
   try {
@@ -1147,3 +1145,5 @@ setInterval(async () => {
     await pool.query('DELETE FROM token_blacklist WHERE expires_at < now()');
   } catch(_) {}
 }, 60 * 60 * 1000);
+
+module.exports = router;

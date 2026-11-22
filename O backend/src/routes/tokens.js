@@ -331,6 +331,9 @@ router.post("/cancel-session", requireDoctorOrAdmin, async (req, res) => {
   const client = await pool.connect();
   try {
     const { doctorId, date, session } = req.body;
+    if (req.user.role === "doctor" && req.user.doctorId !== doctorId) {
+      return res.status(403).json({ error: "Not authorised to cancel another doctor's session" });
+    }
     const key = `${doctorId}_${date}_${session}`;
 
     try {
@@ -379,7 +382,7 @@ router.post("/cancel-session", requireDoctorOrAdmin, async (req, res) => {
 
 // ── GET cancelled list ────────────────────────────────────────────────────────
 const cancelledCache = { data: null, ts: 0, TTL: 5 * 60 * 1000 };
-router.get("/cancelled/list", async (req, res) => {
+router.get("/cancelled/list", requireAuth, async (req, res) => {
   try {
     if (cancelledCache.data && (Date.now() - cancelledCache.ts) < cancelledCache.TTL) {
       return res.json(cancelledCache.data);
