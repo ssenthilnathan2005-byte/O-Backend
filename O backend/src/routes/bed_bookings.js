@@ -206,8 +206,8 @@ router.get("/hospital", requireAuth, staffPerm, async (req, res) => {
     await expireHolds(pool, hospitalId);
     const statuses = String(req.query.status || "requested,confirmed").split(",").filter(Boolean);
     const { rows } = await pool.query(
-      `SELECT * FROM bed_bookings WHERE hospital_id=$1 AND status = ANY($2)
-        ORDER BY CASE status WHEN 'requested' THEN 0 WHEN 'confirmed' THEN 1 ELSE 2 END, created_at DESC`,
+      `SELECT bb.*, (SELECT u.area FROM users u WHERE u.id = bb.patient_user_id) AS area FROM bed_bookings bb WHERE bb.hospital_id=$1 AND bb.status = ANY($2)
+        ORDER BY CASE bb.status WHEN 'requested' THEN 0 WHEN 'confirmed' THEN 1 ELSE 2 END, bb.created_at DESC`,
       [hospitalId, statuses]);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }

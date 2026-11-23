@@ -214,7 +214,7 @@ router.get("/beds", fo, async (req, res) => {
 });
 router.get("/inward", fo, async (req, res) => {
   try {
-    const { rows } = await pool.query("SELECT id, patient_name, phone, age, gender, ward, bed_number, admitting_doctor_name, diagnosis, admitted_at, (SELECT uhid FROM users WHERE users.id=inward_patients.patient_user_id) AS uhid FROM inward_patients WHERE hospital_id=$1 AND status='admitted' ORDER BY admitted_at DESC", [req.user.hospitalId]);
+    const { rows } = await pool.query("SELECT id, patient_name, phone, age, gender, ward, bed_number, admitting_doctor_name, diagnosis, admitted_at, (SELECT uhid FROM users WHERE users.id=inward_patients.patient_user_id) AS uhid, (SELECT area FROM users WHERE users.id=inward_patients.patient_user_id) AS area FROM inward_patients WHERE hospital_id=$1 AND status='admitted' ORDER BY admitted_at DESC", [req.user.hospitalId]);
     res.set("Cache-Control", "no-store");
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
