@@ -268,6 +268,7 @@ router.post("/admit", fo, async (req, res) => {
     const name = String(b.patientName || "").trim();
     if (!name) return res.status(400).json({ error: "Patient name is required" });
     if (!b.wardId || !b.bedId) return res.status(400).json({ error: "Choose a ward and bed" });
+    const area = String(b.area || "").trim().slice(0, 200) || null;
     const age = (b.age === undefined || b.age === null || b.age === "") ? null : Number(b.age);
     if (age !== null && !(Number.isInteger(age) && age >= 0 && age <= 130)) return res.status(400).json({ error: "Enter a valid age" });
     const phone = b.phone ? String(b.phone).trim() : null;
@@ -287,6 +288,7 @@ router.post("/admit", fo, async (req, res) => {
       const dupAcc = await client.query("SELECT 1 FROM inward_patients WHERE hospital_id=$1 AND status='admitted' AND patient_user_id=$2 LIMIT 1", [hid, acc.id]);
       if (dupAcc.rows.length) { await client.query("ROLLBACK"); return res.status(409).json({ error: "This patient is already admitted." }); }
       patientUserId = acc.id; uhid = acc.uhid;
+      if (area) await client.query("UPDATE users SET area=$1 WHERE id=$2 AND (area IS NULL OR area='')", [area, acc.id]);
       admitName = acc.name || name; admitPhone = acc.phone || phone;
       admitGender = acc.gender || admitGender; admitAge = acc.age !== null ? acc.age : admitAge;
     } else {
@@ -298,7 +300,7 @@ router.post("/admit", fo, async (req, res) => {
         }
       }
       patientUserId = "u_walkin_" + randomBytes(6).toString("hex");
-      await client.query("INSERT INTO users (id, name, role, walkin_hospital_id, age, gender) VALUES ($1,$2,'patient',$3,$4,$5)", [patientUserId, name, hid, age, b.gender || null]);
+      await client.query("INSERT INTO users (id, name, role, walkin_hospital_id, age, gender, area) VALUES ($1,$2,'patient',$3,$4,$5,$6)", [patientUserId, name, hid, age, b.gender || null, area]);
       const nu = await client.query("SELECT uhid FROM users WHERE id=$1", [patientUserId]);
       uhid = nu.rows[0] ? nu.rows[0].uhid : null;
     }
@@ -356,6 +358,7 @@ router.post("/walkin", fo, async (req, res) => {
     if (!["morning", "afternoon", "evening"].includes(session)) return res.status(400).json({ error: "Choose a session" });
     const date = /^\d{4}-\d{2}-\d{2}$/.test(String(b.date || "")) ? b.date : todayIST();
     if (!b.doctorId) return res.status(400).json({ error: "Choose a doctor" });
+    const area = String(b.patientArea || "").trim().slice(0, 200) || null;
 
     const dR = await client.query("SELECT id, name FROM doctors WHERE id=$1 AND hospital_id=$2", [b.doctorId, hid]);
     if (!dR.rows.length) return res.status(404).json({ error: "Doctor not found" });
@@ -377,13 +380,14 @@ router.post("/walkin", fo, async (req, res) => {
       const acc = await findPatientByUhid(client, b.uhid, phone, hid);
       if (!acc) throw bad(404, "No patient found. Check the UHID and phone number.");
       patientId = acc.id; uhid = acc.uhid; name = acc.name || name;
+      if (area) await client.query("UPDATE users SET area=$1 WHERE id=$2 AND (area IS NULL OR area='')", [area, acc.id]);
     } else {
       if (phone && !b.confirmNew) {
         const sim = await client.query("SELECT u.uhid FROM bookings b JOIN users u ON u.id=b.patient_id WHERE u.walkin_hospital_id=$1 AND b.phone=$2 AND lower(b.patient_name)=lower($3) LIMIT 1", [hid, phone, name]);
         if (sim.rows.length) throw bad(409, "A patient with this name and phone is already registered" + (sim.rows[0].uhid ? " (UHID " + sim.rows[0].uhid + ")" : "") + ". Register as a different person?");
       }
       patientId = "u_walkin_" + randomBytes(6).toString("hex");
-      await client.query("INSERT INTO users (id, name, role, walkin_hospital_id, age, gender, phone) VALUES ($1,$2,'patient',$3,$4,$5,$6)", [patientId, name, hid, age, ["Male", "Female", "Other"].includes(b.patientGender) ? b.patientGender : null, phone]);
+      await client.query("INSERT INTO users (id, name, role, walkin_hospital_id, age, gender, phone, area) VALUES ($1,$2,'patient',$3,$4,$5,$6,$7)", [patientId, name, hid, age, ["Male", "Female", "Other"].includes(b.patientGender) ? b.patientGender : null, phone, area]);
       const nu = await client.query("SELECT uhid FROM users WHERE id=$1", [patientId]);
       uhid = nu.rows[0] ? nu.rows[0].uhid : null;
     }
