@@ -15,3 +15,5 @@ data/
 uploads/
 .env*
 *.pre-*
+
+node_modules/
