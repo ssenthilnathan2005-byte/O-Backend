@@ -6,6 +6,7 @@ const express = require("express");
 const { pool } = require("../db/init");
 const { requireDoctorOrAdmin, requireAuth } = require("../middleware/auth");
 const { broadcast } = require("../services/ws");
+const { getSessionCapacity, getSessionTiming } = require("../utils/scheduleCapacity");
 
 const router = express.Router();
 const SENTINEL = "__cancelled__";
@@ -267,10 +268,164 @@ router.post("/:sessionId/complete-skipped", requireDoctorOrAdmin, async (req, re
   });
 });
 
+
+// ── Carry-over helpers ───────────────────────────────────────────────────────
+const DEFAULT_SESSION_TIMES = {
+  morning:   { start: "09:00", end: "12:00" },
+  afternoon: { start: "14:00", end: "17:00" },
+  evening:   { start: "18:00", end: "21:00" },
+};
+const toMin = (t) => { const [h, m] = String(t).split(":").map(Number); return h * 60 + (m || 0); };
+const istNow = () => {
+  const d = new Date(Date.now() + 5.5 * 3600 * 1000);
+  return { date: d.toISOString().slice(0, 10), min: d.getUTCHours() * 60 + d.getUTCMinutes() };
+};
+const capWord = (s) => s.charAt(0).toUpperCase() + s.slice(1);
+const httpErr = (status, message) => Object.assign(new Error(message), { status });
+
+// End a session but MOVE the still-waiting patients into a later session of the same day.
+async function closeWithCarryOver(req, res, sessionId, target) {
+  const [doctorId, date, session] = sessionId.split("_");
+  if (!doctorId || !date || !session) return res.status(400).json({ error: "Invalid session id" });
+  if (req.user.role === "doctor" && req.user.doctorId !== doctorId)
+    return res.status(403).json({ error: "Not authorised to close another doctor's session" });
+  if (!Object.keys(DEFAULT_SESSION_TIMES).includes(target) || target === session)
+    return res.status(400).json({ error: "Invalid session to carry patients over to" });
+
+  const targetSid = `${doctorId}_${date}_${target}`;
+  const moved = [];
+  const client = await pool.connect();
+  try {
+    const { rows: dRows } = await client.query("SELECT * FROM doctors WHERE id=$1", [doctorId]);
+    const doctor = dRows[0];
+    if (!doctor) return res.status(404).json({ error: "Doctor not found" });
+
+    const offered = String(doctor.sessions || "").split(",").map((s) => s.trim());
+    if (!offered.includes(target))
+      return res.status(400).json({ error: `This doctor has no ${target} session` });
+
+    let timings = null;
+    try { timings = doctor.session_timings ? JSON.parse(doctor.session_timings) : null; } catch (_) {}
+    const srcT = getSessionTiming(doctor, date, session, timings, DEFAULT_SESSION_TIMES[session]);
+    const tgtT = getSessionTiming(doctor, date, target, timings, DEFAULT_SESSION_TIMES[target]);
+    if (!srcT || !tgtT) return res.status(400).json({ error: "Session timings not found" });
+    if (toMin(tgtT.start) <= toMin(srcT.start))
+      return res.status(400).json({ error: "Patients can only be carried over to a later session" });
+    const now = istNow();
+    if (date === now.date && now.min >= toMin(tgtT.end))
+      return res.status(400).json({ error: `${capWord(target)} session has already ended` });
+
+    const cancelledRow = await getState(SENTINEL, client);
+    const cancelledKeys = cancelledRow ? JSON.parse(cancelledRow.cancelled_keys || "[]") : [];
+    if (cancelledKeys.includes(targetSid))
+      return res.status(400).json({ error: `${capWord(target)} session is cancelled` });
+
+    try {
+      await client.query("BEGIN");
+      // Same lock the booking flow takes, so nobody can grab a token in the target meanwhile.
+      await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [targetSid]);
+
+      const srcRes = await client.query("SELECT * FROM token_states WHERE session_id=$1 FOR UPDATE", [sessionId]);
+      if (!srcRes.rows[0]) throw httpErr(404, "Session not found");
+      const src = parseState(srcRes.rows[0]);
+      if (src.isClosed) throw httpErr(409, "This session is already closed");
+
+      const tgtRes = await client.query("SELECT * FROM token_states WHERE session_id=$1 FOR UPDATE", [targetSid]);
+      const tgtRow = tgtRes.rows[0] || null;
+      if (tgtRow && tgtRow.is_closed === 1) throw httpErr(409, `${capWord(target)} session is already closed`);
+      const tgtStatuses = tgtRow ? JSON.parse(tgtRow.token_statuses || "{}") : {};
+
+      const { rows: waiting } = await client.query(
+        "SELECT * FROM bookings WHERE session_id=$1 AND status='confirmed' AND token_number<1000 ORDER BY token_number ASC",
+        [sessionId]
+      );
+      const current = src.currentToken;
+      const toMove = waiting.filter((b) => b.token_number !== current);
+
+      const { rows: mx } = await client.query(
+        "SELECT COALESCE(MAX(token_number),0) AS m FROM bookings WHERE session_id=$1 AND token_number<1000",
+        [targetSid]
+      );
+      const maxTok = Math.max(
+        Number(mx[0].m) || 0,
+        ...Object.keys(tgtStatuses).map(Number).filter((n) => Number.isFinite(n) && n < 1000)
+      );
+      const free = getSessionCapacity(doctor, date, target) - maxTok;
+      if (toMove.length > free)
+        throw httpErr(
+          409,
+          `${capWord(target)} session has only ${Math.max(free, 0)} free token(s) but ${toMove.length} patient(s) are waiting. ` +
+          `Choose "End and mark unvisited" instead, or ask the front desk to make room.`
+        );
+
+      const srcStatuses = { ...src.tokenStatuses };
+      for (let i = 0; i < toMove.length; i++) {
+        const b = toMove[i];
+        const newTok = maxTok + 1 + i;
+        await client.query(
+          "UPDATE bookings SET session=$1, session_id=$2, token_number=$3 WHERE id=$4",
+          [target, targetSid, newTok, b.id]
+        );
+        delete srcStatuses[b.token_number];
+        tgtStatuses[newTok] = "red";
+        moved.push({ booking: b, newTok });
+      }
+
+      // The patient who is in the room right now counts as seen.
+      if (current !== null) {
+        srcStatuses[current] = "green";
+        await client.query(
+          "UPDATE bookings SET status='completed' WHERE session_id=$1 AND token_number=$2 AND status='confirmed'",
+          [sessionId, current]
+        );
+      }
+      for (const [n, s] of Object.entries(srcStatuses))
+        if (s === "red" || s === "yellow") srcStatuses[n] = "unvisited";
+
+      await saveState(client, sessionId, srcStatuses, src.prioritySlots, null, null, true);
+      if (tgtRow) {
+        await client.query(
+          "UPDATE token_states SET token_statuses=$1, updated_at=now() WHERE session_id=$2",
+          [JSON.stringify(tgtStatuses), targetSid]
+        );
+      } else {
+        await client.query(
+          "INSERT INTO token_states (session_id, doctor_id, date, session, token_statuses) VALUES ($1,$2,$3,$4,$5)",
+          [targetSid, doctorId, date, target, JSON.stringify(tgtStatuses)]
+        );
+      }
+      await client.query("COMMIT");
+    } catch (txErr) {
+      await client.query("ROLLBACK");
+      throw txErr;
+    }
+
+    await broadcastState(sessionId);
+    await broadcastState(targetSid);
+
+    for (const { booking, newTok } of moved) {
+      sendPushToBooking(booking, {
+        title: `Your appointment moved to ${capWord(target)} session`,
+        body: `Dr. ${booking.doctor_name}'s ${capWord(session)} session has ended. You are now token #${newTok} in the ${capWord(target)} session. No need to rebook - your payment stays valid.`,
+        data: { tag: "session-carried-over", bookingId: booking.id },
+      }).catch(() => {});
+    }
+    console.log(`[tokens] carry-over ${sessionId} -> ${targetSid}: moved ${moved.length}`);
+    res.json(parseState(await getState(sessionId)));
+  } catch (err) {
+    console.error(`[tokens] carry-over error session=${sessionId}:`, err.message);
+    res.status(err.status || 500).json({ error: err.message });
+  } finally {
+    client.release();
+  }
+}
+
 // ── POST close session ────────────────────────────────────────────────────────
 router.post("/:sessionId/close", requireDoctorOrAdmin, async (req, res) => {
   const sessionId = req.params.sessionId;
   const reason = String(req.body.reason || "").trim();
+  const carryOverTo = String(req.body.carryOverTo || "").trim().toLowerCase();
+  if (carryOverTo) return closeWithCarryOver(req, res, sessionId, carryOverTo);
 
   // Find patients still waiting BEFORE we touch anything, so we know whether
   // a reason is actually required and who needs to be notified.
