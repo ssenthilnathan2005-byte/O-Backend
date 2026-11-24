@@ -917,6 +917,8 @@ router.post("/hospital/set-password", async (req, res) => {
     const { rows: hospRows } = await pool.query("SELECT id, name, admin_user_id, login_id FROM hospitals WHERE login_id=$1", [String(loginId).trim()]);
     const hospital = hospRows[0];
     if (!hospital || !hospital.admin_user_id) return res.status(404).json({ error: "Hospital not found" });
+    const { rows: _fu_h } = await pool.query("SELECT first_login FROM users WHERE id=$1", [hospital.admin_user_id]);
+    if (!_fu_h[0] || _fu_h[0].first_login !== 1) return res.status(403).json({ error: "Password already set. Please log in." });
 
     const hash = await bcrypt.hash(newPassword, 10);
     await pool.query("UPDATE users SET password=$1, first_login=0 WHERE id=$2", [hash, hospital.admin_user_id]);
@@ -969,6 +971,8 @@ router.post("/lab/set-password", async (req, res) => {
     const { rows: labRows } = await pool.query("SELECT * FROM labs WHERE login_id=$1", [String(loginId).trim()]);
     const lab = labRows[0];
     if (!lab || !lab.admin_user_id) return res.status(404).json({ error: "Lab not found" });
+    const { rows: _fu_l } = await pool.query("SELECT first_login FROM users WHERE id=$1", [lab.admin_user_id]);
+    if (!_fu_l[0] || _fu_l[0].first_login !== 1) return res.status(403).json({ error: "Password already set. Please log in." });
 
     const hash = await bcrypt.hash(newPassword, 10);
     await pool.query("UPDATE users SET password=$1, first_login=0 WHERE id=$2", [hash, lab.admin_user_id]);

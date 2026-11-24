@@ -74,6 +74,10 @@ const isCodespacesOrigin = (origin = "") => {
   return /^https:\/\/[a-z0-9-]+-\d+\.app\.github\.dev$/i.test(origin);
 };
 
+if (!ALLOWED_ORIGINS && require("./utils/secrets").isProduction) {
+  console.warn("[SECURITY] ALLOWED_ORIGINS is not set - CORS is open to every origin. Set it on the server.");
+}
+
 const corsOptions = {
   origin: (origin, callback) => {
     // Allow server-to-server/health checks without Origin header.
@@ -227,21 +231,10 @@ app.use('/api/app-version', require('./routes/appversion'));
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get("/api/health", async (_req, res) => {
   try {
-    const [users, hospitals, doctors, bookings] = await Promise.all([
-      pool.query("SELECT COUNT(*) as c FROM users"),
-      pool.query("SELECT COUNT(*) as c FROM hospitals"),
-      pool.query("SELECT COUNT(*) as c FROM doctors"),
-      pool.query("SELECT COUNT(*) as c FROM bookings"),
-    ]);
-    const counts = {
-      users:     Number(users.rows[0].c),
-      hospitals: Number(hospitals.rows[0].c),
-      doctors:   Number(doctors.rows[0].c),
-      bookings:  Number(bookings.rows[0].c),
-    };
-    res.json({ status: "ok", timestamp: new Date().toISOString(), counts, uptime: process.uptime() });
+    await pool.query("SELECT 1");
+    res.json({ status: "ok" });
   } catch (err) {
-    res.status(500).json({ status: "error", error: err.message });
+    res.status(500).json({ status: "error" });
   }
 });
 
@@ -253,7 +246,7 @@ app.use((err, _req, res, _next) => {
   console.error("[ERROR]", err.message);
   if (!res.headersSent) {
     res.status(err.status || 500).json({
-      error: err.message || "Internal server error",
+      error: ((err.status && err.status < 500) || !require("./utils/secrets").isProduction) ? (err.message || "Internal server error") : "Internal server error"
     });
   }
 });
