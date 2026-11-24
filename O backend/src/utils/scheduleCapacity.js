@@ -30,8 +30,14 @@ function readEntry(doctor, date) {
   return bucket;
 }
 
+const MAX_SESSION_TOKENS = 200;
+function capTokens(n) {
+  const x = Number(n);
+  return Number.isFinite(x) ? Math.min(x, MAX_SESSION_TOKENS) : n;
+}
+
 function getSessionCapacity(doctor, date, session) {
-  const fallback = doctor.tokens_per_session;
+  const fallback = capTokens(doctor.tokens_per_session);
 
   const bucket = readEntry(doctor, date);
   if (!bucket) return fallback;
@@ -45,7 +51,7 @@ function getSessionCapacity(doctor, date, session) {
   const num = Number(val);
   if (!Number.isFinite(num) || num < 0) return fallback;
 
-  return num;
+  return capTokens(num);
 }
 
 function getSessionTiming(doctor, date, session, fallbackTimings, defaultTiming) {

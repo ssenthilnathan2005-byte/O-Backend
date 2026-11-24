@@ -82,6 +82,28 @@ function viewDoctor(req, d) {
   return { ...d, phone: "", contactPhone: "", password: "" };
 }
 
+const MAX_SESSION_TOKENS = 200;
+function capTokens(n) {
+  const x = Number(n);
+  return Number.isFinite(x) ? Math.min(Math.max(Math.trunc(x), 0), MAX_SESSION_TOKENS) : n;
+}
+function capScheduleConfig(cfg) {
+  if (!cfg) return cfg;
+  let c = cfg;
+  if (typeof c === "string") { try { c = JSON.parse(c); } catch (_) { return cfg; } }
+  if (!c || typeof c !== "object") return c;
+  for (const day of Object.keys(c)) {
+    const bucket = c[day];
+    if (!bucket || typeof bucket !== "object") continue;
+    for (const sess of Object.keys(bucket)) {
+      const e = bucket[sess];
+      if (e && typeof e === "object" && "count" in e) e.count = capTokens(e.count);
+      else if (typeof e === "number") bucket[sess] = capTokens(e);
+    }
+  }
+  return c;
+}
+
 function row2doctor(r) {
   if (!r) return null;
   return {
@@ -90,8 +112,8 @@ function row2doctor(r) {
     phone: r.phone || "", contactPhone: r.phone || "", password: String(r.password || "").startsWith("$2") ? "" : (r.password || ""),
     bio: r.bio || "", photo: r.photo || null,
     price: r.price, consultationFee: r.consultation_fee, doctorFee: r.doctor_fee ?? null,
-    tokensPerSession: r.tokens_per_session,
-    scheduleConfig: r.schedule_config ? (typeof r.schedule_config === 'string' ? JSON.parse(r.schedule_config) : r.schedule_config) : null,
+    tokensPerSession: capTokens(r.tokens_per_session),
+    scheduleConfig: r.schedule_config ? capScheduleConfig(typeof r.schedule_config === 'string' ? JSON.parse(r.schedule_config) : r.schedule_config) : null,
     walkInInterval: r.walk_in_interval ?? 5,
     sessions: r.sessions ? r.sessions.split(",") : ["morning","afternoon"],
     sessionTimings: r.session_timings ? JSON.parse(r.session_timings) : null,
@@ -186,10 +208,10 @@ router.post("/", requireAdminOrHospitalAdmin, async (req, res) => {
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,1,$14,$15,$16,$17)`,
       [
         id, hospitalId, code, name, specialty, phone, bio, price, price,
-        tokensPerSession,
+        capTokens(tokensPerSession),
         Array.isArray(sessions) ? sessions.join(",") : sessions,
         sessionTimings ? JSON.stringify(sessionTimings) : null,
-        scheduleConfig ? JSON.stringify(scheduleConfig) : null,
+        scheduleConfig ? JSON.stringify(capScheduleConfig(scheduleConfig)) : null,
         yearsOfExperience, education,
         languages.length ? JSON.stringify(languages) : null,
         feeVal,
@@ -323,7 +345,7 @@ router.patch("/:id", async (req, res, next) => {
         yearsOfExperience ?? null,
         education    ?? null,
         languages    ? JSON.stringify(languages) : null,
-        tokensPerSession ?? null,
+        tokensPerSession != null ? capTokens(tokensPerSession) : null,
         walkInInterval ?? null,
         price        ?? null,
         consultationFee ?? price ?? null,
@@ -331,7 +353,7 @@ router.patch("/:id", async (req, res, next) => {
         finalCode,
         statusOverride ?? null,
         avgMinutesPerPatient ?? null,
-        scheduleConfig ? JSON.stringify(scheduleConfig) : null,
+        scheduleConfig ? JSON.stringify(capScheduleConfig(scheduleConfig)) : null,
         req.params.id,
         feeVal,
       ]
@@ -339,6 +361,7 @@ router.patch("/:id", async (req, res, next) => {
 
     const { rows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [req.params.id]);
     invalidateDoctorCache();
+    try { require("../services/activity").logDoctorChange(req, row, rows[0]); } catch (_) {}
     res.json(row2doctor(rows[0]));
   } catch (err) {
     console.error("[doctors PATCH]", err.message);

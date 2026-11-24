@@ -143,6 +143,21 @@ router.post("/", requireAuth, async (req, res) => {
 
   // Everything in one transaction — atomic, no partial commits.
   // pg transactions need a single checked-out client for BEGIN/COMMIT/ROLLBACK.
+  // FAMILY_ONLY_GUARD: booking for someone else must use a saved family member of this account.
+  try {
+    const typed = String(submittedName || "").trim().toLowerCase();
+    const fmId = req.body.familyMemberId ? String(req.body.familyMemberId) : "";
+    if (fmId) {
+      const fm = await pool.query("SELECT name FROM family_members WHERE id=$1 AND user_id=$2 AND relation<>'Self'", [fmId, req.user.id]);
+      if (!fm.rows[0] || String(fm.rows[0].name || "").trim().toLowerCase() !== typed)
+        return res.status(400).json({ error: "Select a saved family member to book for someone else." });
+    } else if (typed) {
+      const own = await pool.query("SELECT name FROM users WHERE id=$1 UNION SELECT name FROM family_members WHERE user_id=$1 AND relation='Self'", [req.user.id]);
+      if (!own.rows.some(r => String(r.name || "").trim().toLowerCase() === typed))
+        return res.status(400).json({ error: "Select a saved family member to book for someone else." });
+    }
+  } catch (e) { return res.status(500).json({ error: "Could not verify patient" }); }
+
   const client = await pool.connect();
   try {
     const { rows: doctorRows } = await client.query("SELECT * FROM doctors WHERE id=$1", [doctorId]);

@@ -226,6 +226,7 @@ app.use("/api/staff-management", require("./routes/staff_management"));
 app.use("/api/availability", require("./routes/availability"));
 app.use("/api", require("./routes/maternity"));
 app.use("/api/enquiries", require("./routes/enquiries"));
+app.use("/api/activity", require("./routes/activity"));
 app.use('/api/app-version', require('./routes/appversion'));
 
 // ── Health check ──────────────────────────────────────────────────────────────

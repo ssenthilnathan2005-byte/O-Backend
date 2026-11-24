@@ -17,7 +17,7 @@ function adminOnly(req, res, next) {
   next();
 }
 
-router.get("/", requireAuth, requirePerm("ipd"), async (req, res) => {
+router.get("/", requireAuth, requireAnyPerm("beds_wards", "ipd"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });

@@ -110,10 +110,14 @@ router.get("/my-orders", requireAuth, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT o.id, o.hospital_id, h.name AS hospital_name, o.test_name, o.status,
               o.slot_date, o.slot_time, o.token_number, o.price,
-              o.result_value, o.report_url, o.ordered_at
+              o.result_value, o.report_url, o.ordered_at,
+              o.inward_id, o.amount,
+              CASE WHEN o.inward_id IS NOT NULL THEN 'ipd' ELSE 'patient' END AS booked_via
        FROM hospital_lab_orders o
        JOIN hospitals h ON h.id = o.hospital_id
-       WHERE o.patient_id = $1 AND o.source = 'patient'
+       WHERE (o.patient_id = $1 AND o.source = 'patient')
+          OR (o.inward_id IS NOT NULL AND o.status <> 'cancelled'
+              AND o.inward_id IN (SELECT id FROM inward_patients WHERE patient_user_id = $1))
        ORDER BY o.ordered_at DESC`,
       [req.user.id]);
     res.json(rows);
