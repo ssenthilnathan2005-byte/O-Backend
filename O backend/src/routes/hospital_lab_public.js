@@ -62,6 +62,13 @@ router.get("/public/:hospitalId", async (req, res) => {
 });
 
 // ── Patient booking (login required) ─────────────────────────────────────────
+// Which sessions exist and what time it is in India (the booking dialog uses this to grey out finished sessions)
+router.get("/public/:hospitalId/sessions", (req, res) => {
+  const now = labSessions.istNow();
+  res.set("Cache-Control", "no-store");
+  res.json({ today: now.date, nowMin: now.min, sessions: labSessions.LAB_SESSIONS });
+});
+
 router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
   try {
     const hospitalId = req.params.hospitalId;
@@ -70,8 +77,10 @@ router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
     if (!/^\d{10}$/.test(String(phone || "").trim())) return res.status(400).json({ error: "Enter a valid 10-digit phone number" });
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(slotDate || ""))) return res.status(400).json({ error: "Invalid date" });
     const days = (new Date(slotDate + "T00:00:00Z") - Date.now()) / 86400000;
-    if (!(days > -2 && days < 31)) return res.status(400).json({ error: "Date is out of range" });
+    if (!(days < 31)) return res.status(400).json({ error: "Date is out of range" });
     if (!["morning", "afternoon"].includes(slotTime)) return res.status(400).json({ error: "Invalid session" });
+    const closedMsg = labSessions.closedReason(slotDate, slotTime);
+    if (closedMsg) return res.status(400).json({ error: closedMsg, code: "LAB_SESSION_CLOSED" });
 
     const { rows: h } = await pool.query("SELECT has_lab FROM hospitals WHERE id=$1", [hospitalId]);
     if (!h.length || h[0].has_lab !== 1) return res.status(400).json({ error: "Lab facility is not available at this hospital" });
@@ -109,6 +118,7 @@ router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
 
 const { findLabDuplicate, ensureLabDuplicateIndex } = require("../db/labDuplicate");
 setTimeout(() => ensureLabDuplicateIndex(pool), 10000);
+const labSessions = require("../db/labSessions");
 module.exports = router;
 
 // ── Patient: my lab bookings ─────────────────────────────────────────────────
