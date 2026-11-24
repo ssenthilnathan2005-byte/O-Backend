@@ -1,4 +1,4 @@
-﻿// Duplicate lab test booking prevention.
+// Duplicate lab test booking prevention.
 // One active booking per patient (matched by UHID) per lab test ID. Cancelled orders do not count.
 async function findLabDuplicate(db, { patientId, testId, inwardId }) {
   if ((!patientId && !inwardId) || !testId) return null;
