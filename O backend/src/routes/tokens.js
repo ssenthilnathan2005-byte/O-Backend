@@ -285,7 +285,11 @@ const httpErr = (status, message) => Object.assign(new Error(message), { status 
 
 // End a session but MOVE the still-waiting patients into a later session of the same day.
 async function closeWithCarryOver(req, res, sessionId, target) {
-  const [doctorId, date, session] = sessionId.split("_");
+  // Doctor ids contain an underscore (d_1780...), so read date and session from the END of the id
+  const idParts = sessionId.split("_");
+  const session = idParts.pop();
+  const date = idParts.pop();
+  const doctorId = idParts.join("_");
   if (!doctorId || !date || !session) return res.status(400).json({ error: "Invalid session id" });
   if (req.user.role === "doctor" && req.user.doctorId !== doctorId)
     return res.status(403).json({ error: "Not authorised to close another doctor's session" });
