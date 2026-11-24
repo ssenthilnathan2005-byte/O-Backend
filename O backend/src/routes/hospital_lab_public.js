@@ -79,6 +79,10 @@ router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
       "SELECT id, name, price FROM hospital_lab_tests WHERE id=$1 AND hospital_id=$2 AND is_active=1", [testId, hospitalId]);
     if (!t.length) return res.status(404).json({ error: "Test not found" });
 
+    // Duplicate prevention: the same patient (UHID) cannot book the same lab test twice
+    const dup = await findLabDuplicate(pool, { patientId: req.user.id, testId });
+    if (dup) return res.status(409).json({ error: "You have already booked this test.", code: "DUPLICATE_LAB_BOOKING" });
+
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
         const { rows } = await pool.query(
@@ -94,6 +98,7 @@ router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
            testId, t[0].name, notes || null, String(phone).trim(), slotDate, slotTime, t[0].price]);
         return res.status(201).json({ ...rows[0], testName: t[0].name, price: t[0].price });
       } catch (e) {
+        if (e.code === "23505" && e.constraint === "uq_hlo_patient_test") return res.status(409).json({ error: "You have already booked this test.", code: "DUPLICATE_LAB_BOOKING" });
         if (e.code === "23505") continue; // token collision, retry
         throw e;
       }
@@ -102,6 +107,8 @@ router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
   } catch (err) { console.error("[hospital-lab book]", err.message); res.status(500).json({ error: err.message }); }
 });
 
+const { findLabDuplicate, ensureLabDuplicateIndex } = require("../db/labDuplicate");
+setTimeout(() => ensureLabDuplicateIndex(pool), 10000);
 module.exports = router;
 
 // ── Patient: my lab bookings ─────────────────────────────────────────────────
@@ -110,7 +117,7 @@ router.get("/my-orders", requireAuth, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT o.id, o.hospital_id, h.name AS hospital_name, o.test_name, o.status,
               o.slot_date, o.slot_time, o.token_number, o.price,
-              o.result_value, o.report_url, o.ordered_at,
+              o.test_id, o.result_value, o.report_url, o.ordered_at,
               o.inward_id, o.amount,
               CASE WHEN o.inward_id IS NOT NULL THEN 'ipd' ELSE 'patient' END AS booked_via
        FROM hospital_lab_orders o
