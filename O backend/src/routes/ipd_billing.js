@@ -9,7 +9,7 @@ const { requireAnyPerm } = require("./permissions");
 
 const router = express.Router();
 const nid = (p) => p + randomBytes(6).toString("hex");
-const staff = requireAnyPerm("billing", "ipd_patients", "ipd_collections");
+const staff = requireAnyPerm("billing", "ipd_patient_billing", "ipd_collections");
 const collectionsPerm = requireAnyPerm("billing", "ipd_collections");
 const CATEGORIES = ["procedure", "test", "medicine", "doctor_visit", "room_service", "other"];
 const MODES = ["cash", "upi", "card", "bank", "insurance", "other"];

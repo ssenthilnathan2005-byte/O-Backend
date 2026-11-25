@@ -8,12 +8,20 @@ const ROLES = ["doctor", "front_office", "pharmacy", "nurse", "hospital_lab"];
 const MODULES = [
   "revenue", "billing", "all_patients", "live_patients", "beds_wards", "vitals",
   "ipd", "lab", "pharmacy", "inventory", "hr", "attendance",
-  "ipd_bed_requests", "ipd_collections", "ipd_patients",
+  "ipd_bed_requests", "ipd_collections", "ipd_patient_ops", "ipd_patient_billing",
 ];
 // Sub-permissions of ipd. An ipd saved before they existed (no sub key at all) means all three.
-const IPD_SUBS = ["ipd_bed_requests", "ipd_collections", "ipd_patients"];
-function normalizeMods(mods) {
+const IPD_SUBS = ["ipd_bed_requests", "ipd_collections", "ipd_patient_ops", "ipd_patient_billing"];
+// The single "ipd_patients" key became two: patient operations and billing.
+function upgradeLegacy(mods) {
   const m = Array.isArray(mods) ? [...mods] : [];
+  if (!m.includes("ipd_patients")) return m;
+  const rest = m.filter(x => x !== "ipd_patients");
+  for (const k of ["ipd_patient_ops", "ipd_patient_billing"]) if (!rest.includes(k)) rest.push(k);
+  return rest;
+}
+function normalizeMods(mods) {
+  const m = upgradeLegacy(mods);
   const hasIpd = m.includes("ipd");
   if (hasIpd && !IPD_SUBS.some(s => m.includes(s))) return [...m, ...IPD_SUBS];
   if (!hasIpd) return m.filter(x => !IPD_SUBS.includes(x));
@@ -79,7 +87,7 @@ router.put("/:role", requireAuth, async (req, res) => {
     if (!ROLES.includes(role)) return res.status(400).json({ error: "Unknown role" });
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
-    let mods = (Array.isArray(req.body.modules) ? req.body.modules : []).filter(m => MODULES.includes(m));
+    let mods = upgradeLegacy(Array.isArray(req.body.modules) ? req.body.modules : []).filter(m => MODULES.includes(m));
     if (!mods.includes("ipd")) mods = mods.filter(m => !IPD_SUBS.includes(m));
     await pool.query(
       `INSERT INTO hospital_role_permissions (hospital_id, role, modules, updated_at)
