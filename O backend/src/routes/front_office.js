@@ -40,6 +40,12 @@ function fo(req, res, next) {
     next();
   });
 }
+// FO_PERMS_V1: front office routes that follow Admin > Permissions
+const { requireAnyPerm: _foAnyPerm } = require("./permissions");
+function foPerm(...keys) {
+  const gate = _foAnyPerm(...keys);
+  return (req, res, next) => fo(req, res, () => gate(req, res, next));
+}
 function haOnly(req, res, next) {
   requireAuth(req, res, () => {
     if (req.user.role !== "hospital_admin" || !req.user.hospitalId)
@@ -197,13 +203,13 @@ router.post("/bookings/:bid/undo-check-in", fo, async (req, res) => {
 });
 
 // ---- admission ----
-router.get("/doctors", fo, async (req, res) => {
+router.get("/doctors", foPerm("ipd"), async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT id, name, specialty FROM doctors WHERE hospital_id=$1 ORDER BY name", [req.user.hospitalId]);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.get("/beds", fo, async (req, res) => {
+router.get("/beds", foPerm("ipd"), async (req, res) => {
   try {
     const { rows } = await pool.query(
       "SELECT b.id AS bed_id, b.bed_number, w.id AS ward_id, w.name AS ward_name FROM beds b JOIN wards w ON w.id=b.ward_id WHERE b.hospital_id=$1 AND b.status='available' AND b.reserved_booking_id IS NULL ORDER BY w.name, length(b.bed_number), b.bed_number",
@@ -212,7 +218,7 @@ router.get("/beds", fo, async (req, res) => {
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.get("/inward", fo, async (req, res) => {
+router.get("/inward", foPerm("ipd"), async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT id, patient_name, phone, age, gender, ward, bed_number, admitting_doctor_name, diagnosis, admitted_at, (SELECT uhid FROM users WHERE users.id=inward_patients.patient_user_id) AS uhid, (SELECT area FROM users WHERE users.id=inward_patients.patient_user_id) AS area FROM inward_patients WHERE hospital_id=$1 AND status='admitted' ORDER BY admitted_at DESC", [req.user.hospitalId]);
     res.set("Cache-Control", "no-store");
@@ -259,7 +265,7 @@ router.get("/patient-lookup", fo, async (req, res) => {
     res.json({ patients: rows.map(patientView) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.post("/admit", fo, async (req, res) => {
+router.post("/admit", foPerm("ipd"), async (req, res) => {
   const client = await pool.connect();
   let began = false;
   try {
@@ -457,7 +463,7 @@ router.post("/claim-code", fo, async (req, res) => {
 
 // ---- vitals (optional, after check-in) ----
 const num = (v, lo, hi) => { if (v === undefined || v === null || v === "") return null; const n = Number(v); return Number.isFinite(n) && n >= lo && n <= hi ? n : NaN; };
-router.post("/bookings/:bid/vitals", fo, async (req, res) => {
+router.post("/bookings/:bid/vitals", foPerm("vitals"), async (req, res) => {
   try {
     await ready;
     const b = req.body || {};
