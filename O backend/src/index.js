@@ -160,6 +160,8 @@ app.use("/uploads", express.static(UPLOAD_DIR, {
 }));
 
 // ── API routes ────────────────────────────────────────────────────────────────
+app.use("/api/my-modules", require("./routes/my_modules"));
+app.use("/api", require("./middleware/moduleGate"));
 app.use("/api/auth",      authRoutes);
 const nurseRoutes = require("./routes/nurses");
 app.use("/api/auth/nurse", nurseRoutes.authRouter);
