@@ -11,7 +11,7 @@ const { sendPushToPatient } = require("../services/push");
 
 const router = express.Router();
 const nid = (p) => p + randomBytes(6).toString("hex");
-const staffPerm = requireAnyPerm("ipd", "beds_wards");
+const staffPerm = requireAnyPerm("ipd_bed_requests", "beds_wards");
 const DEFAULT_HOLD_HOURS = 24;
 const ACTIVE = ["requested", "confirmed"];
 

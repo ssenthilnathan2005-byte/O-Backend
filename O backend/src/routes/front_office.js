@@ -203,13 +203,13 @@ router.post("/bookings/:bid/undo-check-in", fo, async (req, res) => {
 });
 
 // ---- admission ----
-router.get("/doctors", foPerm("ipd"), async (req, res) => {
+router.get("/doctors", foPerm("ipd_patients"), async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT id, name, specialty FROM doctors WHERE hospital_id=$1 ORDER BY name", [req.user.hospitalId]);
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.get("/beds", foPerm("ipd"), async (req, res) => {
+router.get("/beds", foPerm("ipd_patients"), async (req, res) => {
   try {
     const { rows } = await pool.query(
       "SELECT b.id AS bed_id, b.bed_number, w.id AS ward_id, w.name AS ward_name FROM beds b JOIN wards w ON w.id=b.ward_id WHERE b.hospital_id=$1 AND b.status='available' AND b.reserved_booking_id IS NULL ORDER BY w.name, length(b.bed_number), b.bed_number",
@@ -218,7 +218,7 @@ router.get("/beds", foPerm("ipd"), async (req, res) => {
     res.json(rows);
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.get("/inward", foPerm("ipd"), async (req, res) => {
+router.get("/inward", foPerm("ipd_patients"), async (req, res) => {
   try {
     const { rows } = await pool.query("SELECT id, patient_name, phone, age, gender, ward, bed_number, admitting_doctor_name, diagnosis, admitted_at, (SELECT uhid FROM users WHERE users.id=inward_patients.patient_user_id) AS uhid, (SELECT area FROM users WHERE users.id=inward_patients.patient_user_id) AS area FROM inward_patients WHERE hospital_id=$1 AND status='admitted' ORDER BY admitted_at DESC", [req.user.hospitalId]);
     res.set("Cache-Control", "no-store");
@@ -265,7 +265,7 @@ router.get("/patient-lookup", fo, async (req, res) => {
     res.json({ patients: rows.map(patientView) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
-router.post("/admit", foPerm("ipd"), async (req, res) => {
+router.post("/admit", foPerm("ipd_patients"), async (req, res) => {
   const client = await pool.connect();
   let began = false;
   try {

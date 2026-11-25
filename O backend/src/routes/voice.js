@@ -7,7 +7,7 @@ const { requireAuth } = require("../middleware/auth");
 const { requireAnyPerm } = require("./permissions");
 
 // Doctors, and nurses with Beds & Wards / IPD access (inpatient prescriptions from the Nurse Console)
-const nursePerm = requireAnyPerm("beds_wards", "ipd");
+const nursePerm = requireAnyPerm("beds_wards", "ipd_patients");
 function requireDoctorOrNurse(req, res, next) {
   requireAuth(req, res, () => {
     if (req.user.role === "doctor") return next();
