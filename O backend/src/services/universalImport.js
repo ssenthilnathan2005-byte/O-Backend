@@ -111,7 +111,8 @@ const FIELDS = [
   ["supplier", /supplier|vendor|distributor/],
   ["category", /categor|dosage form|^form$|^type$/],
   ["strength", /strength|dosage|dose/],
-  ["name", /name|item|product|medicine|drug|description|particulars|brand/],
+  ["brandName", /^(brand|trade|marketed as)( ?\/ ?trade)?( name)?$|^brand\b/],
+  ["name", /name|item|product|medicine|drug|description|particulars/],
 ];
 const IGNORE = /^(?!.*hsn).*(?:amount|amt|discount|disc\b|value|code|sr ?no|s ?no|sl ?no|serial|mfg|manufactur|mfr|company|\bfree\b|bonus|scheme)/;
 const CONTAINER_STRENGTH = /^\d+(\.\d+)?\s*(ml|g|gm|l)\s*(ampoule|sachet|cartridge|tube|bottle|vial|spray|inhaler)s?$|^\d+\s*(actuations?|doses?|puffs?)$/i;
@@ -145,6 +146,8 @@ function mapHeader(cells) {
       if (map[f] === undefined && re.test(h)) { map[f] = i; raw[f] = str(c); break; }
     }
   });
+  // Old behaviour kept: a sheet whose only name-like column is "Brand" still uses it as the medicine name.
+  if (map.name === undefined && map.brandName !== undefined) { map.name = map.brandName; raw.name = raw.brandName; delete map.brandName; delete raw.brandName; }
   return { map, raw, score: Object.keys(map).length };
 }
 
@@ -265,6 +268,7 @@ function parseSheet(aoa, sheetName) {
     rows.push({
       _row: hd.start + i + 1,
       name, strength,
+      brandName: str(g("brandName")).replace(/\s+/g, " ").slice(0, 100) || null,
       medCategory,
       quantity: q.qty,
       quantityUnit: outUnit,

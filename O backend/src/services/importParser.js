@@ -20,7 +20,8 @@ const FIELD_PATTERNS = [
   ["supplier", /supplier|vendor|distributor/],
   ["category", /categor|dosage form|^form$|^type$/],
   ["strength", /strength|dosage|dose/],
-  ["name", /name|item|product|medicine|drug|description|particulars|brand/],
+  ["brandName", /^(brand|trade|marketed as)( ?\/ ?trade)?( name)?$|^brand\b/],
+  ["name", /name|item|product|medicine|drug|description|particulars/],
 ];
 const IGNORE_HEADER = /^(?!.*hsn).*(?:amount|amt|discount|disc\b|value|code|sr no|s no|sl no|serial)/;
 
@@ -100,6 +101,8 @@ function mapHeader(row) {
       if (map[field] === undefined && re.test(h)) { map[field] = i; names[field] = str(cell); break; }
     }
   });
+  // Old behaviour kept: a sheet whose only name-like column is "Brand" still uses it as the medicine name.
+  if (map.name === undefined && map.brandName !== undefined) { map.name = map.brandName; names.name = names.brandName; delete map.brandName; delete names.brandName; }
   return { map, names, score: Object.keys(map).length };
 }
 
@@ -136,6 +139,7 @@ function parseSpreadsheet(buf) {
     rows.push({
       _row: i + 1,
       name,
+      brandName: str(get(r, "brandName")).replace(/\s+/g, " ").slice(0, 100) || null,
       strength,
       medCategory: normalizeCategory(get(r, "category"), name),
       quantity: qty,

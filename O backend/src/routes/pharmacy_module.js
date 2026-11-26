@@ -19,12 +19,23 @@ pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_no TEXT")
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS schedule TEXT"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS gst_percent REAL"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS hsn_code TEXT"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS brand_name TEXT"))
   .then(() => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_med_categories (hospital_id TEXT NOT NULL, name TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (hospital_id, name))"))
   .then(() => pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS payment_mode TEXT"))
   .catch(e => console.warn("[pharmacy_module] migration:", e.message));
 
 const DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
 const MED_CATEGORIES = ["Tablet", "Capsule", "Syrup/Tonic", "Injection", "Oil", "Ointment/Cream", "Drops", "Powder", "Others"];
+
+// Brand name (e.g. "Dolo" for Paracetamol 500mg). Optional. Returns { value } (null when blank) or { error }.
+function cleanBrand(raw) {
+  if (raw === undefined || raw === null) return { value: null };
+  const v = String(raw).replace(/\s+/g, " ").trim();
+  if (!v) return { value: null };
+  if (v.length > 100) return { error: "Brand name must be 100 characters or less" };
+  if (/[<>]/.test(v)) return { error: "Brand name has invalid characters" };
+  return { value: v };
+}
 
 // Returns { value } with the canonical category name (null when blank) or { error }.
 // A new custom name is saved per hospital so it appears in the dropdown next time.
@@ -165,7 +176,7 @@ router.get("/inventory", guard, async (req, res) => {
     const t = await todayIST();
     const soon = addDays(t, 30);
     const { rows } = await pool.query(
-      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, pack_unit, schedule, gst_percent, hsn_code, " +
+      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, pack_unit, schedule, gst_percent, hsn_code, brand_name, " +
       "to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, updated_at " +
       "FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC", [req.hid]);
     const bq = await pool.query(
@@ -188,7 +199,7 @@ router.get("/inventory", guard, async (req, res) => {
       else if (qty <= Number(r.min_quantity)) status = "low_stock";
       else if (exps.some(e => e <= soon)) status = "expiring_soon";
       return {
-        id: r.id, name: r.name, unit: r.unit, quantity: qty, packSize: pack, packUnit: r.pack_unit || null,
+        id: r.id, name: r.name, brandName: r.brand_name || null, unit: r.unit, quantity: qty, packSize: pack, packUnit: r.pack_unit || null,
         tabletsAvailable: total, reorderLevel: Number(r.min_quantity),
         purchasePrice: r.purchase_price, sellingPrice: r.selling_price, stripsPerBox: r.strips_per_box, tabletsPerBox: r.strips_per_box ? r.strips_per_box * pack : null, schedule: r.schedule || "none", gstPercent: r.gst_percent, hsnCode: r.hsn_code || null, breakdown: breakdownOf(qty * pack, pack, r.strips_per_box),
         supplier: r.supplier, location: r.location, batchNo: r.batch_no, medCategory: r.med_category || null,
@@ -217,6 +228,8 @@ router.post("/inventory", guard, async (req, res) => {
     if ((pp !== null && !(pp >= 0)) || (sp !== null && !(sp >= 0)))
       return res.status(400).json({ error: "Prices must be 0 or more" });
     if (b.expiryDate && !DATE_RE.test(b.expiryDate)) return res.status(400).json({ error: "expiryDate must be YYYY-MM-DD" });
+    const br = cleanBrand(b.brandName);
+    if (br.error) return res.status(400).json({ error: br.error });
     await client.query("BEGIN");
     const dup = await client.query(
       "SELECT 1 FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL AND lower(name)=lower($2)", [req.hid, name]);
@@ -227,9 +240,9 @@ router.post("/inventory", guard, async (req, res) => {
     const id = "inv_" + randomBytes(5).toString("hex");
     const qty = Math.round((openTabs / pack) * 1000) / 1000;
     await client.query(
-      "INSERT INTO inventory_items (id, hospital_id, name, category, unit, quantity, min_quantity, purchase_price, supplier, location, pack_size, batch_no, expiry_date, selling_price, med_category) " +
-      "VALUES ($1,$2,$3,'medicines','tablets',$4,$5,$6,$7,$8,$9,$10,$11::date,$12,$13)",
-      [id, req.hid, name, qty, reorder, pp, b.supplier || null, b.location || null, pack, b.batchNo || null, b.expiryDate || null, sp, medCat]);
+      "INSERT INTO inventory_items (id, hospital_id, name, category, unit, quantity, min_quantity, purchase_price, supplier, location, pack_size, batch_no, expiry_date, selling_price, med_category, brand_name) " +
+      "VALUES ($1,$2,$3,'medicines','tablets',$4,$5,$6,$7,$8,$9,$10,$11::date,$12,$13,$14)",
+      [id, req.hid, name, qty, reorder, pp, b.supplier || null, b.location || null, pack, b.batchNo || null, b.expiryDate || null, sp, medCat, br.value]);
     if (qty > 0) {
       await client.query(
         "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
@@ -290,6 +303,10 @@ router.patch("/inventory/:id/meta", guard, async (req, res) => {
   const client = await pool.connect();
   try {
     const { batchNo, expiryDate, sellingPrice, supplier, location, packSize, medCategory } = req.body || {};
+    // brandName: only touched when the key is sent; an empty string clears it
+    const brandGiven = Object.prototype.hasOwnProperty.call(req.body || {}, "brandName");
+    const br = cleanBrand(brandGiven ? req.body.brandName : undefined);
+    if (br.error) return res.status(400).json({ error: br.error });
     if (expiryDate && !DATE_RE.test(expiryDate)) return res.status(400).json({ error: "expiryDate must be YYYY-MM-DD" });
     if (sellingPrice != null && !(Number(sellingPrice) >= 0)) return res.status(400).json({ error: "Invalid sellingPrice" });
     let newPack = null;
@@ -315,9 +332,9 @@ router.patch("/inventory/:id/meta", guard, async (req, res) => {
     await client.query(
       "UPDATE inventory_items SET batch_no=COALESCE($1,batch_no), expiry_date=COALESCE($2::date,expiry_date), " +
       "selling_price=COALESCE($3,selling_price), supplier=COALESCE($4,supplier), location=COALESCE($7,location), " +
-      "pack_size=COALESCE($8,pack_size), quantity=COALESCE($9,quantity), med_category=COALESCE($10,med_category), updated_at=now() " +
+      "pack_size=COALESCE($8,pack_size), quantity=COALESCE($9,quantity), med_category=COALESCE($10,med_category), brand_name=CASE WHEN $11::boolean THEN $12::text ELSE brand_name END, updated_at=now() " +
       "WHERE id=$5 AND hospital_id=$6",
-      [batchNo ?? null, expiryDate ?? null, sellingPrice ?? null, supplier ?? null, req.params.id, req.hid, location ?? null, newPack, newQty, newCat]);
+      [batchNo ?? null, expiryDate ?? null, sellingPrice ?? null, supplier ?? null, req.params.id, req.hid, location ?? null, newPack, newQty, newCat, brandGiven, br.value]);
     await client.query("COMMIT");
     try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
     res.json({ ok: true });

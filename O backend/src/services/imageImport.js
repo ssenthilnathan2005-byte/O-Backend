@@ -10,9 +10,10 @@ const MAX_BYTES = 5 * 1024 * 1024; // the vision API accepts images up to 5 MB
 const PROMPT = [
   "You read a photo or scan of a pharmacy supplier invoice / stock list and return its table as JSON.",
   "Return ONLY JSON, no text around it, in this shape:",
-  '{"supplier":"","invoiceNo":"","items":[{"name":"","category":"","strength":"","qty":0,"unit":"","pack":"","batch":"","expiry":"","cost":0,"costBasis":"","mrp":0,"mrpBasis":""}]}',
+  '{"supplier":"","invoiceNo":"","items":[{"name":"","brand":"","category":"","strength":"","qty":0,"unit":"","pack":"","batch":"","expiry":"","cost":0,"costBasis":"","mrp":0,"mrpBasis":""}]}',
   "Rules:",
   "- Copy only what is printed. If a value is not visible or unreadable, use an empty string (or null for numbers). Never guess or calculate.",
+  "- brand: the brand / trade name (e.g. Dolo, Crocin) ONLY when the invoice prints it, in a Brand column or clearly next to the medicine. If there is no brand printed, use an empty string. Never guess a brand and never copy the manufacturer or company name into it.",
   "- name: medicine name only. strength like '500 mg'. category like Tablet, Syrup/Tonic, Drops, Ointment/Cream, Injection, Capsule when printed.",
   "- qty: the ordered / stock quantity as a number. unit: Box, Carton, Strip, Bottle, etc. as printed.",
   "- pack: packing text like '10 strips x 10 tablets' or '10 bottles x 100 ml' when printed, else ''.",
@@ -35,12 +36,12 @@ function buildRows(data) {
   const rows = [
     ["Supplier", str(data && data.supplier), "Invoice No.", str(data && data.invoiceNo)],
     [],
-    ["Item / Medicine", "Category", "Strength", "Qty", "Unit", "Pack / Conversion", "Batch", "Expiry", "Cost / Basis", "MRP / Basis"],
+    ["Item / Medicine", "Brand Name", "Category", "Strength", "Qty", "Unit", "Pack / Conversion", "Batch", "Expiry", "Cost / Basis", "MRP / Basis"],
   ];
   for (const it of items) {
     if (!str(it.name)) continue;
     const q = Number(it.qty);
-    rows.push([str(it.name), str(it.category), str(it.strength), isFinite(q) && it.qty !== "" && it.qty != null ? String(q) : "",
+    rows.push([str(it.name), str(it.brand), str(it.category), str(it.strength), isFinite(q) && it.qty !== "" && it.qty != null ? String(q) : "",
       str(it.unit), str(it.pack), str(it.batch), str(it.expiry), price(it.cost, it.costBasis), price(it.mrp, it.mrpBasis)]);
   }
   return rows;

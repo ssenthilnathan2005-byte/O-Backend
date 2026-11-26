@@ -70,7 +70,7 @@ function pageToRows(items, opts) {
 
 // ---- Normalise a PDF table into the same layout the Excel import uses -------------------------
 const HDR = [
-  [/^(item|medicine|product|description)/i, "Medicine Name"], [/^categor/i, "Category"], [/^strength/i, "Strength"],
+  [/^(item|medicine|product|description)/i, "Medicine Name"], [/^(brand|trade name|marketed as)/i, "Brand Name"], [/^categor/i, "Category"], [/^strength/i, "Strength"],
   [/^(qty|quantity|stock qty)/i, "Stock Qty"], [/^(unit|uom|stock unit)/i, "Stock Unit"],
   [/^(pack|conversion|packing)/i, "Packing Details"], [/^batch/i, "Batch No"], [/^exp/i, "Expiry Date"],
   [/^(cost|purchase|rate|ptr|buy)/i, "Purchase Price"], [/^(mrp|selling|sale)/i, "MRP"],
