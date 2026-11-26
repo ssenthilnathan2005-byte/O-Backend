@@ -2,6 +2,7 @@
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
+const imp = require("../services/activityImportance");
 const router = express.Router();
 
 function adminOnly(req, res, next) {
@@ -44,7 +45,7 @@ router.get("/", requireAuth, adminOnly, async (req, res) => {
     if (!hid) return res.status(400).json({ error: "hospitalId required" });
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
     const params = [hid];
-    let where = "hospital_id=$1";
+    let where = "hospital_id=$1 AND " + imp.importantClause();
     const add = (sql, v) => { params.push(v); where += " AND " + sql.replace("?", "$" + params.length); };
     if (req.query.before && !Number.isNaN(Date.parse(req.query.before))) add("at < ?", new Date(req.query.before).toISOString());
     const cat = String(req.query.category || "");
@@ -76,7 +77,7 @@ router.get("/unread", requireAuth, adminOnly, async (req, res) => {
     const since = req.query.since && !Number.isNaN(Date.parse(req.query.since))
       ? new Date(req.query.since).toISOString() : new Date(Date.now() - 86400000).toISOString();
     const { rows } = await pool.query(
-      "SELECT COUNT(*)::int AS c FROM hospital_activity WHERE hospital_id=$1 AND at > $2 AND coalesce(actor_role,'') <> 'hospital_admin'",
+      "SELECT COUNT(*)::int AS c FROM hospital_activity WHERE hospital_id=$1 AND at > $2 AND coalesce(actor_role,'') <> 'hospital_admin' AND " + imp.importantClause(),
       [hid, since]);
     res.set("Cache-Control", "no-store");
     res.json({ count: rows[0].c });
