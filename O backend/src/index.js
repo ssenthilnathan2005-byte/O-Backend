@@ -214,7 +214,9 @@ app.use("/api/prescriptions", pharmacyRoutes);
 app.use("/api/ambulance", ambulanceRoutes);
 app.use("/api/labs", labRoutes);
 app.use("/api/prescription-presets", presetRoutes);
-app.use("/api/hospital-integrations", require("./routes/hospital_integrations"));
+// Device integrations (fingerprint/ID-card machines) are disabled: attendance is manual now.
+// app.use("/api/hospital-integrations", require("./routes/hospital_integrations"));
+app.use("/api/staff-attendance", require("./routes/staff_attendance"));
 app.use("/api/dashboard", require("./routes/dashboard_kpis"));
 app.use("/api/pharmacy-stats", require("./routes/pharmacy_stats"));
 app.use("/api/pharmacy-module", require("./routes/pharmacy_module"));
