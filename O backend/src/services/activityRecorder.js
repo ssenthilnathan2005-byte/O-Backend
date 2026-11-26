@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 // Central audit recorder. One middleware, mounted once in index.js, watches every change (POST/PUT/PATCH/DELETE)
 // that a logged-in hospital staff member makes anywhere in the API. When the request succeeds it saves an entry
 // in hospital_activity (who, role, what, which record, before -> after, exact time).
@@ -186,7 +186,7 @@ R("POST", /^\/front-office\/admit$/, { cat: "front_desk", action: "ipd.admitted"
 R("POST", /^\/bed-bookings$/, { cat: "wards", action: "bed.requested", ent: "patient", name: pn, text: (c, n) => "created a bed request for " + (n || "a patient"), details: (c) => autoDetails(c.body) });
 R("PATCH", /^\/bed-bookings\/([^/]+)\/(cancel|confirm|reject)$/, { cat: "wards", action: "bed.request_changed", ent: "patient", snap: row("bed_bookings"), name: (c) => c.before && c.before.patient_name, text: (c, n) => { const w = /\/(cancel|confirm|reject)$/.exec(c.path)[1]; return ({ cancel: "cancelled", confirm: "confirmed", reject: "rejected" })[w] + " the bed request of " + (n || "a patient"); }, details: (c) => compact([detail("Ward", c.before && c.before.ward_name), detail("Bed", c.before && c.before.bed_number), detail("Note", c.body.staffNote || c.body.note || c.body.reason)]) });
 R("POST", /^\/bed-bookings\/([^/]+)\/admit$/, { cat: "wards", action: "bed.request_admitted", ent: "patient", snap: row("bed_bookings"), name: (c) => c.before && c.before.patient_name, text: (c, n) => "admitted " + (n || "a patient") + " from a bed request", details: (c) => compact([detail("Ward", c.before && c.before.ward_name), detail("Bed", c.before && c.before.bed_number)]) });
-R("PATCH", /^\/bed-bookings\/ward-rate\/([^/]+)$/, { cat: "wards", action: "bed.ward_rate_changed", ent: "ward", snap: row("wards"), name: (c) => c.before && c.before.name, text: (c, n) => "changed the bed charges of ward " + (n || ""), details: (c) => autoDetails(c.body) });
+R("PATCH", /^\/bed-bookings\/ward-rate\/([^/]+)$/, { cat: "wards", action: "bed.ward_rate_changed", ent: "ward", snap: row("wards"), after: true, diff: { only: ["daily_rate"], labels: { daily_rate: "Daily bed rate" } }, noun: "ward", name: (c) => c.before && c.before.name, text: (c, n) => "changed the bed charges of ward " + (n || ""), details: (c) => autoDetails(c.body) });
 R("PATCH", /^\/ipd-billing\/([^/]+)\/settings$/, { cat: "wards", action: "ipd.bill_settings", ent: "patient", snap: row("inward_patients"), name: (c) => c.before && c.before.patient_name, text: (c, n) => "changed the bill settings (discount / tax) of " + (n || "a patient"), details: (c) => autoDetails(c.body) });
 R("POST", /^\/ipd-billing\/([^/]+)\/items$/, { cat: "wards", action: "ipd.bill_item_added", ent: "patient", snap: row("inward_patients"), name: (c) => c.before && c.before.patient_name, text: (c, n) => "added a bill item for " + (n || "a patient"), details: (c) => autoDetails(c.body) });
 R("DELETE", /^\/ipd-billing\/([^/]+)\/items\/([^/]+)$/, { cat: "wards", action: "ipd.bill_item_removed", ent: "patient", snap: row("inward_patients"), name: (c) => c.before && c.before.patient_name, text: (c, n) => "removed a bill item of " + (n || "a patient"), details: () => [] });
@@ -426,3 +426,4 @@ function activityRecorder() {
 }
 
 module.exports = { activityRecorder, matchRule, buildFromRule, buildGeneric, diffRows, autoDetails, rules };
+

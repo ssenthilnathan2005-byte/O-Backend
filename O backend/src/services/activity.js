@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 // Hospital activity feed (audit log): who changed what, with before/after values.
 // Fire-and-forget for callers: a logging failure must never break the request it is logging,
 // but every entry is retried and saved to the database (table hospital_activity), never kept only in memory.
@@ -91,6 +91,7 @@ async function record(e) {
     summary: e.summary, changes: e.changes && e.changes.length ? JSON.stringify(e.changes) : null,
   };
   if (!row.hospitalId || !row.summary) return false;
+  if (!require("./activityImportance").shouldRecord(row.action, e.changes)) return false; // Activity Monitor keeps important changes only
   let lastErr = null;
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
@@ -199,3 +200,4 @@ function logDoctorChange(req, before, after) {
 
 
 module.exports = { logActivity, record, resolveActor, resolveActorName, notifyLive, describeDoctorChanges, logDoctorChange, fmtTime, ROLE_LABEL };
+

@@ -1,7 +1,8 @@
-"use strict";
+﻿"use strict";
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
+const imp = require("../services/activityImportance");
 const router = express.Router();
 
 function adminOnly(req, res, next) {
@@ -24,51 +25,38 @@ pool.query(`
   CREATE INDEX IF NOT EXISTS idx_hact_hospital_role ON hospital_activity(hospital_id, actor_role, at DESC);
 `).catch((e) => console.warn("[activity] migration:", e.message));
 
-// Each filter shows what that group of people did AND what was done in their area by anyone.
-const FILTERS = {
-  doctor: "(category = 'doctor' OR actor_role = 'doctor')",
-  nursing: "(category = 'nursing' OR actor_role = 'nurse')",
-  front_desk: "(category = 'front_desk' OR actor_role = 'front_office')",
-  pharmacy: "(category = 'pharmacy' OR actor_role IN ('pharmacy','pharmacy_staff'))",
-  lab: "(category = 'lab' OR actor_role = 'hospital_lab')",
-  inventory: "category = 'inventory'",
-  wards: "category = 'wards'",
-  hr: "category = 'hr'",
-  admin: "actor_role IN ('hospital_admin','admin')",
-};
-
-// GET /api/activity?category=&role=&q=&before=ISO&limit=
+// GET /api/activity?group=pricing|access|staff|config&q=&before=ISO&limit=
+// Only important administrative changes are ever returned (see services/activityImportance.js).
 router.get("/", requireAuth, adminOnly, async (req, res) => {
   try {
     const hid = hospitalIdOf(req);
     if (!hid) return res.status(400).json({ error: "hospitalId required" });
     const limit = Math.min(Math.max(parseInt(req.query.limit, 10) || 50, 1), 200);
     const params = [hid];
-    let where = "hospital_id=$1";
+    let where = "hospital_id=$1 AND " + imp.importantClause();
     const add = (sql, v) => { params.push(v); where += " AND " + sql.replace("?", "$" + params.length); };
     if (req.query.before && !Number.isNaN(Date.parse(req.query.before))) add("at < ?", new Date(req.query.before).toISOString());
-    const cat = String(req.query.category || "");
-    if (cat) { if (FILTERS[cat]) where += " AND " + FILTERS[cat]; else add("category = ?", cat); }
-    if (req.query.role) add("actor_role = ?", String(req.query.role));
+    const gc = imp.groupClause(String(req.query.group || ""));
+    if (gc) where += " AND " + gc;
     const q = String(req.query.q || "").trim().toLowerCase().slice(0, 100);
     if (q) {
       params.push("%" + q.replace(/[\\%_]/g, (m) => "\\" + m) + "%");
       const n = "$" + params.length;
       where += ` AND (lower(summary) LIKE ${n} OR lower(coalesce(actor_name,'')) LIKE ${n}`
         + ` OR lower(replace(coalesce(actor_role,''),'_',' ')) LIKE ${n} OR lower(coalesce(entity_name,'')) LIKE ${n}`
-        + ` OR lower(coalesce(entity_type,'')) LIKE ${n} OR lower(replace(category,'_',' ')) LIKE ${n}`
-        + ` OR lower(coalesce(changes::text,'')) LIKE ${n})`;
+        + ` OR lower(coalesce(entity_type,'')) LIKE ${n} OR lower(coalesce(changes::text,'')) LIKE ${n})`;
     }
     params.push(limit + 1);
     const { rows } = await pool.query(
       `SELECT id, at, actor_id, actor_role, actor_name, category, action, entity_type, entity_id, entity_name, summary, changes
          FROM hospital_activity WHERE ${where} ORDER BY at DESC LIMIT $${params.length}`, params);
+    const items = rows.slice(0, limit).map((r) => Object.assign({}, r, { group: imp.groupOf(r.action) }));
     res.set("Cache-Control", "no-store");
-    res.json({ items: rows.slice(0, limit), hasMore: rows.length > limit });
+    res.json({ items, hasMore: rows.length > limit });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// GET /api/activity/unread?since=ISO  (changes made by others since the admin last looked)
+// GET /api/activity/unread?since=ISO  (important changes made by others since the admin last looked)
 router.get("/unread", requireAuth, adminOnly, async (req, res) => {
   try {
     const hid = hospitalIdOf(req);
@@ -76,7 +64,7 @@ router.get("/unread", requireAuth, adminOnly, async (req, res) => {
     const since = req.query.since && !Number.isNaN(Date.parse(req.query.since))
       ? new Date(req.query.since).toISOString() : new Date(Date.now() - 86400000).toISOString();
     const { rows } = await pool.query(
-      "SELECT COUNT(*)::int AS c FROM hospital_activity WHERE hospital_id=$1 AND at > $2 AND coalesce(actor_role,'') <> 'hospital_admin'",
+      "SELECT COUNT(*)::int AS c FROM hospital_activity WHERE hospital_id=$1 AND at > $2 AND coalesce(actor_role,'') <> 'hospital_admin' AND " + imp.importantClause(),
       [hid, since]);
     res.set("Cache-Control", "no-store");
     res.json({ count: rows[0].c });
