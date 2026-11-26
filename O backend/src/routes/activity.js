@@ -34,6 +34,7 @@ const FILTERS = {
   inventory: "category = 'inventory'",
   wards: "category = 'wards'",
   hr: "category = 'hr'",
+  admin: "actor_role IN ('hospital_admin','admin')",
 };
 
 // GET /api/activity?category=&role=&q=&before=ISO&limit=
