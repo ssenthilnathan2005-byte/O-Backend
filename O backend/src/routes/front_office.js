@@ -549,4 +549,85 @@ router.get("/fees/summary", fo, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ---- full patient profile for the front desk popup (this hospital only) ----
+const OPD_SELECT = "SELECT b.id, b.date, b.session, b.token_number, b.doctor_id, b.doctor_name, d.specialty, b.status, b.complaint, b.payment_done, b.patient_name, b.patient_age, b.patient_gender, b.patient_area, b.patient_blood_group FROM bookings b JOIN doctors d ON d.id=b.doctor_id";
+const IPD_SELECT = "SELECT ip.id, ip.ward, ip.bed_number, ip.admitting_doctor_id, ip.admitting_doctor_name, ip.diagnosis, ip.status, ip.admitted_at, ip.discharged_at, ip.patient_name, ip.age, ip.gender, d.specialty FROM inward_patients ip LEFT JOIN doctors d ON d.id=ip.admitting_doctor_id";
+router.get("/patient-profile", fo, async (req, res) => {
+  try {
+    const hid = req.user.hospitalId;
+    const inwardId = String(req.query.inwardId || "").trim();
+    const uhid = String(req.query.uhid || "").trim().toUpperCase();
+    const phone = String(req.query.phone || "").replace(/\D/g, "").slice(-10);
+    const name = String(req.query.name || "").trim().toLowerCase().replace(/\s+/g, " ");
+    const UCOLS = "id, name, phone, gender, age, year_of_birth, uhid, area, blood_group, walkin_hospital_id";
+    let user = null;
+    if (inwardId) {
+      const r = await pool.query("SELECT u.id, u.name, u.phone, u.gender, u.age, u.year_of_birth, u.uhid, u.area, u.blood_group, u.walkin_hospital_id FROM inward_patients ip JOIN users u ON u.id=ip.patient_user_id WHERE ip.id=$1 AND ip.hospital_id=$2", [inwardId, hid]);
+      user = r.rows[0] || null;
+    }
+    if (!user && uhid && uhid.length <= 20) {
+      const r = await pool.query("SELECT " + UCOLS + " FROM users WHERE role='patient' AND upper(uhid)=$1", [uhid]);
+      user = r.rows[0] || null;
+    }
+    const bPhone = "right(regexp_replace(coalesce(b.phone,''), '\\D', '', 'g'), 10)";
+    const bName = "lower(regexp_replace(trim(b.patient_name), '\\s+', ' ', 'g'))";
+    const iPhone = "right(regexp_replace(coalesce(ip.phone,''), '\\D', '', 'g'), 10)";
+    const iName = "lower(regexp_replace(trim(ip.patient_name), '\\s+', ' ', 'g'))";
+    let opd = [], ipd = [];
+    if (user) {
+      opd = (await pool.query(OPD_SELECT + " WHERE d.hospital_id=$1 AND (b.patient_id=$2 OR b.for_user_id=$2) ORDER BY b.date DESC, b.token_number DESC LIMIT 300", [hid, user.id])).rows;
+      ipd = (await pool.query(IPD_SELECT + " WHERE ip.hospital_id=$1 AND ip.patient_user_id=$2 ORDER BY ip.admitted_at DESC LIMIT 100", [hid, user.id])).rows;
+    } else {
+      if (phone.length === 10 && name) {
+        opd = (await pool.query(OPD_SELECT + " WHERE d.hospital_id=$1 AND " + bPhone + "=$2 AND " + bName + "=$3 ORDER BY b.date DESC, b.token_number DESC LIMIT 300", [hid, phone, name])).rows;
+        ipd = (await pool.query(IPD_SELECT + " WHERE ip.hospital_id=$1 AND " + iPhone + "=$2 AND " + iName + "=$3 ORDER BY ip.admitted_at DESC LIMIT 100", [hid, phone, name])).rows;
+      }
+      if (inwardId && !ipd.some(r => r.id === inwardId)) {
+        const r = await pool.query(IPD_SELECT + " WHERE ip.hospital_id=$1 AND ip.id=$2", [hid, inwardId]);
+        ipd = ipd.concat(r.rows);
+      }
+    }
+    // Privacy: only show patients who actually have a record at this hospital.
+    if (!opd.length && !ipd.length && !(user && user.walkin_hospital_id === hid))
+      return res.status(404).json({ error: "No record of this patient at this hospital" });
+
+    const ageOf = (yob, a) => yob && /^\d{4}$/.test(String(yob)) ? new Date().getFullYear() - Number(yob) : (a !== null && a !== undefined && a !== "" ? Number(a) : null);
+    const o0 = opd[0] || {}, i0 = ipd[0] || {};
+    const patient = user ? {
+      name: user.name, uhid: user.uhid || null, gender: user.gender || o0.patient_gender || i0.gender || null,
+      age: ageOf(user.year_of_birth, user.age),
+      phone: String(user.phone || "").replace(/\D/g, "").slice(-10) || null,
+      area: user.area || (opd.find(r => r.patient_area) || {}).patient_area || null,
+      blood_group: user.blood_group || (opd.find(r => r.patient_blood_group) || {}).patient_blood_group || null,
+    } : {
+      name: i0.patient_name || o0.patient_name || "", uhid: null, gender: i0.gender || o0.patient_gender || null,
+      age: i0.age != null ? Number(i0.age) : (o0.patient_age != null ? Number(o0.patient_age) : null),
+      phone: phone || null,
+      area: (opd.find(r => r.patient_area) || {}).patient_area || null,
+      blood_group: (opd.find(r => r.patient_blood_group) || {}).patient_blood_group || null,
+    };
+
+    const docs = new Map();
+    const bump = (key, nm, spec, kind, when) => {
+      if (!nm) return;
+      const d = docs.get(key) || { name: nm, specialty: spec || "", opd: 0, ipd: 0, last: "" };
+      d[kind]++;
+      const w = when ? new Date(when).toISOString() : "";
+      if (w > d.last) d.last = w;
+      if (!d.specialty && spec) d.specialty = spec;
+      docs.set(key, d);
+    };
+    for (const r of opd) if (r.status !== "cancelled") bump(r.doctor_id || r.doctor_name, r.doctor_name, r.specialty, "opd", r.date);
+    for (const r of ipd) bump(r.admitting_doctor_id || r.admitting_doctor_name, r.admitting_doctor_name, r.specialty, "ipd", r.admitted_at);
+
+    res.set("Cache-Control", "no-store");
+    res.json({
+      patient,
+      opd: opd.map(r => ({ id: r.id, date: r.date, session: r.session, token_number: r.token_number, doctor_name: r.doctor_name, specialty: r.specialty || "", status: r.status, complaint: r.complaint || "", paid: !!r.payment_done })),
+      ipd: ipd.map(r => ({ id: r.id, ward: r.ward || "", bed_number: r.bed_number || "", doctor_name: r.admitting_doctor_name || "", diagnosis: r.diagnosis || "", status: r.status, admitted_at: r.admitted_at, discharged_at: r.discharged_at })),
+      doctors: Array.from(docs.values()).sort((a, b) => (b.opd + b.ipd) - (a.opd + a.ipd)),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 module.exports = router;
