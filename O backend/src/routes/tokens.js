@@ -457,22 +457,15 @@ router.post("/:sessionId/close", requireDoctorOrAdmin, async (req, res) => {
     );
   });
 
-  // Notify every affected patient — paid bookings also get refunded.
+  // Notify every affected patient. Paid bookings are still handled in the background;
+  // the message itself does not mention refunds.
   for (const b of affected) {
-    if (b.payment_done === 1) {
-      refundBooking(b.id).catch(() => {});
-      sendPushToPatient(b.patient_id, {
-        title: "Session ended early — refund on the way",
-        body: `Dr. ${b.doctor_name} had to end today's session early${reason ? ` (${reason})` : ""}. Your payment will be refunded within a few days.`,
-        data: { tag: "session-closed-early", bookingId: b.id },
-      }).catch(() => {});
-    } else {
-      sendPushToPatient(b.patient_id, {
-        title: "Session ended early",
-        body: `Dr. ${b.doctor_name} had to end today's session early${reason ? ` (${reason})` : ""}. We're sorry for the inconvenience — please rebook for another available slot.`,
-        data: { tag: "session-closed-early", bookingId: b.id },
-      }).catch(() => {});
-    }
+    if (b.payment_done === 1) refundBooking(b.id).catch(() => {});
+    sendPushToPatient(b.patient_id, {
+      title: "Session ended early",
+      body: `Dr. ${b.doctor_name} had to end today's session early${reason ? ` (${reason})` : ""}. We're sorry for the inconvenience - please rebook for another available slot.`,
+      data: { tag: "session-closed-early", bookingId: b.id },
+    }).catch(() => {});
   }
 });
 
