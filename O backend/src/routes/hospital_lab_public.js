@@ -107,7 +107,7 @@ router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
            testId, t[0].name, notes || null, String(phone).trim(), slotDate, slotTime, t[0].price]);
         return res.status(201).json({ ...rows[0], testName: t[0].name, price: t[0].price });
       } catch (e) {
-        if (e.code === "23505" && e.constraint === "uq_hlo_patient_test") return res.status(409).json({ error: "You have already booked this test.", code: "DUPLICATE_LAB_BOOKING" });
+        if (e.code === "23505" && e.constraint === "uq_hlo_patient_test_active") return res.status(409).json({ error: "You have already booked this test.", code: "DUPLICATE_LAB_BOOKING" });
         if (e.code === "23505") continue; // token collision, retry
         throw e;
       }
