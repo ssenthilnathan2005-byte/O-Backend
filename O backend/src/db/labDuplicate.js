@@ -11,7 +11,7 @@ async function findLabDuplicate(db, { patientId, testId, inwardId }) {
     `SELECT o.id, o.token_number, o.slot_date, o.status
        FROM hospital_lab_orders o
       WHERE o.test_id = $2
-        AND o.status <> 'cancelled'
+        AND o.status NOT IN ('cancelled','report_ready')
         AND (
               ($1::text IS NOT NULL AND o.patient_id = $1)
            OR ($3::text IS NOT NULL AND o.patient_id IN (SELECT id FROM users WHERE uhid = $3))
@@ -27,18 +27,19 @@ async function findLabDuplicate(db, { patientId, testId, inwardId }) {
 // Skipped (with a warning) while old duplicate rows still exist.
 async function ensureLabDuplicateIndex(db) {
   try {
+    await db.query("DROP INDEX IF EXISTS uq_hlo_patient_test");
     const { rows } = await db.query(
       `SELECT patient_id, test_id, COUNT(*) AS n FROM hospital_lab_orders
-        WHERE patient_id IS NOT NULL AND status <> 'cancelled'
+        WHERE patient_id IS NOT NULL AND status NOT IN ('cancelled','report_ready')
         GROUP BY patient_id, test_id HAVING COUNT(*) > 1`);
     if (rows.length) {
       console.warn("[hospital-lab] " + rows.length + " patient/test duplicate group(s) exist; unique index not created until they are cancelled");
       return;
     }
     await db.query(
-      `CREATE UNIQUE INDEX IF NOT EXISTS uq_hlo_patient_test
+      `CREATE UNIQUE INDEX IF NOT EXISTS uq_hlo_patient_test_active
          ON hospital_lab_orders (patient_id, test_id)
-         WHERE patient_id IS NOT NULL AND status <> 'cancelled'`);
+         WHERE patient_id IS NOT NULL AND status NOT IN ('cancelled','report_ready')`);
   } catch (e) { console.warn("[hospital-lab] duplicate index:", e.message); }
 }
 
