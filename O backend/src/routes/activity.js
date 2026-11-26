@@ -1,4 +1,4 @@
-"use strict";
+﻿"use strict";
 const express = require("express");
 const { pool } = require("../db/init");
 const { requireAuth } = require("../middleware/auth");
@@ -48,7 +48,7 @@ router.get("/", requireAuth, adminOnly, async (req, res) => {
     const add = (sql, v) => { params.push(v); where += " AND " + sql.replace("?", "$" + params.length); };
     if (req.query.before && !Number.isNaN(Date.parse(req.query.before))) add("at < ?", new Date(req.query.before).toISOString());
     const cat = String(req.query.category || "");
-    if (cat) { if (FILTERS[cat]) where += " AND " + FILTERS[cat]; else add("category = ?", cat); }
+    if (cat) { if (FILTERS[cat]) { where += " AND " + FILTERS[cat]; if (cat !== "admin") where += " AND coalesce(actor_role,'') NOT IN ('hospital_admin','admin')"; } else add("category = ?", cat); }
     if (req.query.role) add("actor_role = ?", String(req.query.role));
     const q = String(req.query.q || "").trim().toLowerCase().slice(0, 100);
     if (q) {
@@ -84,3 +84,4 @@ router.get("/unread", requireAuth, adminOnly, async (req, res) => {
 });
 
 module.exports = router;
+
