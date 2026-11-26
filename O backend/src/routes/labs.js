@@ -235,6 +235,21 @@ router.post("/bookings", async (req, res) => {
     try {
       await client.query("BEGIN");
       await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", [sessionId]);
+      // one active booking per patient, lab, test, date and session
+      const { rows: dupRows } = await client.query(
+        `SELECT 1 FROM lab_bookings
+          WHERE lab_id=$1 AND test_id=$2 AND slot_date=$3 AND slot_time=$4
+            AND status NOT IN ('cancelled','report_ready')
+            AND lower(btrim(patient_name)) = lower(btrim($5))
+            AND (phone = $6 OR ($7::text IS NOT NULL AND patient_id = $7::text))
+          LIMIT 1`,
+        [labId, testId, slotDate, slotTime, patientName, phone, patientId]
+      );
+      if (dupRows.length) {
+        const dupErr = new Error("This patient already has a " + slotTime + " booking for this test on this date. Only one booking per test is allowed in each session.");
+        dupErr.dupBooking = true;
+        throw dupErr;
+      }
       const { rows: tk } = await client.query(
         "SELECT COALESCE(MAX(token_number),0)+1 AS n FROM lab_bookings WHERE lab_id=$1 AND test_id=$2 AND slot_date=$3 AND slot_time=$4",
         [labId, testId, slotDate, slotTime]
@@ -269,6 +284,7 @@ router.post("/bookings", async (req, res) => {
     const { rows } = await pool.query("SELECT * FROM lab_bookings WHERE id=$1", [id]);
     res.status(201).json(rows[0]);
   } catch (err) {
+    if (err && err.dupBooking) return res.status(409).json({ error: err.message });
     console.error("[labs] POST bookings error:", err.message);
     res.status(500).json({ error: "Failed to book lab test" });
   }
