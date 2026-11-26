@@ -169,6 +169,74 @@ router.get("/revenue", guard, async (req, res) => {
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
+// ── Net margin details: where the margin on the Revenue card comes from ──────
+// Same prescriptions, same amounts and same cost as /revenue, split by medicine and by prescription.
+router.get("/revenue/margin-details", guard, async (req, res) => {
+  try {
+    const rg = await getRange(req);
+    if (!rg) return res.status(400).json({ error: "Invalid from/to dates" });
+    const inv = await invMap(req.hid);
+    const { rows } = await pool.query(
+      "SELECT id, bill_amount, payment_mode, dispensed_items, tablets_sold, " +
+      "to_char((handed_over_at AT TIME ZONE 'Asia/Kolkata')::date,'YYYY-MM-DD') AS day " +
+      "FROM prescriptions WHERE " + HANDED_WHERE + " AND ip_billed=false ORDER BY handed_over_at DESC", [req.hid, rg[0], rg[1]]);
+    const items = new Map();
+    const rxList = [];
+    let gross = 0, cost = 0, adjustment = 0;
+    for (const r of rows) {
+      const bill = Number(r.bill_amount) || 0;
+      const lines = parse(r.dispensed_items);
+      const la = lineAmounts(r, inv);
+      let rxCost = 0, lineSum = 0;
+      la.forEach((l, i) => {
+        const raw = lines[i] || {};
+        const it = inv[raw.inventoryItemId] || null;
+        const key = raw.inventoryItemId || ("name:" + String(l.name || "").toLowerCase());
+        const pack = Number(it && it.pack_size) || 1;
+        let e = items.get(key);
+        if (!e) {
+          e = { name: l.name || (it && it.name) || "Unknown", tablets: 0, revenue: 0, cost: 0, prescriptions: 0,
+                purchasePerTablet: it && Number(it.purchase_price) > 0 ? r2(Number(it.purchase_price) / pack) : null,
+                mrpPerTablet: it && Number(it.selling_price) > 0 ? r2(Number(it.selling_price) / pack) : null,
+                hasCostPrice: !!(it && Number(it.purchase_price) > 0), removed: !it };
+          items.set(key, e);
+        }
+        e.tablets += l.tablets; e.revenue += l.amount; e.cost += l.cost; e.prescriptions += 1;
+        rxCost += l.cost; lineSum += l.amount;
+      });
+      const adj = r2(bill - lineSum);
+      adjustment += adj;
+      gross += bill; cost += rxCost;
+      rxList.push({ id: r.id, day: r.day, payment: r.payment_mode || "cash", bill: r2(bill), cost: r2(rxCost), margin: r2(bill - rxCost), medicines: la.length });
+    }
+    const list = Array.from(items.values()).map(e => {
+      const revenue = r2(e.revenue), c = r2(e.cost), margin = r2(revenue - c);
+      let issue = null;
+      if (!e.hasCostPrice) issue = "no_cost_price";
+      else if (revenue <= 0) issue = "no_revenue";
+      else if (margin < 0) issue = "below_cost";
+      return {
+        name: e.name, tablets: e.tablets, prescriptions: e.prescriptions, revenue, cost: c, margin,
+        marginPct: revenue > 0 ? r2((margin / revenue) * 100) : null,
+        soldPerTablet: e.tablets > 0 ? r2(revenue / e.tablets) : null,
+        costPerTablet: e.purchasePerTablet, mrpPerTablet: e.mrpPerTablet, issue,
+      };
+    }).sort((a, b) => a.margin - b.margin);
+    res.set("Cache-Control", "no-store");
+    res.json({
+      from: rg[0], to: rg[1],
+      summary: {
+        grossRevenue: r2(gross), costOfGoods: r2(cost), netMargin: r2(gross - cost),
+        netMarginPct: gross > 0 ? r2(((gross - cost) / gross) * 100) : null,
+        billAdjustment: r2(adjustment), prescriptions: rows.length,
+        lossMedicines: list.filter(x => x.margin < 0).length,
+        missingCostPrice: list.filter(x => x.issue === "no_cost_price").length,
+      },
+      medicines: list, prescriptions: rxList.slice(0, 200),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
 // ── Inventory (medicines) ────────────────────────────────────────────────────
 router.get("/inventory", guard, async (req, res) => {
   try {
