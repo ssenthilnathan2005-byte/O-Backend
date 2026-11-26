@@ -20,7 +20,21 @@ pool.query(`
     entity_type TEXT, entity_id TEXT, entity_name TEXT, summary TEXT NOT NULL, changes JSONB
   );
   CREATE INDEX IF NOT EXISTS idx_hact_hospital_at ON hospital_activity(hospital_id, at DESC);
+  CREATE INDEX IF NOT EXISTS idx_hact_hospital_cat ON hospital_activity(hospital_id, category, at DESC);
+  CREATE INDEX IF NOT EXISTS idx_hact_hospital_role ON hospital_activity(hospital_id, actor_role, at DESC);
 `).catch((e) => console.warn("[activity] migration:", e.message));
+
+// Each filter shows what that group of people did AND what was done in their area by anyone.
+const FILTERS = {
+  doctor: "(category = 'doctor' OR actor_role = 'doctor')",
+  nursing: "(category = 'nursing' OR actor_role = 'nurse')",
+  front_desk: "(category = 'front_desk' OR actor_role = 'front_office')",
+  pharmacy: "(category = 'pharmacy' OR actor_role IN ('pharmacy','pharmacy_staff'))",
+  lab: "(category = 'lab' OR actor_role = 'hospital_lab')",
+  inventory: "category = 'inventory'",
+  wards: "category = 'wards'",
+  hr: "category = 'hr'",
+};
 
 // GET /api/activity?category=&role=&q=&before=ISO&limit=
 router.get("/", requireAuth, adminOnly, async (req, res) => {
@@ -32,12 +46,17 @@ router.get("/", requireAuth, adminOnly, async (req, res) => {
     let where = "hospital_id=$1";
     const add = (sql, v) => { params.push(v); where += " AND " + sql.replace("?", "$" + params.length); };
     if (req.query.before && !Number.isNaN(Date.parse(req.query.before))) add("at < ?", new Date(req.query.before).toISOString());
-    if (req.query.category) add("category = ?", String(req.query.category));
+    const cat = String(req.query.category || "");
+    if (cat) { if (FILTERS[cat]) where += " AND " + FILTERS[cat]; else add("category = ?", cat); }
     if (req.query.role) add("actor_role = ?", String(req.query.role));
-    if (req.query.q) {
-      params.push("%" + String(req.query.q).toLowerCase() + "%");
+    const q = String(req.query.q || "").trim().toLowerCase().slice(0, 100);
+    if (q) {
+      params.push("%" + q.replace(/[\\%_]/g, (m) => "\\" + m) + "%");
       const n = "$" + params.length;
-      where += ` AND (lower(summary) LIKE ${n} OR lower(coalesce(actor_name,'')) LIKE ${n} OR lower(coalesce(entity_name,'')) LIKE ${n})`;
+      where += ` AND (lower(summary) LIKE ${n} OR lower(coalesce(actor_name,'')) LIKE ${n}`
+        + ` OR lower(replace(coalesce(actor_role,''),'_',' ')) LIKE ${n} OR lower(coalesce(entity_name,'')) LIKE ${n}`
+        + ` OR lower(coalesce(entity_type,'')) LIKE ${n} OR lower(replace(category,'_',' ')) LIKE ${n}`
+        + ` OR lower(coalesce(changes::text,'')) LIKE ${n})`;
     }
     params.push(limit + 1);
     const { rows } = await pool.query(

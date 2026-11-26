@@ -160,6 +160,8 @@ app.use("/uploads", express.static(UPLOAD_DIR, {
 }));
 
 // ── API routes ────────────────────────────────────────────────────────────────
+// Central audit log: records every change made by hospital staff (Activity Monitor)
+app.use("/api", require("./services/activityRecorder").activityRecorder());
 app.use("/api/my-modules", require("./routes/my_modules"));
 app.use("/api", require("./middleware/moduleGate"));
 app.use("/api/auth",      authRoutes);

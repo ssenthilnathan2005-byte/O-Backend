@@ -1,6 +1,7 @@
 "use strict";
-// Hospital activity feed: who changed what, with before/after values.
-// Fire-and-forget: a logging failure must never break the request it is logging.
+// Hospital activity feed (audit log): who changed what, with before/after values.
+// Fire-and-forget for callers: a logging failure must never break the request it is logging,
+// but every entry is retried and saved to the database (table hospital_activity), never kept only in memory.
 const crypto = require("crypto");
 const { pool } = require("../db/init");
 
@@ -24,6 +25,8 @@ function ensureTable() {
         changes     JSONB
       );
       CREATE INDEX IF NOT EXISTS idx_hact_hospital_at ON hospital_activity(hospital_id, at DESC);
+      CREATE INDEX IF NOT EXISTS idx_hact_hospital_cat ON hospital_activity(hospital_id, category, at DESC);
+      CREATE INDEX IF NOT EXISTS idx_hact_hospital_role ON hospital_activity(hospital_id, actor_role, at DESC);
     `).catch((e) => { tableReady = null; throw e; });
   }
   return tableReady;
@@ -38,33 +41,87 @@ const STAFF_TABLES = [
   ["pharmacyStaffId", "pharmacy_staff"], ["labStaffId", "hospital_lab_staff"],
 ];
 
-async function resolveActorName(u) {
+// Who is acting: name and hospital. Doctor/front-office/pharmacy/lab tokens carry no name or hospital, so look them up.
+const actorCache = new Map();
+async function resolveActor(u) {
+  u = u || {};
+  const key = [u.role, u.doctorId || u.nurseId || u.frontOfficeStaffId || u.pharmacyStaffId || u.labStaffId || u.id, u.hospitalId].join("|");
+  const hit = actorCache.get(key);
+  if (hit && Date.now() - hit.t < 10 * 60 * 1000) return hit.v;
+  let name = null;
+  let hospitalId = u.hospitalId || null;
   for (const [field, table] of STAFF_TABLES) {
     if (!u[field]) continue;
     try {
-      const { rows } = await pool.query("SELECT name FROM " + table + " WHERE id=$1", [u[field]]);
-      if (rows[0] && rows[0].name) return (field === "doctorId" && !/^dr\.?\s/i.test(rows[0].name)) ? "Dr. " + rows[0].name : rows[0].name;
+      const { rows } = await pool.query("SELECT name, hospital_id FROM " + table + " WHERE id=$1", [u[field]]);
+      if (rows[0]) {
+        name = rows[0].name || null;
+        if (!hospitalId) hospitalId = rows[0].hospital_id || null;
+        if (field === "doctorId" && name && !/^dr\.?\s/i.test(name)) name = "Dr. " + name;
+      }
     } catch (_) { /* fall through */ }
+    break;
   }
-  return u.name || ROLE_LABEL[u.role] || "Staff";
+  if (!name) name = u.name || ROLE_LABEL[u.role] || "Staff";
+  const v = { name, hospitalId };
+  if (hospitalId) {
+    if (actorCache.size > 500) actorCache.clear();
+    actorCache.set(key, { t: Date.now(), v });
+  }
+  return v;
+}
+async function resolveActorName(u) { return (await resolveActor(u)).name; }
+
+function notifyLive(hospitalId) {
+  // Only a tiny "something changed" ping goes over the socket; the admin screen then re-reads
+  // the data through the authenticated API, so no activity details are ever broadcast.
+  try { require("./ws").broadcast("activity_" + hospitalId, { type: "activity" }); } catch (_) { /* ignore */ }
+}
+
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+/** Saves one activity row (3 tries). Resolves true when saved. */
+async function record(e) {
+  const row = {
+    id: "act_" + crypto.randomBytes(8).toString("hex"),
+    hospitalId: e.hospitalId,
+    actorId: e.actorId || null, actorRole: e.actorRole || null, actorName: e.actorName || null,
+    category: e.category || "general", action: e.action || "activity",
+    entityType: e.entityType || null, entityId: e.entityId == null ? null : String(e.entityId), entityName: e.entityName || null,
+    summary: e.summary, changes: e.changes && e.changes.length ? JSON.stringify(e.changes) : null,
+  };
+  if (!row.hospitalId || !row.summary) return false;
+  let lastErr = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      await ensureTable();
+      await pool.query(
+        `INSERT INTO hospital_activity (id, hospital_id, actor_id, actor_role, actor_name, category, action, entity_type, entity_id, entity_name, summary, changes)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
+        [row.id, row.hospitalId, row.actorId, row.actorRole, row.actorName, row.category, row.action,
+         row.entityType, row.entityId, row.entityName, row.summary, row.changes]);
+      notifyLive(row.hospitalId);
+      return true;
+    } catch (err) { lastErr = err; await sleep(250 * attempt); }
+  }
+  console.error("[activity] NOT RECORDED after 3 tries:", row.action, "-", lastErr && lastErr.message);
+  return false;
 }
 
 /** logActivity(req, { hospitalId, category, action, entityType, entityId, entityName, summary, changes:[{field,label,from,to}] }) */
 function logActivity(req, o) {
   const u = (req && req.user) || {};
   (async () => {
-    const hid = o.hospitalId || u.hospitalId;
+    const actor = await resolveActor(u);
+    const hid = o.hospitalId || actor.hospitalId;
     if (!hid) return;
-    await ensureTable();
-    const name = o.actorName || await resolveActorName(u);
+    const name = o.actorName || actor.name;
     const summary = typeof o.summary === "function" ? o.summary(name) : o.summary;
-    await pool.query(
-      `INSERT INTO hospital_activity (id, hospital_id, actor_id, actor_role, actor_name, category, action, entity_type, entity_id, entity_name, summary, changes)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
-      ["act_" + crypto.randomBytes(8).toString("hex"), hid,
-       u.id || u.doctorId || null, u.role || null, name,
-       o.category, o.action, o.entityType || null, o.entityId || null, o.entityName || null,
-       summary, o.changes && o.changes.length ? JSON.stringify(o.changes) : null]);
+    await record({
+      hospitalId: hid, actorId: u.id || u.doctorId || null, actorRole: u.role || null, actorName: name,
+      category: o.category, action: o.action, entityType: o.entityType, entityId: o.entityId, entityName: o.entityName,
+      summary, changes: o.changes,
+    });
   })().catch((e) => console.warn("[activity] not recorded:", e.message));
 }
 
@@ -140,4 +197,5 @@ function logDoctorChange(req, before, after) {
   });
 }
 
-module.exports = { logActivity, describeDoctorChanges, logDoctorChange, fmtTime };
+
+module.exports = { logActivity, record, resolveActor, resolveActorName, notifyLive, describeDoctorChanges, logDoctorChange, fmtTime, ROLE_LABEL };
