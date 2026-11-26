@@ -2,6 +2,7 @@
 const { logAccess } = require("../services/audit");
 const express = require("express");
 const { pool } = require("../db/init");
+const { syncPassword } = require("../services/passwordSync");
 const { requireAuth } = require("../middleware/auth");
 const { requirePerm, requireAnyPerm } = require("./permissions");
 const { randomBytes } = require("crypto");
@@ -213,6 +214,7 @@ router.post("/replace-doctor", requireAuth, adminOnly, async (req, res) => {
       "SELECT $1::text, hospital_id, $2::text, $3::text, COALESCE($4::text, specialty), $5::text, '', NULL, price, consultation_fee, tokens_per_session, walk_in_interval, sessions, session_timings, schedule_config, 1, '', '', NULL, doctor_fee, avg_minutes_per_patient FROM doctors WHERE id=$6",
       [newId, old.code, nm, b.specialty ? String(b.specialty).trim() : null, pw, old.id]);
     await client.query("UPDATE doctors SET password=$1, phone=NULL WHERE id=$2", [pw, newId]);
+    await syncPassword({ type: "doctor", id: newId, hospitalId: hospitalId, plain: pw, action: "create", actorId: req.user && req.user.id });
     let newHr = (await client.query("UPDATE hospital_staff SET join_date=$1 WHERE login_type='doctor' AND login_id=$2 RETURNING *", [when, newId])).rows[0] || null;
     if (!newHr) {
       newHr = (await client.query("INSERT INTO hospital_staff (id, hospital_id, name, role, join_date, login_type, login_id, is_active) VALUES ($1,$2,$3,'doctor',$4,'doctor',$5,1) ON CONFLICT DO NOTHING RETURNING *", ["staff_" + nanoid(10), hospitalId, nm, when, newId])).rows[0] || null;

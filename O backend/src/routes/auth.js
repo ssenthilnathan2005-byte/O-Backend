@@ -8,6 +8,7 @@ const { body, validationResult } = require("express-validator");
 const { OAuth2Client } = require("google-auth-library");
 const { requireAuth } = require("../middleware/auth");
 const { pool } = require("../db/init");
+const { syncPassword } = require("../services/passwordSync");
 const { sendOTP, generateOTP, normalisePhone, IS_DEV } = require("../services/sms");
 const { Resend } = require("resend");
 
@@ -620,6 +621,7 @@ router.post("/pharmacy/set-password", async (req, res) => {
 
     const hash = await bcrypt.hash(String(newPassword), 10);
     await pool.query("UPDATE pharmacy_staff SET password=$1, first_login=0 WHERE id=$2", [hash, staff.id]);
+    await syncPassword({ type: "pharmacy", id: staff.id, hospitalId: staff.hospital_id, plain: String(newPassword), action: "first-login", actorId: staff.id });
 
     const payload = pharmacyPayload(staff);
     return res.json({ token: sign(payload), user: payload });
@@ -922,6 +924,7 @@ router.post("/hospital/set-password", async (req, res) => {
 
     const hash = await bcrypt.hash(newPassword, 10);
     await pool.query("UPDATE users SET password=$1, first_login=0 WHERE id=$2", [hash, hospital.admin_user_id]);
+    await syncPassword({ type: "hospital_admin", id: hospital.admin_user_id, hospitalId: hospital.id, plain: String(newPassword), action: "first-login", actorId: hospital.admin_user_id });
 
     const payload = { id: hospital.admin_user_id, role: "hospital_admin", hospitalId: hospital.id, hospitalName: hospital.name };
     return res.json({ token: sign(payload), user: payload });

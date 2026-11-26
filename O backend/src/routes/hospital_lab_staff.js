@@ -5,6 +5,7 @@ const jwt = require("jsonwebtoken");
 const { randomBytes } = require("crypto");
 const { issueCode } = require("../services/loginCodes");
 const { pool } = require("../db/init");
+const { syncPassword } = require("../services/passwordSync");
 const { requireAuth, requireAdminOrHospitalAdmin } = require("../middleware/auth");
 const router = express.Router();
 
@@ -68,6 +69,7 @@ router.post("/set-password", async (req, res) => {
     if (!(await bcrypt.compare(String(currentPassword), s.password))) return res.status(401).json({ error: "Current password is incorrect" });
     const hash = await bcrypt.hash(String(newPassword), 10);
     await pool.query("UPDATE hospital_lab_staff SET password=$1, first_login=0 WHERE id=$2", [hash, s.id]);
+    await syncPassword({ type: "lab", id: s.id, hospitalId: s.hospital_id, plain: String(newPassword), action: "first-login", actorId: s.id });
     const p = payloadOf(s);
     res.json({ token: sign(p), user: p });
   } catch (err) { console.error("[hl-staff set-password]", err.message); res.status(500).json({ error: err.message }); }
@@ -100,6 +102,7 @@ router.post("/staff", requireAdminOrHospitalAdmin, async (req, res) => {
         const { rows } = await pool.query(
           "INSERT INTO hospital_lab_staff (id, hospital_id, code, name, phone, password) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, name, phone, code, created_at",
           ["hls_" + rid(12), hid, code, String(name).trim(), phone || null, hash]);
+        await syncPassword({ type: "lab", id: rows[0].id, hospitalId: hid, plain: String(password), action: "create", actorId: req.user && req.user.id });
         return res.status(201).json(rows[0]);
       } catch (e) { if (e.code === "23505") continue; throw e; }
     }
@@ -123,6 +126,7 @@ router.patch("/staff/:id/password", requireAdminOrHospitalAdmin, async (req, res
     const hash = await bcrypt.hash(String(password), 10);
     const { rows } = await pool.query(
       "UPDATE hospital_lab_staff SET password=$1, first_login=1 WHERE id=$2 AND hospital_id=$3 RETURNING id", [hash, req.params.id, hid]);
+    if (rows.length) await syncPassword({ type: "lab", id: req.params.id, hospitalId: hid, plain: String(password), action: "change", actorId: req.user && req.user.id });
     if (!rows.length) return res.status(404).json({ error: "Staff not found" });
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }

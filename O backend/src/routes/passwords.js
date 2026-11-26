@@ -60,7 +60,7 @@ pool.query(`
     action      TEXT NOT NULL,
     created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
   );
-`).catch(e => console.warn("[password-mgmt] migration:", e.message));
+`).catch(e => console.warn("[password-mgmt] migration:", e.message)).then(() => ensureTracking());
 
 async function vaultSave(type, id, hospitalId, plain) {
   if (!KEY) return;
@@ -135,33 +135,103 @@ async function applyPassword(type, id, hospitalId, plain) {
   return rowCount > 0;
 }
 
+// ── "Last updated" tracking ─────────────────────────────────────────────────
+// password_changed_at is stamped by a database trigger on every login table, so it is correct no matter
+// which route (or script) changes a password. Set up once at start-up; retried if a table is not ready yet.
+const TRACKED = { hospital_admin: "users", doctor: "doctors", nurse: "nurses", front_office: "front_office_staff", lab: "hospital_lab_staff", pharmacy: "pharmacy_staff" };
+let trackingReady = false;
+let trackingRun = null;
+function ensureTracking() {
+  if (trackingReady) return Promise.resolve(true);
+  if (trackingRun) return trackingRun;
+  trackingRun = (async () => {
+    try {
+      await pool.query(`CREATE OR REPLACE FUNCTION touch_password_changed_at() RETURNS trigger AS $fn$
+        BEGIN
+          IF TG_OP = 'INSERT' THEN
+            IF COALESCE(NEW.password, '') <> '' THEN NEW.password_changed_at := now(); END IF;
+          ELSIF NEW.password IS DISTINCT FROM OLD.password THEN
+            NEW.password_changed_at := now();
+          END IF;
+          RETURN NEW;
+        END
+        $fn$ LANGUAGE plpgsql`);
+      for (const tbl of Object.values(TRACKED)) {
+        const col = await pool.query("SELECT 1 FROM information_schema.columns WHERE table_schema=current_schema() AND table_name=$1 AND column_name='password_changed_at'", [tbl]);
+        if (!col.rows[0]) await pool.query(`ALTER TABLE ${tbl} ADD COLUMN IF NOT EXISTS password_changed_at TIMESTAMPTZ`);
+        const trg = await pool.query("SELECT 1 FROM pg_trigger WHERE tgname='trg_password_changed_at' AND tgrelid=$1::regclass", [tbl]);
+        if (!trg.rows[0]) await pool.query(`CREATE TRIGGER trg_password_changed_at BEFORE INSERT OR UPDATE OF password ON ${tbl} FOR EACH ROW EXECUTE PROCEDURE touch_password_changed_at()`);
+      }
+      // One-time fill for accounts that already have an encrypted copy: use the time that copy was written.
+      for (const [type, tbl] of Object.entries(TRACKED))
+        await pool.query(`UPDATE ${tbl} x SET password_changed_at = v.updated_at FROM password_vault v WHERE v.login_type=$1 AND v.login_id=x.id AND x.password_changed_at IS NULL`, [type]);
+      trackingReady = true;
+    } catch (e) { console.warn("[password-mgmt] tracking setup:", e.message); }
+    trackingRun = null;
+    return trackingReady;
+  })();
+  return trackingRun;
+}
+
+// What the audit log action means, in words for the "Last updated" column.
+const EVENT_NOTE = {
+  "create": "Created by admin",
+  "change": "Changed by admin",
+  "reset": "Reset by admin",
+  "self-change": "Changed by the user",
+  "first-login": "Set by the user at login",
+  "staffmgmt-create": "Created by a doctor",
+  "staffmgmt-change": "Changed by a doctor",
+};
+const statusOf = (first, hasPw) => first === 1 ? "Pending first login" : (hasPw ? "Active" : "No password set");
+
 // ── GET / : every login of this hospital ────────────────────────────────────
 router.get("/", async (req, res) => {
   res.setHeader("Cache-Control", "no-store");
   try {
     const hid = req.user.hospitalId;
-    const out = [];
+    const tracked = await ensureTracking();
+    const stamp = a => tracked ? `${a}.password_changed_at` : "NULL::timestamptz";
 
+    // Latest password event of every account (viewing a password is not an update).
+    const events = new Map();
+    const evRows = (await pool.query(
+      `SELECT DISTINCT ON (login_type, login_id) login_type, login_id, action, created_at
+         FROM password_audit
+        WHERE hospital_id=$1 AND action NOT IN ('show','self-show','staffmgmt-show')
+        ORDER BY login_type, login_id, created_at DESC`, [hid])).rows;
+    for (const e of evRows) events.set(e.login_type + ":" + e.login_id, e);
+    const lastUpdate = (type, id, changedAt) => {
+      const e = events.get(type + ":" + id);
+      const at = changedAt || (e ? e.created_at : null);
+      if (!at) return { lastUpdatedAt: null, lastUpdatedNote: null };
+      // Trust the event label only when it is the very update that set this time.
+      const same = e && Math.abs(new Date(e.created_at).getTime() - new Date(at).getTime()) < 10000;
+      return { lastUpdatedAt: new Date(at).toISOString(), lastUpdatedNote: (same && EVENT_NOTE[e.action]) || "Password updated" };
+    };
+
+    const out = [];
     const ha = (await pool.query(
-      `SELECT u.id, h.name AS hname, h.login_id, u.password, u.first_login
+      `SELECT u.id, h.name AS hname, h.login_id, u.first_login, (COALESCE(u.password,'') <> '') AS has_pw, ${stamp("u")} AS changed_at
          FROM hospitals h JOIN users u ON u.id=h.admin_user_id WHERE h.id=$1`, [hid])).rows[0];
     if (ha) out.push({ type: "hospital_admin", role: ADMIN_LABEL, id: ha.id, name: ha.hname + " (Admin)", loginId: ha.login_id || "",
-      status: ha.first_login === 1 ? "Pending first login" : "Active" });
+      status: statusOf(ha.first_login, ha.has_pw), ...lastUpdate("hospital_admin", ha.id, ha.changed_at) });
 
     for (const [type, t] of Object.entries(TABLES)) {
       const { rows } = await pool.query(
-        `SELECT x.id, x.name, x.${t.code} AS login_code, ${t.first === null ? "NULL::int" : "x.first_login"} AS first_login
+        `SELECT x.id, x.name, x.${t.code} AS login_code, ${t.first === null ? "NULL::int" : "x.first_login"} AS first_login,
+                (COALESCE(x.password,'') <> '') AS has_pw, ${stamp("x")} AS changed_at
            FROM ${t.table} x WHERE x.hospital_id=$1 AND ${liveSql(type, "x")} ORDER BY x.name ASC`, [hid]);
       for (const r of rows)
         out.push({ type, role: t.label, id: r.id, name: r.name, loginId: r.login_code,
-          status: r.first_login === 1 ? "Pending first login" : "Active" });
+          status: statusOf(r.first_login, r.has_pw), ...lastUpdate(type, r.id, r.changed_at) });
     }
     // Forget the encrypted password of any account that is no longer live (deleted / archived / inactive in HR).
     const keys = out.map(u => u.type + ":" + u.id);
     await pool.query(
       "DELETE FROM password_vault WHERE hospital_id=$1 AND NOT ((login_type || ':' || login_id) = ANY($2::text[]))",
       [hid, keys]).catch(e => console.warn("[password-mgmt] vault cleanup:", e.message));
-    res.json({ vaultEnabled: !!KEY, users: out });
+    res.json({ vaultEnabled: !!KEY, trackingEnabled: tracked, users: out });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
@@ -194,8 +264,19 @@ router.post("/:type/:id/show", async (req, res) => {
     }
 
     if (!KEY) return res.status(503).json({ error: "Password vault is not configured on the server (PASSWORD_VAULT_KEY)" });
-    const pw = await vaultGet(type, id, hid);
-    if (!pw) return res.status(404).json({ error: "Not available yet. This password was set before Password Management existed - use Change once, then it can be shown." });
+    let pw = await vaultGet(type, id, hid);
+    let stale = false;
+    if (pw) {
+      // Never show a saved copy that no longer matches the password the account really logs in with.
+      const hrow = (await pool.query(
+        type === "hospital_admin" ? "SELECT password FROM users WHERE id=$1" : `SELECT password FROM ${TABLES[type].table} WHERE id=$1 AND hospital_id=$2`,
+        type === "hospital_admin" ? [id] : [id, hid])).rows[0];
+      const h = String((hrow && hrow.password) || "");
+      if (h.startsWith("$2") && !(await bcrypt.compare(pw, h))) { pw = null; stale = true; }
+    }
+    if (!pw) return res.status(404).json({ error: stale
+      ? "The user has changed this password since it was saved here, so the saved copy is out of date. Use Change to set a new one."
+      : "Not available yet. This password was set before Password Management existed - use Change once, then it can be shown." });
     await audit(req, type, id, "show");
     res.json({ password: pw, note });
   } catch (err) { res.status(500).json({ error: err.message }); }

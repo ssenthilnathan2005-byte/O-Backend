@@ -2,6 +2,7 @@ const express = require("express");
 const router = express.Router();
 const { v4: uuidv4 } = require("uuid");
 const { pool } = require("../db/init");
+const { syncPassword } = require("../services/passwordSync");
 const { broadcast } = require("../services/ws");
 const { requireAuth, requireAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
 const { requireAnyPerm } = require("./permissions");
@@ -591,6 +592,7 @@ router.post("/staff", requireAdminOrHospitalAdmin, async (req, res) => {
       "INSERT INTO pharmacy_staff (id, hospital_id, code, name, phone, password) VALUES ($1,$2,$3,$4,$5,$6) RETURNING id, name, phone, code, is_active, created_at",
       [id, hospitalId, code, name, phone, passwordHash]
     );
+    await syncPassword({ type: "pharmacy", id: id, hospitalId: hospitalId, plain: String(password), action: "create", actorId: req.user && req.user.id });
     res.status(201).json(rows[0]);
   } catch (err) {
     if (err.message.includes("unique")) return res.status(409).json({ error: "Phone already registered" });
@@ -638,6 +640,7 @@ router.patch("/staff/:id/password", requireAdminOrHospitalAdmin, async (req, res
       );
     }
     if (!result.rows.length) return res.status(404).json({ error: "Staff not found" });
+    await syncPassword({ type: "pharmacy", id: req.params.id, plain: String(password), action: "change", actorId: req.user && req.user.id });
     res.json({ success: true });
   } catch (err) {
     res.status(500).json({ error: err.message });

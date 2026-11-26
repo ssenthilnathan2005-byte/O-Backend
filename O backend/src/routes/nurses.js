@@ -5,6 +5,7 @@ const bcrypt = require("bcrypt");
 const crypto = require("crypto");
 const jwt = require("jsonwebtoken");
 const { pool } = require("../db/init");
+const { syncPassword } = require("../services/passwordSync");
 const { requireAdminOrHospitalAdmin } = require("../middleware/auth");
 
 const { issueCode } = require("../services/loginCodes");
@@ -59,6 +60,7 @@ adminRouter.post("/", async (req, res) => {
           "INSERT INTO nurses (id, hospital_id, nurse_code, name, phone, password, first_login) VALUES ($1,$2,$3,$4,$5,$6,1) RETURNING id, nurse_code, name, phone, is_active, first_login, created_at",
           [id, hospitalId, code, name, phone, hash]
         );
+        await syncPassword({ type: "nurse", id: id, hospitalId: hospitalId, plain: tempPassword, action: "create", actorId: req.user && req.user.id });
         return res.status(201).json({ ...rows[0], tempPassword });
       } catch (e) {
         if (e.code === "23505") continue;
@@ -80,6 +82,7 @@ adminRouter.post("/:id/reset-password", async (req, res) => {
     sql += " RETURNING id, nurse_code, name";
     const { rows } = await pool.query(sql, params);
     if (!rows.length) return res.status(404).json({ error: "Nurse not found" });
+    await syncPassword({ type: "nurse", id: rows[0].id, plain: tempPassword, action: "reset", actorId: req.user && req.user.id });
     res.json({ ...rows[0], tempPassword });
   } catch (err) {
     res.status(500).json({ error: err.message });
@@ -151,6 +154,7 @@ authRouter.post("/set-password", async (req, res) => {
       return res.status(401).json({ error: BAD });
     const hash = await bcrypt.hash(String(newPassword), 10);
     await pool.query("UPDATE nurses SET password=$1, first_login=0 WHERE id=$2", [hash, n.id]);
+    await syncPassword({ type: "nurse", id: n.id, plain: String(newPassword), action: "first-login", actorId: n.id });
     const p = payload(n);
     return res.json({ token: sign(p), user: p });
   } catch (err) {

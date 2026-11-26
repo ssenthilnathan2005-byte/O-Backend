@@ -2,6 +2,7 @@
 const { issueCode } = require("../services/loginCodes");
 const express = require("express");
 const { pool } = require("../db/init");
+const { syncPassword } = require("../services/passwordSync");
 const { requireAdmin, requireDoctorOrAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
 
 const router = express.Router();
@@ -220,6 +221,7 @@ router.post("/", requireAdminOrHospitalAdmin, async (req, res) => {
 
     const _pw = String((req.body || {}).password || "").trim();
     if (_pw.length >= 6) await pool.query("UPDATE doctors SET password=$1 WHERE id=$2", [_pw, id]);
+    await syncPassword({ type: "doctor", id: id, hospitalId: hospitalId, plain: _pw.length >= 6 ? _pw : null, action: "create", actorId: req.user && req.user.id });
     const { rows } = await pool.query("SELECT * FROM doctors WHERE id=$1", [id]);
     invalidateDoctorCache();
     res.status(201).json(row2doctor(rows[0]));
@@ -416,6 +418,7 @@ router.post("/:id/reset-password", requireAdminOrHospitalAdmin, async (req, res)
     if (!d) return res.status(404).json({ error: "Doctor not found" });
     if (req.user.role === "hospital_admin" && req.user.hospitalId !== d.hospital_id) return res.status(403).json({ error: "Not your hospital" });
     await pool.query("UPDATE doctors SET password=$1 WHERE id=$2", [pw, d.id]);
+    await syncPassword({ type: "doctor", id: d.id, hospitalId: d.hospital_id, plain: pw, action: "change", actorId: req.user && req.user.id });
     invalidateDoctorCache();
     res.json({ ok: true });
   } catch (err) { res.status(500).json({ error: err.message }); }

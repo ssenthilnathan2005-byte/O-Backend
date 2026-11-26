@@ -5,6 +5,7 @@ const { broadcast } = require("../services/ws");
 const jwt = require("jsonwebtoken");
 const { randomBytes, randomInt } = require("crypto");
 const { pool } = require("../db/init");
+const { syncPassword } = require("../services/passwordSync");
 const { requireAuth } = require("../middleware/auth");
 const { issueCode } = require("../services/loginCodes");
 let bcrypt; try { bcrypt = require("bcryptjs"); } catch (_) { bcrypt = require("bcrypt"); }
@@ -92,6 +93,7 @@ router.post("/set-password", async (req, res) => {
     if (!s || s.is_active === 0) return res.status(401).json({ error: "Invalid access code" });
     if (!(await checkPw(s, currentPassword))) return res.status(401).json({ error: "Current password is incorrect" });
     await pool.query("UPDATE front_office_staff SET password=$1, first_login=0 WHERE id=$2", [await bcrypt.hash(String(newPassword), 10), s.id]);
+    await syncPassword({ type: "front_office", id: s.id, hospitalId: s.hospital_id, plain: String(newPassword), action: "first-login", actorId: s.id });
     const p = payload(s);
     res.json({ token: sign(p), user: p });
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -115,6 +117,7 @@ router.post("/staff", haOnly, async (req, res) => {
       const code = await issueCode(req.user.hospitalId, "front_office");
       try {
         const { rows } = await pool.query("INSERT INTO front_office_staff (id, hospital_id, code, name, phone) VALUES ($1,$2,$3,$4,$5) RETURNING id, code, name, phone, is_active, created_at", [id("fos_"), req.user.hospitalId, code, name, phone]);
+        await syncPassword({ type: "front_office", id: rows[0].id, hospitalId: req.user.hospitalId, plain: null, action: "create", actorId: req.user.id });
         return res.status(201).json(rows[0]);
       } catch (e) { if (e.code !== "23505") throw e; }
     }
@@ -125,7 +128,10 @@ router.patch("/staff/:sid", haOnly, async (req, res) => {
   try {
     await ready;
     const b = req.body || {};
-    if (b.resetPassword) await pool.query("UPDATE front_office_staff SET password=NULL, first_login=1 WHERE id=$1 AND hospital_id=$2", [req.params.sid, req.user.hospitalId]);
+    if (b.resetPassword) {
+      await pool.query("UPDATE front_office_staff SET password=NULL, first_login=1 WHERE id=$1 AND hospital_id=$2", [req.params.sid, req.user.hospitalId]);
+      await syncPassword({ type: "front_office", id: req.params.sid, hospitalId: req.user.hospitalId, plain: null, action: "reset", actorId: req.user.id });
+    }
     if (typeof b.isActive === "boolean") await pool.query("UPDATE front_office_staff SET is_active=$1 WHERE id=$2 AND hospital_id=$3", [b.isActive ? 1 : 0, req.params.sid, req.user.hospitalId]);
     res.json({ ok: true });
   } catch (e) { res.status(500).json({ error: e.message }); }

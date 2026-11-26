@@ -4,6 +4,7 @@ const cache = require("../utils/cache");
 "use strict";
 const express = require("express");
 const { pool } = require("../db/init");
+const { syncPassword } = require("../services/passwordSync");
 const { requireAdmin, requireAdminOrHospitalAdmin } = require("../middleware/auth");
 const { requireFounderOrAdmin } = require("../middleware/hospitalDeleteAccess");
 const { deleteHospital } = require("../services/hospitalDelete");
@@ -302,8 +303,10 @@ router.post("/:id/reset-login", requireAdmin, async (req, res) => {
         [adminUserId, `${hospital.name} Admin`, ""]
       );
       await pool.query("UPDATE hospitals SET admin_user_id=$1 WHERE id=$2", [adminUserId, hospital.id]);
+      await syncPassword({ type: "hospital_admin", id: adminUserId, hospitalId: hospital.id, plain: null, action: "create", actorId: req.user && req.user.id });
     } else {
       await pool.query("UPDATE users SET password='', first_login=1 WHERE id=$1", [hospital.admin_user_id]);
+      await syncPassword({ type: "hospital_admin", id: hospital.admin_user_id, hospitalId: hospital.id, plain: null, action: "reset", actorId: req.user && req.user.id });
     }
 
     const { rows } = await pool.query("SELECT login_id, admin_user_id FROM hospitals WHERE id=$1", [hospital.id]);
