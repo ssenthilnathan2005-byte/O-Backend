@@ -9,7 +9,8 @@ const { requireAnyPerm } = require("./permissions");
 
 const router = express.Router();
 const nid = (p) => p + randomBytes(6).toString("hex");
-const staff = requireAnyPerm("billing", "ipd");
+const staff = requireAnyPerm("billing", "ipd_patient_billing", "ipd_collections");
+const collectionsPerm = requireAnyPerm("billing", "ipd_collections");
 const CATEGORIES = ["procedure", "test", "medicine", "doctor_visit", "room_service", "other"];
 const MODES = ["cash", "upi", "card", "bank", "insurance", "other"];
 
@@ -224,7 +225,7 @@ async function guardEdit(req, res, stay, action, detail, opts) {
 }
 
 // GET /ipd-billing/summary — collections and outstanding balances for the hospital
-router.get("/summary", requireAuth, staff, async (req, res) => {
+router.get("/summary", requireAuth, collectionsPerm, async (req, res) => {
   try {
     const hid = hospitalOf(req);
     if (!hid) return res.status(400).json({ error: "hospitalId required" });
@@ -265,7 +266,7 @@ router.get("/summary", requireAuth, staff, async (req, res) => {
 });
 
 // GET /ipd-billing/report?from=YYYY-MM-DD&to=YYYY-MM-DD — IPD money collected per day (net of refunds), for the Billing page
-router.get("/report", requireAuth, staff, async (req, res) => {
+router.get("/report", requireAuth, collectionsPerm, async (req, res) => {
   try {
     const hid = hospitalOf(req);
     if (!hid) return res.status(400).json({ error: "hospitalId required" });

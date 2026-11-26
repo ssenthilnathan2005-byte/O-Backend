@@ -8,7 +8,25 @@ const ROLES = ["doctor", "front_office", "pharmacy", "nurse", "hospital_lab"];
 const MODULES = [
   "revenue", "billing", "all_patients", "live_patients", "beds_wards", "vitals",
   "ipd", "lab", "pharmacy", "inventory", "hr", "attendance",
+  "ipd_bed_requests", "ipd_collections", "ipd_patient_ops", "ipd_patient_billing",
 ];
+// Sub-permissions of ipd. An ipd saved before they existed (no sub key at all) means all three.
+const IPD_SUBS = ["ipd_bed_requests", "ipd_collections", "ipd_patient_ops", "ipd_patient_billing"];
+// The single "ipd_patients" key became two: patient operations and billing.
+function upgradeLegacy(mods) {
+  const m = Array.isArray(mods) ? [...mods] : [];
+  if (!m.includes("ipd_patients")) return m;
+  const rest = m.filter(x => x !== "ipd_patients");
+  for (const k of ["ipd_patient_ops", "ipd_patient_billing"]) if (!rest.includes(k)) rest.push(k);
+  return rest;
+}
+function normalizeMods(mods) {
+  const m = upgradeLegacy(mods);
+  const hasIpd = m.includes("ipd");
+  if (hasIpd && !IPD_SUBS.some(s => m.includes(s))) return [...m, ...IPD_SUBS];
+  if (!hasIpd) return m.filter(x => !IPD_SUBS.includes(x));
+  return m;
+}
 const DEFAULTS = {
   doctor:       ["live_patients", "lab"],
   front_office: ["live_patients", "ipd", "beds_wards"],
@@ -44,7 +62,7 @@ async function loadRole(hospitalId, role) {
   const { rows } = await pool.query(
     "SELECT modules FROM hospital_role_permissions WHERE hospital_id=$1 AND role=$2",
     [hospitalId, role]);
-  const mods = rows[0] ? rows[0].modules : (DEFAULTS[role] || []);
+  const mods = normalizeMods(rows[0] ? rows[0].modules : (DEFAULTS[role] || []));
   _permCache.set(key, { mods, t: Date.now() });
   return mods;
 }
@@ -69,14 +87,15 @@ router.put("/:role", requireAuth, async (req, res) => {
     if (!ROLES.includes(role)) return res.status(400).json({ error: "Unknown role" });
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
-    const mods = (Array.isArray(req.body.modules) ? req.body.modules : []).filter(m => MODULES.includes(m));
+    let mods = upgradeLegacy(Array.isArray(req.body.modules) ? req.body.modules : []).filter(m => MODULES.includes(m));
+    if (!mods.includes("ipd")) mods = mods.filter(m => !IPD_SUBS.includes(m));
     await pool.query(
       `INSERT INTO hospital_role_permissions (hospital_id, role, modules, updated_at)
        VALUES ($1,$2,$3,now())
        ON CONFLICT (hospital_id, role) DO UPDATE SET modules=$3, updated_at=now()`,
       [hospitalId, role, JSON.stringify(mods)]);
     _permCache.delete(hospitalId + ":" + role);
-    res.json({ role, modules: mods });
+    res.json({ role, modules: normalizeMods(mods) });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 

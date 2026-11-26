@@ -136,7 +136,7 @@ router.post("/", requireAuth, async (req, res) => {
 
 // ── GET my prescriptions (patient) ───────────────────────────────────────────
 // ── Inpatient prescriptions (Nurse Console / Beds & Wards) ──────────────────
-router.get("/inward/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd", "vitals", "all_patients"), async (req, res) => {
+router.get("/inward/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd_patient_ops", "vitals", "all_patients"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     const { rows } = await pool.query(
@@ -147,7 +147,7 @@ router.get("/inward/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd",
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post("/inward/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd"), async (req, res) => {
+router.post("/inward/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd_patient_ops"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });

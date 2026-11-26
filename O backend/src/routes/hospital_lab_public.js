@@ -62,6 +62,13 @@ router.get("/public/:hospitalId", async (req, res) => {
 });
 
 // ── Patient booking (login required) ─────────────────────────────────────────
+// Which sessions exist and what time it is in India (the booking dialog uses this to grey out finished sessions)
+router.get("/public/:hospitalId/sessions", (req, res) => {
+  const now = labSessions.istNow();
+  res.set("Cache-Control", "no-store");
+  res.json({ today: now.date, nowMin: now.min, sessions: labSessions.LAB_SESSIONS });
+});
+
 router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
   try {
     const hospitalId = req.params.hospitalId;
@@ -70,14 +77,20 @@ router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
     if (!/^\d{10}$/.test(String(phone || "").trim())) return res.status(400).json({ error: "Enter a valid 10-digit phone number" });
     if (!/^\d{4}-\d{2}-\d{2}$/.test(String(slotDate || ""))) return res.status(400).json({ error: "Invalid date" });
     const days = (new Date(slotDate + "T00:00:00Z") - Date.now()) / 86400000;
-    if (!(days > -2 && days < 31)) return res.status(400).json({ error: "Date is out of range" });
+    if (!(days < 31)) return res.status(400).json({ error: "Date is out of range" });
     if (!["morning", "afternoon"].includes(slotTime)) return res.status(400).json({ error: "Invalid session" });
+    const closedMsg = labSessions.closedReason(slotDate, slotTime);
+    if (closedMsg) return res.status(400).json({ error: closedMsg, code: "LAB_SESSION_CLOSED" });
 
     const { rows: h } = await pool.query("SELECT has_lab FROM hospitals WHERE id=$1", [hospitalId]);
     if (!h.length || h[0].has_lab !== 1) return res.status(400).json({ error: "Lab facility is not available at this hospital" });
     const { rows: t } = await pool.query(
       "SELECT id, name, price FROM hospital_lab_tests WHERE id=$1 AND hospital_id=$2 AND is_active=1", [testId, hospitalId]);
     if (!t.length) return res.status(404).json({ error: "Test not found" });
+
+    // Duplicate prevention: the same patient (UHID) cannot book the same lab test twice
+    const dup = await findLabDuplicate(pool, { patientId: req.user.id, testId });
+    if (dup) return res.status(409).json({ error: "You have already booked this test.", code: "DUPLICATE_LAB_BOOKING" });
 
     for (let attempt = 0; attempt < 3; attempt++) {
       try {
@@ -94,6 +107,7 @@ router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
            testId, t[0].name, notes || null, String(phone).trim(), slotDate, slotTime, t[0].price]);
         return res.status(201).json({ ...rows[0], testName: t[0].name, price: t[0].price });
       } catch (e) {
+        if (e.code === "23505" && e.constraint === "uq_hlo_patient_test") return res.status(409).json({ error: "You have already booked this test.", code: "DUPLICATE_LAB_BOOKING" });
         if (e.code === "23505") continue; // token collision, retry
         throw e;
       }
@@ -102,6 +116,9 @@ router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
   } catch (err) { console.error("[hospital-lab book]", err.message); res.status(500).json({ error: err.message }); }
 });
 
+const { findLabDuplicate, ensureLabDuplicateIndex } = require("../db/labDuplicate");
+setTimeout(() => ensureLabDuplicateIndex(pool), 10000);
+const labSessions = require("../db/labSessions");
 module.exports = router;
 
 // ── Patient: my lab bookings ─────────────────────────────────────────────────
@@ -110,7 +127,7 @@ router.get("/my-orders", requireAuth, async (req, res) => {
     const { rows } = await pool.query(
       `SELECT o.id, o.hospital_id, h.name AS hospital_name, o.test_name, o.status,
               o.slot_date, o.slot_time, o.token_number, o.price,
-              o.result_value, o.report_url, o.ordered_at,
+              o.test_id, o.result_value, o.report_url, o.ordered_at,
               o.inward_id, o.amount,
               CASE WHEN o.inward_id IS NOT NULL THEN 'ipd' ELSE 'patient' END AS booked_via
        FROM hospital_lab_orders o

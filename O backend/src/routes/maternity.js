@@ -194,7 +194,7 @@ router.get("/maternity-eligible", requireAuth, staffOrOwnPatient("all_patients",
 }));
 
 // ---------- Profile ----------
-router.get("/maternity", requireAuth, requireAnyPerm("beds_wards", "ipd"), handle(async (req, res) => {
+router.get("/maternity", requireAuth, requireAnyPerm("beds_wards", "ipd_patient_ops"), handle(async (req, res) => {
   const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
   const { rows } = await pool.query(
     `SELECT m.*, m.inward_id AS id, i.patient_name, i.age, i.ward, i.bed_number, i.status
@@ -205,7 +205,7 @@ router.get("/maternity", requireAuth, requireAnyPerm("beds_wards", "ipd"), handl
   res.json(rows);
 }));
 
-router.get("/maternity/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd"), handle(async (req, res) => {
+router.get("/maternity/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd_patient_ops"), handle(async (req, res) => {
   const p = await loadInward(req);
   const { rows } = await pool.query("SELECT * FROM maternity_profiles WHERE inward_id=$1", [p.id]);
   res.json({
@@ -214,7 +214,7 @@ router.get("/maternity/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ip
   });
 }));
 
-router.post("/maternity/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd"), handle(async (req, res) => {
+router.post("/maternity/:inwardId", requireAuth, requireAnyPerm("beds_wards", "ipd_patient_ops"), handle(async (req, res) => {
   const p = await loadInward(req);
   const b = req.body || {};
   const bloodGroup = blank(b.bloodGroup) ? null : String(b.bloodGroup);

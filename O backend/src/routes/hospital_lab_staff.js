@@ -210,6 +210,12 @@ router.post("/inpatients/:inwardId/orders", requireLabStaff, async (req, res) =>
     const ip = ipR.rows[0];
     if (ip.status !== "admitted") { await client.query("ROLLBACK"); return res.status(409).json({ error: "This patient is already discharged" }); }
 
+    // Duplicate prevention: lock this inpatient so two staff cannot order the same test at once
+    await client.query("SELECT pg_advisory_xact_lock(hashtext($1))", ["hlo-dup:" + ip.id]);
+    const puR = await client.query("SELECT patient_user_id FROM inward_patients WHERE id=$1", [ip.id]);
+    const patientUserId = (puR.rows[0] && puR.rows[0].patient_user_id) || null;
+    const seenTests = new Set();
+
     const created = [];
     let added = 0;
     for (const p of picks) {
@@ -217,6 +223,9 @@ router.post("/inpatients/:inwardId/orders", requireLabStaff, async (req, res) =>
         "SELECT id, name, price FROM hospital_lab_tests WHERE id=$1 AND hospital_id=$2 AND is_active=1", [String(p.testId || ""), hid]);
       if (!tR.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "A selected test was not found" }); }
       const t = tR.rows[0];
+      const dup = seenTests.has(t.id) ? { id: "same-request" } : await findLabDuplicate(client, { patientId: patientUserId, testId: t.id, inwardId: ip.id });
+      if (dup) { await client.query("ROLLBACK"); return res.status(409).json({ error: t.name + " is already ordered for this patient.", code: "DUPLICATE_LAB_BOOKING" }); }
+      seenTests.add(t.id);
       const amount = (p.amount === undefined || p.amount === null || p.amount === "") ? Number(t.price) || 0 : Number(p.amount);
       if (!(amount >= 0)) { await client.query("ROLLBACK"); return res.status(400).json({ error: "Enter a valid amount for " + t.name }); }
       const amt = Math.round(amount * 100) / 100;
@@ -244,4 +253,5 @@ router.post("/inpatients/:inwardId/orders", requireLabStaff, async (req, res) =>
   } finally { client.release(); }
 });
 
+const { findLabDuplicate } = require("../db/labDuplicate");
 module.exports = router;

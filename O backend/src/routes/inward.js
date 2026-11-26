@@ -17,7 +17,7 @@ function adminOnly(req, res, next) {
   next();
 }
 
-router.get("/", requireAuth, requireAnyPerm("beds_wards", "ipd"), async (req, res) => {
+router.get("/", requireAuth, requireAnyPerm("beds_wards", "ipd_patient_ops", "ipd_patient_billing"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.query.hospitalId : req.user.hospitalId;
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
@@ -30,7 +30,7 @@ router.get("/", requireAuth, requireAnyPerm("beds_wards", "ipd"), async (req, re
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-router.post("/", requireAuth, requirePerm("ipd"), async (req, res) => {
+router.post("/", requireAuth, requirePerm("ipd_patient_ops"), async (req, res) => {
   const client = await pool.connect();
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
@@ -90,7 +90,7 @@ router.post("/", requireAuth, requirePerm("ipd"), async (req, res) => {
   } finally { client.release(); }
 });
 
-router.patch("/:id", requireAuth, requirePerm("ipd"), async (req, res) => {
+router.patch("/:id", requireAuth, requirePerm("ipd_patient_ops"), async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const b = req.body || {};
@@ -146,7 +146,7 @@ pool.query(`
 
 // POST /inward/:id/transfer { bedId, rate?, reason? } - move an admitted patient to another free bed (any ward).
 // New ward rate applies from the transfer day. The old ward is billed for the days before it.
-router.post("/:id/transfer", requireAuth, requirePerm("ipd"), async (req, res) => {
+router.post("/:id/transfer", requireAuth, requirePerm("ipd_patient_ops"), async (req, res) => {
   const client = await pool.connect();
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
@@ -216,7 +216,7 @@ router.post("/:id/transfer", requireAuth, requirePerm("ipd"), async (req, res) =
   } finally { client.release(); }
 });
 
-router.patch("/:id/discharge", requireAuth, requirePerm("ipd"), async (req, res) => {
+router.patch("/:id/discharge", requireAuth, requirePerm("ipd_patient_ops"), async (req, res) => {
   const client = await pool.connect();
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;

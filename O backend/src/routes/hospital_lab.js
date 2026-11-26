@@ -106,12 +106,23 @@ router.post("/orders", requireAuth, requirePerm("lab"), async (req, res) => {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { patientName, patientId, doctorId, doctorName, bookingId, testId, testName, priority, notes } = req.body;
     if (!patientName || !testId) return res.status(400).json({ error: "patientName and testId required" });
+
+    // Duplicate prevention: same patient (UHID) cannot be ordered the same lab test twice
+    let dupPatientId = patientId || null;
+    if (!dupPatientId && req.body.uhid) {
+      const { rows: pu } = await pool.query("SELECT id FROM users WHERE uhid = $1 AND role = 'patient'", [String(req.body.uhid).trim().toUpperCase()]);
+      if (!pu.length) return res.status(404).json({ error: "No patient found with that UHID" });
+      dupPatientId = pu[0].id;
+    }
+    if (!dupPatientId) return res.status(400).json({ error: "Patient UHID is required" });
+    const dup = await findLabDuplicate(pool, { patientId: dupPatientId, testId });
+    if (dup) return res.status(409).json({ error: "This patient has already booked this test.", code: "DUPLICATE_LAB_BOOKING" });
     const id = `hlo_${nanoid(10)}`;
     const { rows } = await pool.query(
       `INSERT INTO hospital_lab_orders
          (id, hospital_id, patient_name, patient_id, doctor_id, doctor_name, booking_id, test_id, test_name, priority, notes)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
-      [id, hospitalId, patientName, patientId||null, doctorId||null, doctorName||null,
+      [id, hospitalId, patientName, dupPatientId, doctorId||null, doctorName||null,
        bookingId||null, testId, testName, priority||"normal", notes||null]);
     logAccess(req, { action: "lab.order_created", resourceType: "lab_order", resourceId: String(rows[0].id) });
     res.status(201).json(rows[0]);
@@ -141,4 +152,5 @@ router.patch("/orders/:id", requireAuth, adminOnly, async (req, res) => {
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+const { findLabDuplicate } = require("../db/labDuplicate");
 module.exports = router;

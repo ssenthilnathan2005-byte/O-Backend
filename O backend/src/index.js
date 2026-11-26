@@ -160,6 +160,8 @@ app.use("/uploads", express.static(UPLOAD_DIR, {
 }));
 
 // ── API routes ────────────────────────────────────────────────────────────────
+app.use("/api/my-modules", require("./routes/my_modules"));
+app.use("/api", require("./middleware/moduleGate"));
 app.use("/api/auth",      authRoutes);
 const nurseRoutes = require("./routes/nurses");
 app.use("/api/auth/nurse", nurseRoutes.authRouter);
@@ -219,6 +221,7 @@ app.use("/api/pharmacy-module", require("./routes/pharmacy_module"));
 app.use("/api/pharmacy-import", require("./routes/pharmacy_import"));
 app.use("/api/voice", require("./routes/voice"));
 app.use("/api/front-office", require("./routes/front_office"));
+app.use("/api/doctor-vitals", require("./routes/doctor_vitals"));
 app.use("/api/permissions", require("./routes/permissions"));
 app.use("/api/password-management", require("./routes/passwords"));
 app.use("/api/doctor-account", require("./routes/doctor_password"));

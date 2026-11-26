@@ -882,7 +882,7 @@ router.post("/hospital/login", async (req, res) => {
     const { loginId, password } = req.body;
     if (!loginId || !password) return res.status(400).json({ error: "loginId and password are required" });
 
-    const { rows: hospRows } = await pool.query("SELECT id, name, admin_user_id, login_id FROM hospitals WHERE login_id=$1", [String(loginId).trim()]);
+    const { rows: hospRows } = await pool.query("SELECT id, name, admin_user_id, login_id FROM hospitals WHERE LOWER(login_id)=LOWER($1)", [String(loginId).trim()]);
     const hospital = hospRows[0];
     if (!hospital) return res.status(401).json({ error: "Invalid login ID" });
     if (!hospital.admin_user_id) return res.status(401).json({ error: "No admin account set up for this hospital" });
@@ -914,7 +914,7 @@ router.post("/hospital/set-password", async (req, res) => {
     if (!loginId || !newPassword) return res.status(400).json({ error: "loginId and newPassword are required" });
     if (String(newPassword).length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
 
-    const { rows: hospRows } = await pool.query("SELECT id, name, admin_user_id, login_id FROM hospitals WHERE login_id=$1", [String(loginId).trim()]);
+    const { rows: hospRows } = await pool.query("SELECT id, name, admin_user_id, login_id FROM hospitals WHERE LOWER(login_id)=LOWER($1)", [String(loginId).trim()]);
     const hospital = hospRows[0];
     if (!hospital || !hospital.admin_user_id) return res.status(404).json({ error: "Hospital not found" });
     const { rows: _fu_h } = await pool.query("SELECT first_login FROM users WHERE id=$1", [hospital.admin_user_id]);
@@ -937,7 +937,7 @@ router.post("/lab/login", async (req, res) => {
     const { loginId, password } = req.body;
     if (!loginId || !password) return res.status(400).json({ error: "loginId and password are required" });
 
-    const { rows: labRows } = await pool.query("SELECT * FROM labs WHERE login_id=$1", [String(loginId).trim()]);
+    const { rows: labRows } = await pool.query("SELECT * FROM labs WHERE LOWER(login_id)=LOWER($1)", [String(loginId).trim()]);
     const lab = labRows[0];
     if (!lab) return res.status(401).json({ error: "Invalid login ID" });
     if (!lab.admin_user_id) return res.status(401).json({ error: "No admin account set up for this lab" });
@@ -968,7 +968,7 @@ router.post("/lab/set-password", async (req, res) => {
     if (!loginId || !newPassword) return res.status(400).json({ error: "loginId and newPassword are required" });
     if (String(newPassword).length < 6) return res.status(400).json({ error: "Password must be at least 6 characters" });
 
-    const { rows: labRows } = await pool.query("SELECT * FROM labs WHERE login_id=$1", [String(loginId).trim()]);
+    const { rows: labRows } = await pool.query("SELECT * FROM labs WHERE LOWER(login_id)=LOWER($1)", [String(loginId).trim()]);
     const lab = labRows[0];
     if (!lab || !lab.admin_user_id) return res.status(404).json({ error: "Lab not found" });
     const { rows: _fu_l } = await pool.query("SELECT first_login FROM users WHERE id=$1", [lab.admin_user_id]);
