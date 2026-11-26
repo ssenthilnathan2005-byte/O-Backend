@@ -10,6 +10,7 @@ const router = express.Router();
 
 const STATUSES = ["present", "absent", "half_day", "leave"];
 const MAX_SUMMARY_DAYS = 62;
+const MAX_SAVE_ENTRIES = 500;
 
 pool.query(`
   CREATE TABLE IF NOT EXISTS staff_attendance (
@@ -82,55 +83,47 @@ router.get("/summary", requireAuth, requireAnyPerm("attendance"), async (req, re
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
-// POST /api/staff-attendance/bulk {date, status}  -> fill only UNMARKED staff for that day
-router.post("/bulk", requireAuth, requireAnyPerm("attendance"), async (req, res) => {
+// POST /api/staff-attendance/save {date, entries:[{staffId, status|null}]}
+// Saves a whole day in one transaction. status null/"" clears that staff member's mark.
+// Used both for the first save of a day and for later corrections to a past day.
+router.post("/save", requireAuth, requireAnyPerm("attendance"), async (req, res) => {
+  const client = await pool.connect();
   try {
     const hospitalId = hospitalOf(req);
-    const { date, status = "present" } = req.body || {};
+    const { date, entries } = req.body || {};
     if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
     if (!isDate(date) || date > todayIST()) return res.status(400).json({ error: "Choose today or an earlier date" });
-    if (!STATUSES.includes(status)) return res.status(400).json({ error: "Invalid status" });
-    const r = await pool.query(
-      `INSERT INTO staff_attendance (staff_id, attendance_date, hospital_id, status, marked_by)
-       SELECT s.id, $2, s.hospital_id, $3, $4
-         FROM hospital_staff s
-        WHERE ${ELIGIBLE_STAFF}
-       ON CONFLICT (staff_id, attendance_date) DO NOTHING`,
-      [hospitalId, date, status, req.user.id || null]
-    );
-    logAccess(req, { action: "attendance.bulk_marked", resourceType: "attendance", resourceId: date });
-    res.json({ ok: true, marked: r.rowCount });
-  } catch (err) { res.status(500).json({ error: err.message }); }
-});
-
-// PUT /api/staff-attendance/:staffId/:date {status, note}  -> set one day; status null/"" clears it
-router.put("/:staffId/:date", requireAuth, requireAnyPerm("attendance"), async (req, res) => {
-  try {
-    const hospitalId = hospitalOf(req);
-    const { staffId, date } = req.params;
-    const { status, note } = req.body || {};
-    if (!hospitalId) return res.status(400).json({ error: "hospitalId required" });
-    if (!isDate(date) || date > todayIST()) return res.status(400).json({ error: "Choose today or an earlier date" });
-    const own = await pool.query("SELECT 1 FROM hospital_staff WHERE id=$1 AND hospital_id=$2", [staffId, hospitalId]);
-    if (!own.rows.length) return res.status(404).json({ error: "Staff not found" });
-
-    if (!status) {
-      await pool.query("DELETE FROM staff_attendance WHERE staff_id=$1 AND attendance_date=$2", [staffId, date]);
-      return res.json({ ok: true, status: null });
+    if (!Array.isArray(entries) || entries.length === 0) return res.status(400).json({ error: "Nothing to save" });
+    if (entries.length > MAX_SAVE_ENTRIES) return res.status(400).json({ error: `Too many entries (max ${MAX_SAVE_ENTRIES})` });
+    for (const e of entries) {
+      if (!e || typeof e.staffId !== "string") return res.status(400).json({ error: "Invalid entry" });
+      if (e.status && !STATUSES.includes(e.status)) return res.status(400).json({ error: "Invalid status" });
     }
-    if (!STATUSES.includes(status)) return res.status(400).json({ error: "Invalid status" });
-    const cleanNote = typeof note === "string" && note.trim() ? note.trim().slice(0, 200) : null;
-    const { rows } = await pool.query(
-      `INSERT INTO staff_attendance (staff_id, attendance_date, hospital_id, status, note, marked_by)
-       VALUES ($1,$2,$3,$4,$5,$6)
-       ON CONFLICT (staff_id, attendance_date)
-       DO UPDATE SET status=EXCLUDED.status, note=EXCLUDED.note, marked_by=EXCLUDED.marked_by, updated_at=now()
-       RETURNING staff_id, attendance_date, status, note`,
-      [staffId, date, hospitalId, status, cleanNote, req.user.id || null]
-    );
-    logAccess(req, { action: "attendance.marked", resourceType: "staff", resourceId: staffId });
-    res.json({ ok: true, ...rows[0] });
-  } catch (err) { res.status(500).json({ error: err.message }); }
+    const ids = [...new Set(entries.map(e => e.staffId))];
+    const own = await client.query("SELECT id FROM hospital_staff WHERE hospital_id=$1 AND id = ANY($2::text[])", [hospitalId, ids]);
+    if (own.rows.length !== ids.length) return res.status(404).json({ error: "Some staff were not found" });
+
+    await client.query("BEGIN");
+    for (const e of entries) {
+      if (!e.status) {
+        await client.query("DELETE FROM staff_attendance WHERE staff_id=$1 AND attendance_date=$2", [e.staffId, date]);
+      } else {
+        await client.query(
+          `INSERT INTO staff_attendance (staff_id, attendance_date, hospital_id, status, marked_by)
+           VALUES ($1,$2,$3,$4,$5)
+           ON CONFLICT (staff_id, attendance_date)
+           DO UPDATE SET status=EXCLUDED.status, marked_by=EXCLUDED.marked_by, updated_at=now()`,
+          [e.staffId, date, hospitalId, e.status, req.user.id || null]
+        );
+      }
+    }
+    await client.query("COMMIT");
+    logAccess(req, { action: "attendance.day_saved", resourceType: "attendance", resourceId: date });
+    res.json({ ok: true, date, saved: entries.length });
+  } catch (err) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    res.status(500).json({ error: err.message });
+  } finally { client.release(); }
 });
 
 module.exports = router;
