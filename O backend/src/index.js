@@ -207,6 +207,7 @@ app.use("/api/wards", wardsRoutes);
 app.use("/api/bed-bookings", require("./routes/bed_bookings"));
 app.use("/api/ipd-billing", require("./routes/ipd_billing"));
 app.use("/api/hr", hrRoutes);
+app.use("/api/employees", require("./routes/employees"));
 app.use("/api/inventory", inventoryRoutes);
 app.use("/api/hospital-lab", hospitalLabRoutes);
 app.use("/api/hospital-lab", require("./routes/hospital_lab_public"));

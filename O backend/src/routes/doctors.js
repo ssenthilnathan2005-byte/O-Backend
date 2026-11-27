@@ -198,6 +198,10 @@ router.post("/", requireAdminOrHospitalAdmin, async (req, res) => {
         return res.status(400).json({ error: "Invalid consultation fee" });
     }
 
+    {
+      const _dup = await require("../services/employees").duplicateMessage(hospitalId, { phone });
+      if (_dup) return res.status(409).json({ error: _dup });
+    }
     const code = await issueCode(hospitalId, "doctor");
     const id   = `d_${Date.now()}`;
 
