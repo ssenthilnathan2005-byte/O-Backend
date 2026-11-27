@@ -133,6 +133,7 @@ router.patch("/orders/:id", requireAuth, adminOnly, async (req, res) => {
   try {
     const hospitalId = req.user.role === "admin" ? req.body.hospitalId : req.user.hospitalId;
     const { status, resultValue, reportUrl, notes } = req.body;
+    const before = await pool.query("SELECT status FROM hospital_lab_orders WHERE id=$1 AND hospital_id=$2", [req.params.id, hospitalId]);
     const { rows } = await pool.query(
       `UPDATE hospital_lab_orders SET
          status=COALESCE($1, status),
@@ -148,9 +149,11 @@ router.patch("/orders/:id", requireAuth, adminOnly, async (req, res) => {
         "DELETE FROM ipd_bill_items WHERE id=$1 AND inward_id IN (SELECT id FROM inward_patients WHERE id=$2 AND status='admitted')",
         [rows[0].ipd_bill_item_id, rows[0].inward_id]);
     }
+    if (before.rows[0] && before.rows[0].status !== rows[0].status) hlQueue.onStatusChanged(rows[0]).catch(() => {});
     res.json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
 });
 
+const hlQueue = require("../services/hospitalLabQueue");
 const { findLabDuplicate } = require("../db/labDuplicate");
 module.exports = router;

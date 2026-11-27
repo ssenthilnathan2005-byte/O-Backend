@@ -145,6 +145,7 @@ router.patch("/orders/:id", requireLabStaff, async (req, res) => {
   try {
     const { status, resultValue } = req.body;
     if (status && !ALLOWED.includes(status)) return res.status(400).json({ error: "Invalid status" });
+    const before = await pool.query("SELECT status FROM hospital_lab_orders WHERE id=$1 AND hospital_id=$2", [req.params.id, req.user.hospitalId]);
     const { rows } = await pool.query(
       `UPDATE hospital_lab_orders SET status=COALESCE($1,status), result_value=COALESCE($2,result_value), updated_at=now()
        WHERE id=$3 AND hospital_id=$4 AND status <> 'cancelled' RETURNING *`,
@@ -155,8 +156,31 @@ router.patch("/orders/:id", requireLabStaff, async (req, res) => {
         "DELETE FROM ipd_bill_items WHERE id=$1 AND inward_id IN (SELECT id FROM inward_patients WHERE id=$2 AND status='admitted')",
         [rows[0].ipd_bill_item_id, rows[0].inward_id]);
     }
+    // Tell the patient (push) and keep the live token queue in step
+    if (before.rows[0] && before.rows[0].status !== rows[0].status) hlQueue.onStatusChanged(rows[0]).catch(() => {});
     res.json(rows[0]);
   } catch (err) { res.status(500).json({ error: err.message }); }
+});
+
+// ── Live token queue (call next / complete / skip), same as the separate lab ──
+router.get("/queue/:testId/:date/:session", requireLabStaff, async (req, res) => {
+  try {
+    res.set("Cache-Control", "no-store");
+    res.json(await hlQueue.getState(req.user.hospitalId, req.params.testId, req.params.date, req.params.session));
+  } catch (err) { console.error("[hl-staff queue]", err.message); res.status(500).json({ error: "Failed to load queue" }); }
+});
+router.post("/queue/:testId/:date/:session/:action", requireLabStaff, async (req, res) => {
+  try {
+    const { testId, date, session, action } = req.params;
+    if (!["call", "complete", "skip"].includes(action)) return res.status(400).json({ error: "Invalid action" });
+    const b = req.body || {};
+    const tok = b.token !== undefined && b.token !== null ? Number(b.token) : null;
+    res.json(await hlQueue.applyAction(req.user.hospitalId, testId, date, session, action, tok));
+  } catch (err) {
+    if (err.status) return res.status(err.status).json({ error: err.message });
+    console.error("[hl-staff queue action]", err.message);
+    res.status(500).json({ error: "Failed to update queue" });
+  }
 });
 
 // ── Inpatients: lab staff picks an admitted patient, adds tests + amounts, sends to IPD bill ──
@@ -258,4 +282,5 @@ router.post("/inpatients/:inwardId/orders", requireLabStaff, async (req, res) =>
 });
 
 const { findLabDuplicate } = require("../db/labDuplicate");
+const hlQueue = require("../services/hospitalLabQueue");
 module.exports = router;

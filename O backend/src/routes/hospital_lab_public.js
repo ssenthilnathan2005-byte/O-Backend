@@ -105,6 +105,9 @@ router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
            RETURNING id, token_number, slot_date, slot_time`,
           [`hlo_${nanoid(10)}`, hospitalId, String(patientName).trim(), req.user.id || null,
            testId, t[0].name, notes || null, String(phone).trim(), slotDate, slotTime, t[0].price]);
+        try {
+          await hlQueue.onBooked({ hospital_id: hospitalId, test_id: testId, slot_date: rows[0].slot_date, slot_time: rows[0].slot_time, token_number: rows[0].token_number });
+        } catch (qe) { console.error("[hospital-lab book] queue:", qe.message); }
         return res.status(201).json({ ...rows[0], testName: t[0].name, price: t[0].price });
       } catch (e) {
         if (e.code === "23505" && e.constraint === "uq_hlo_patient_test_active") return res.status(409).json({ error: "You have already booked this test.", code: "DUPLICATE_LAB_BOOKING" });
@@ -119,7 +122,17 @@ router.post("/public/:hospitalId/book", requireAuth, async (req, res) => {
 const { findLabDuplicate, ensureLabDuplicateIndex } = require("../db/labDuplicate");
 setTimeout(() => ensureLabDuplicateIndex(pool), 10000);
 const labSessions = require("../db/labSessions");
+const hlQueue = require("../services/hospitalLabQueue");
 module.exports = router;
+
+// ── Patient: live token queue of one test / date / session (no login, same as the separate lab) ──
+router.get("/queue/:hospitalId/:testId/:date/:session", async (req, res) => {
+  try {
+    const { hospitalId, testId, date, session } = req.params;
+    res.set("Cache-Control", "no-store");
+    res.json(await hlQueue.getPublicState(hospitalId, testId, date, session));
+  } catch (err) { console.error("[hospital-lab queue]", err.message); res.status(500).json({ error: "Failed to load queue" }); }
+});
 
 // ── Patient: my lab bookings ─────────────────────────────────────────────────
 router.get("/my-orders", requireAuth, async (req, res) => {
