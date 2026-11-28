@@ -9,7 +9,8 @@ const { ready: batchesReady, addBatch } = require("../services/batches");
 const { STD_CATEGORIES } = require("../services/importParser");
 const { parseImport } = require("../services/universalImport");
 const { parsePdfImport } = require("../services/pdfImport");
-const { applyGst } = require("../services/gstRules");
+const { applyGst, lookup: gstLookup } = require("../services/gstRules");
+const gstAudit = require("../services/gstAudit");
 const withGst = o => { if (o && Array.isArray(o.rows)) o.rows.forEach(r => { try { applyGst(r); } catch (e) { /* keep the row as parsed */ } }); return o; };
 const { parseImageImport } = require("../services/imageImport");
 const { evaluateRow, categoryLabels, exactKey, looseKey } = require("../services/packaging");
@@ -199,6 +200,13 @@ async function importRow(client, req, r, defSupplier, invoiceNo, today) {
       "pack_unit=COALESCE(pack_unit,$10), hsn_code=CASE WHEN $13::text IS NULL THEN hsn_code WHEN hsn_code IS NULL OR hsn_code='' THEN $13::text WHEN $14::boolean THEN $13::text ELSE hsn_code END, brand_name=CASE WHEN $15::text IS NULL THEN brand_name WHEN brand_name IS NULL OR brand_name='' THEN $15::text ELSE brand_name END, updated_at=now() WHERE id=$11 AND hospital_id=$12",
       [newQty, batchNo, expiry, R.sellingPerPack, R.purchasePerPack, supplier, medCat, gst, R.packsPerBox, R.packWord, row.id, req.hid, hsnNew, hsnReplace, brand]);
     await addBatch(client, row.id, req.hid, batchNo, expiry, R.tablets, supplier);
+    const oldGst = row.gst_percent == null ? null : Number(row.gst_percent);
+    if (gst !== null && gst !== oldGst) {
+      const effHsn = (row.hsn_code && !hsnReplace) ? row.hsn_code : (hsnNew || row.hsn_code);
+      const rl = gstLookup(effHsn);
+      await gstAudit.record(client, req, { itemId: row.id, itemName: row.name, hsn: effHsn, oldRate: oldGst, newRate: gst, suggested: rl.rate, status: rl.status,
+        source: "import", reason: "Supplier invoice" + (invoiceNo ? " " + invoiceNo : "") }, { strict: false, inTx: true });
+    }
     await client.query(
       "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
       ["invtx_" + randomBytes(5).toString("hex"), req.hid, row.id, Math.round((R.tablets / pack) * 1000) / 1000, note, by]);
@@ -212,6 +220,11 @@ async function importRow(client, req, r, defSupplier, invoiceNo, today) {
     "VALUES ($1,$2,$3,'medicines','tablets',$4,5,$5,$6,$7,$8,$9::date,$10,$11,$12,$13,$14,$15,$16)",
     [id, req.hid, name, R.tablets / pack, R.purchasePerPack, supplier, pack, batchNo, expiry, R.sellingPerPack, medCat, gst, R.packsPerBox, R.packWord, hsnNew, brand]);
   await addBatch(client, id, req.hid, batchNo, expiry, R.tablets, supplier);
+  if (gst !== null) {
+    const rl = gstLookup(hsnNew);
+    await gstAudit.record(client, req, { itemId: id, itemName: name, hsn: hsnNew, oldRate: null, newRate: gst, suggested: rl.rate, status: rl.status,
+      source: "import", reason: "New medicine from supplier invoice" + (invoiceNo ? " " + invoiceNo : "") }, { strict: false, inTx: true });
+  }
   await client.query(
     "INSERT INTO inventory_transactions (id, hospital_id, item_id, type, quantity, reason, created_by) VALUES ($1,$2,$3,'in',$4,$5,$6)",
     ["invtx_" + randomBytes(5).toString("hex"), req.hid, id, R.tablets / pack, note, by]);

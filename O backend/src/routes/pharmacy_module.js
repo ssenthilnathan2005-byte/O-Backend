@@ -6,6 +6,9 @@ const { requireAuth } = require("../middleware/auth");
 const { hasAnyPerm } = require("./permissions");
 const { broadcast } = require("../services/ws");
 const { randomBytes } = require("crypto");
+const margin = require("../services/margin");
+const gstRules = require("../services/gstRules");
+const gstAudit = require("../services/gstAudit");
 const { ready: batchesReady, takeFromBatches, addBatch } = require("../services/batches");
 const router = express.Router();
 router.use(respCache);
@@ -20,6 +23,9 @@ pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS batch_no TEXT")
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS gst_percent REAL"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS hsn_code TEXT"))
   .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS brand_name TEXT"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS other_direct_cost REAL"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS purchase_discount_pct REAL"))
+  .then(() => pool.query("ALTER TABLE inventory_items ADD COLUMN IF NOT EXISTS purchase_includes_gst BOOLEAN"))
   .then(() => pool.query("CREATE TABLE IF NOT EXISTS pharmacy_med_categories (hospital_id TEXT NOT NULL, name TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL DEFAULT now(), PRIMARY KEY (hospital_id, name))"))
   .then(() => pool.query("ALTER TABLE prescriptions ADD COLUMN IF NOT EXISTS payment_mode TEXT"))
   .catch(e => console.warn("[pharmacy_module] migration:", e.message));
@@ -89,7 +95,7 @@ const HANDED_WHERE =
 
 async function invMap(hid) {
   const { rows } = await pool.query(
-    "SELECT id, name, purchase_price, selling_price, pack_size FROM inventory_items WHERE hospital_id=$1", [hid]);
+    "SELECT id, name, purchase_price, selling_price, pack_size, gst_percent, other_direct_cost, purchase_discount_pct, purchase_includes_gst FROM inventory_items WHERE hospital_id=$1", [hid]);
   const m = {};
   for (const r of rows) m[r.id] = r;
   return m;
@@ -135,102 +141,146 @@ function lineAmounts(rx, inv) {
   });
 }
 
+// Is this pharmacy GST-registered? Decides whether GST is taken out of revenue (see services/margin.js).
+async function isGstRegistered(hid) {
+  try {
+    const { rows } = await pool.query("SELECT gst_type, gstin FROM pharmacy_gst_profile WHERE hospital_id=$1", [hid]);
+    const p = rows[0] || {};
+    return (p.gst_type || (p.gstin ? "registered" : "")) === "registered";
+  } catch (_) { return false; }
+}
+
+// Invoice rates normally include GST, so a medicine counts as "purchase price includes GST" unless it was set to false.
+const inclGst = v => v !== false;
+
+// Margin for every medicine line of one handed-over prescription.
+// The final bill (after any discount, GST-inclusive) is spread over the lines in proportion to their amounts,
+// the same way the tax invoice does it, so the lines always add up to the bill that the Revenue card counts.
+function rxMargin(rx, inv, registered) {
+  const lines = parse(rx.dispensed_items);
+  const la = lineAmounts(rx, inv);
+  const bill = Number(rx.bill_amount) || 0;
+  const sum = la.reduce((s, l) => s + l.amount, 0);
+  const tabs = la.reduce((s, l) => s + l.tablets, 0);
+  const out = la.map((l, i) => {
+    const raw = lines[i] || {};
+    const it = inv[raw.inventoryItemId] || null;
+    const pack = Number(it && it.pack_size) || 1;
+    const share = sum > 0 ? l.amount / sum : (tabs > 0 ? l.tablets / tabs : 1 / la.length);
+    const m = margin.calc({
+      revenueGross: bill * share, packs: l.tablets / pack,
+      purchase: it && it.purchase_price, purchaseDiscountPct: it && it.purchase_discount_pct, purchaseIncludesGst: inclGst(it && it.purchase_includes_gst),
+      otherCost: it && it.other_direct_cost, gstRate: it && it.gst_percent, gstRegistered: registered,
+    });
+    return {
+      key: raw.inventoryItemId || ("name:" + String(l.name || "").toLowerCase()),
+      name: l.name || (it && it.name) || "Unknown", tablets: l.tablets, it, pack, m,
+    };
+  });
+  if (!out.length && bill > 0) {
+    // billed with no medicine lines (manual charge): all revenue, no cost
+    out.push({ key: "manual", name: "Other / manual charges", tablets: 0, it: null, pack: 1,
+      m: margin.calc({ revenueGross: bill, packs: 0, otherCost: 0, gstRate: null, gstRegistered: false }) });
+  }
+  return out;
+}
+
 // ── Revenue Pharmacy ─────────────────────────────────────────────────────────
 router.get("/revenue", guard, async (req, res) => {
   try {
     const rg = await getRange(req);
     if (!rg) return res.status(400).json({ error: "Invalid from/to dates" });
     const inv = await invMap(req.hid);
+    const registered = await isGstRegistered(req.hid);
     const { rows } = await pool.query(
       "SELECT id, bill_amount, payment_mode, dispensed_items, tablets_sold, " +
       "to_char((handed_over_at AT TIME ZONE 'Asia/Kolkata')::date,'YYYY-MM-DD') AS day " +
       "FROM prescriptions WHERE " + HANDED_WHERE + " AND ip_billed=false", [req.hid, rg[0], rg[1]]);
-    let gross = 0, cost = 0, tablets = 0;
+    let gross = 0, tablets = 0;
+    const all = [];
     const byPayment = { cash: 0, upi: 0, insurance: 0 };
     const byDay = {};
     for (const r of rows) {
       const bill = Number(r.bill_amount) || 0;
-      const c = lineAmounts(r, inv).reduce((s, l) => s + l.cost, 0);
-      gross += bill; cost += c; tablets += Number(r.tablets_sold) || 0;
+      for (const l of rxMargin(r, inv, registered)) all.push(l.m);
+      gross += bill; tablets += Number(r.tablets_sold) || 0;
       const pm = ["cash", "upi", "insurance"].includes(r.payment_mode) ? r.payment_mode : "cash";
       byPayment[pm] += bill;
       byDay[r.day] = (byDay[r.day] || 0) + bill;
     }
+    const t = margin.present(margin.combine(all));
     const daily = [];
     for (let d = rg[0]; d <= rg[1]; d = addDays(d, 1)) daily.push({ date: d, revenue: r2(byDay[d] || 0) });
     res.set("Cache-Control", "no-store");
     res.json({
       from: rg[0], to: rg[1], prescriptions: rows.length, tabletsSold: tablets,
-      grossRevenue: r2(gross), costOfGoods: r2(cost), netMargin: r2(gross - cost),
-      netMarginPct: gross > 0 ? r2(((gross - cost) / gross) * 100) : 0,
+      // grossRevenue = what customers paid (GST included). Margin is worked out on revenue excluding GST.
+      grossRevenue: r2(gross), gstCollected: t.gst, revenueExGst: t.revenue,
+      costOfGoods: t.cost, otherCosts: t.otherCost, netMargin: t.profit, netMarginPct: t.marginPct,
+      marginKind: t.kind, gstRegistered: registered, gstMissingLines: all.filter(m => m.gstMissing).length,
       byPayment: { cash: r2(byPayment.cash), upi: r2(byPayment.upi), insurance: r2(byPayment.insurance) },
       daily,
     });
   } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
-// ── Net margin details: where the margin on the Revenue card comes from ──────
-// Same prescriptions, same amounts and same cost as /revenue, split by medicine and by prescription.
+// ── Margin details: where the margin on the Revenue card comes from ──────────
+// Same prescriptions and the same maths (services/margin.js) as /revenue, split by medicine and by prescription.
 router.get("/revenue/margin-details", guard, async (req, res) => {
   try {
     const rg = await getRange(req);
     if (!rg) return res.status(400).json({ error: "Invalid from/to dates" });
     const inv = await invMap(req.hid);
+    const registered = await isGstRegistered(req.hid);
     const { rows } = await pool.query(
       "SELECT id, bill_amount, payment_mode, dispensed_items, tablets_sold, " +
       "to_char((handed_over_at AT TIME ZONE 'Asia/Kolkata')::date,'YYYY-MM-DD') AS day " +
       "FROM prescriptions WHERE " + HANDED_WHERE + " AND ip_billed=false ORDER BY handed_over_at DESC", [req.hid, rg[0], rg[1]]);
     const items = new Map();
     const rxList = [];
-    let gross = 0, cost = 0, adjustment = 0;
+    const every = [];
     for (const r of rows) {
-      const bill = Number(r.bill_amount) || 0;
-      const lines = parse(r.dispensed_items);
-      const la = lineAmounts(r, inv);
-      let rxCost = 0, lineSum = 0;
-      la.forEach((l, i) => {
-        const raw = lines[i] || {};
-        const it = inv[raw.inventoryItemId] || null;
-        const key = raw.inventoryItemId || ("name:" + String(l.name || "").toLowerCase());
-        const pack = Number(it && it.pack_size) || 1;
-        let e = items.get(key);
-        if (!e) {
-          e = { name: l.name || (it && it.name) || "Unknown", tablets: 0, revenue: 0, cost: 0, prescriptions: 0,
-                purchasePerTablet: it && Number(it.purchase_price) > 0 ? r2(Number(it.purchase_price) / pack) : null,
-                mrpPerTablet: it && Number(it.selling_price) > 0 ? r2(Number(it.selling_price) / pack) : null,
-                hasCostPrice: !!(it && Number(it.purchase_price) > 0), removed: !it };
-          items.set(key, e);
-        }
-        e.tablets += l.tablets; e.revenue += l.amount; e.cost += l.cost; e.prescriptions += 1;
-        rxCost += l.cost; lineSum += l.amount;
-      });
-      const adj = r2(bill - lineSum);
-      adjustment += adj;
-      gross += bill; cost += rxCost;
-      rxList.push({ id: r.id, day: r.day, payment: r.payment_mode || "cash", bill: r2(bill), cost: r2(rxCost), margin: r2(bill - rxCost), medicines: la.length });
+      const ls = rxMargin(r, inv, registered);
+      for (const l of ls) {
+        let e = items.get(l.key);
+        if (!e) { e = { name: l.name, tablets: 0, prescriptions: 0, it: l.it, pack: l.pack, parts: [] }; items.set(l.key, e); }
+        e.tablets += l.tablets; e.prescriptions += 1; e.parts.push(l.m); every.push(l.m);
+      }
+      const rm = margin.present(margin.combine(ls.map(l => l.m)));
+      rxList.push({ id: r.id, day: r.day, payment: r.payment_mode || "cash", medicines: ls.length,
+        billed: rm.billed, revenue: rm.revenue, cost: rm.cost, otherCost: rm.otherCost, margin: rm.profit });
     }
+    const total = margin.present(margin.combine(every));
     const list = Array.from(items.values()).map(e => {
-      const revenue = r2(e.revenue), c = r2(e.cost), margin = r2(revenue - c);
+      const c = margin.combine(e.parts), p = margin.present(c);
+      const it = e.it;
+      const cpt = it && Number(it.purchase_price) > 0
+        ? margin.calc({ packs: 1, purchase: it.purchase_price, purchaseDiscountPct: it.purchase_discount_pct, purchaseIncludesGst: inclGst(it.purchase_includes_gst), gstRate: it.gst_percent, gstRegistered: registered }).cost / e.pack
+        : null;
       let issue = null;
-      if (!e.hasCostPrice) issue = "no_cost_price";
-      else if (revenue <= 0) issue = "no_revenue";
-      else if (margin < 0) issue = "below_cost";
+      if (e.it === null && e.name === "Other / manual charges") issue = null;
+      else if (!c.hasPurchase) issue = "no_cost_price";
+      else if (p.revenue <= 0) issue = "no_revenue";
+      else if (p.profit < 0) issue = "below_cost";
       return {
-        name: e.name, tablets: e.tablets, prescriptions: e.prescriptions, revenue, cost: c, margin,
-        marginPct: revenue > 0 ? r2((margin / revenue) * 100) : null,
-        soldPerTablet: e.tablets > 0 ? r2(revenue / e.tablets) : null,
-        costPerTablet: e.purchasePerTablet, mrpPerTablet: e.mrpPerTablet, issue,
+        name: e.name, tablets: e.tablets, prescriptions: e.prescriptions,
+        billed: p.billed, gst: p.gst, revenue: p.revenue, cost: p.cost, otherCost: p.otherCost,
+        margin: p.profit, marginPct: p.marginPct, markupPct: p.markupPct, kind: p.kind, gstMissing: p.gstMissing,
+        soldPerTablet: e.tablets > 0 ? r2(p.revenue / e.tablets) : null,
+        costPerTablet: cpt === null ? null : r2(cpt), issue,
       };
     }).sort((a, b) => a.margin - b.margin);
     res.set("Cache-Control", "no-store");
     res.json({
-      from: rg[0], to: rg[1],
+      from: rg[0], to: rg[1], gstRegistered: registered,
       summary: {
-        grossRevenue: r2(gross), costOfGoods: r2(cost), netMargin: r2(gross - cost),
-        netMarginPct: gross > 0 ? r2(((gross - cost) / gross) * 100) : null,
-        billAdjustment: r2(adjustment), prescriptions: rows.length,
-        lossMedicines: list.filter(x => x.margin < 0).length,
+        grossRevenue: total.billed, gstCollected: total.gst, revenueExGst: total.revenue,
+        costOfGoods: total.cost, otherCosts: total.otherCost, netMargin: total.profit,
+        netMarginPct: total.marginPct, markupPct: total.markupPct, marginKind: total.kind,
+        prescriptions: rows.length, lossMedicines: list.filter(x => x.margin < 0).length,
         missingCostPrice: list.filter(x => x.issue === "no_cost_price").length,
+        otherCostMissingMedicines: list.filter(x => x.kind === "gross").length,
+        gstMissingMedicines: registered ? list.filter(x => x.gstMissing).length : 0,
       },
       medicines: list, prescriptions: rxList.slice(0, 200),
     });
@@ -244,12 +294,13 @@ router.get("/inventory", guard, async (req, res) => {
     const t = await todayIST();
     const soon = addDays(t, 30);
     const { rows } = await pool.query(
-      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, pack_unit, schedule, gst_percent, hsn_code, brand_name, " +
+      "SELECT id, name, unit, quantity, min_quantity, pack_size, purchase_price, selling_price, supplier, location, batch_no, med_category, strips_per_box, pack_unit, schedule, gst_percent, hsn_code, brand_name, other_direct_cost, purchase_discount_pct, purchase_includes_gst, " +
       "to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, updated_at " +
       "FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC", [req.hid]);
     const bq = await pool.query(
       "SELECT item_id, batch_no, to_char(expiry_date,'YYYY-MM-DD') AS expiry_date, tablets, supplier FROM inventory_batches " +
       "WHERE hospital_id=$1 AND tablets>0 ORDER BY expiry_date ASC NULLS LAST, received_at ASC", [req.hid]);
+    const registered = await isGstRegistered(req.hid);
     const byItem = {};
     for (const b of bq.rows) (byItem[b.item_id] = byItem[b.item_id] || []).push({ batchNo: b.batch_no, expiryDate: b.expiry_date, tablets: Number(b.tablets), supplier: b.supplier });
     res.set("Cache-Control", "no-store");
@@ -273,6 +324,18 @@ router.get("/inventory", guard, async (req, res) => {
         supplier: r.supplier, location: r.location, batchNo: r.batch_no, medCategory: r.med_category || null,
         expiryDate: dated.length ? dated[0].expiryDate : r.expiry_date, batches, status,
         updatedAt: r.updated_at,
+        otherDirectCost: r.other_direct_cost == null ? null : Number(r.other_direct_cost),
+        purchaseDiscountPct: r.purchase_discount_pct == null ? null : Number(r.purchase_discount_pct),
+        purchaseIncludesGst: inclGst(r.purchase_includes_gst),
+        // margin on one pack at MRP, same maths as the Revenue card. null when there is no purchase price to compare with.
+        margin: (() => {
+          if (!(Number(r.purchase_price) > 0)) return null;
+          const m = margin.present(margin.calc({
+            revenueGross: Number(r.selling_price) || 0, packs: 1, purchase: r.purchase_price, purchaseDiscountPct: r.purchase_discount_pct, purchaseIncludesGst: inclGst(r.purchase_includes_gst),
+            otherCost: r.other_direct_cost, gstRate: r.gst_percent, gstRegistered: registered,
+          }));
+          return { amount: m.profit, pct: m.marginPct, markupPct: m.markupPct, kind: m.kind, gstMissing: m.gstMissing, revenue: m.revenue, cost: m.cost, otherCost: m.otherCost };
+        })(),
       };
     }));
   } catch (e) { res.status(500).json({ error: e.message }); }
@@ -515,19 +578,56 @@ router.post("/inventory/:id/packing", guard, async (req, res) => {
       gst = Number(b.gstPercent);
       if (!(gst >= 0 && gst <= 40)) return res.status(400).json({ error: "GST percent must be between 0 and 40" });
     }
+    // Optional cost fields: when the key is sent, blank clears it
+    const ocGiven = Object.prototype.hasOwnProperty.call(b, "otherDirectCost");
+    const pdGiven = Object.prototype.hasOwnProperty.call(b, "purchaseDiscountPct");
+    let oc = null, pd = null;
+    if (ocGiven && has(b.otherDirectCost)) {
+      oc = Number(b.otherDirectCost);
+      if (!(oc >= 0 && oc <= 10000000)) return res.status(400).json({ error: "Other direct cost must be 0 or more" });
+    }
+    if (pdGiven && has(b.purchaseDiscountPct)) {
+      pd = Number(b.purchaseDiscountPct);
+      if (!(pd >= 0 && pd <= 100)) return res.status(400).json({ error: "Purchase discount must be between 0 and 100" });
+    }
+    const piGiven = Object.prototype.hasOwnProperty.call(b, "purchaseIncludesGst");
+    let pi = null;
+    if (piGiven) {
+      if (b.purchaseIncludesGst !== true && b.purchaseIncludesGst !== false) return res.status(400).json({ error: "purchaseIncludesGst must be true or false" });
+      pi = b.purchaseIncludesGst;
+    }
     await client.query("BEGIN");
     const cur = await client.query(
-      "SELECT quantity, pack_size FROM inventory_items WHERE id=$1 AND hospital_id=$2 AND category='medicines' FOR UPDATE",
+      "SELECT name, quantity, pack_size, gst_percent, hsn_code FROM inventory_items WHERE id=$1 AND hospital_id=$2 AND category='medicines' FOR UPDATE",
       [req.params.id, req.hid]);
     if (!cur.rows.length) { await client.query("ROLLBACK"); return res.status(404).json({ error: "Medicine not found" }); }
+    // GST % change: compare with the HSN rule. A change away from a clear rule needs a reason, and every change is audited.
+    const oldGst = cur.rows[0].gst_percent == null ? null : Number(cur.rows[0].gst_percent);
+    const effHsn = hsnGiven ? hsn : cur.rows[0].hsn_code;
+    const rule = gstRules.lookup(effHsn);
+    const gstChanged = has(b.gstPercent) && oldGst !== gst;
+    const gstReason = String(b.gstReason == null ? "" : b.gstReason).replace(/\s+/g, " ").trim().slice(0, 300);
+    if (gstChanged && rule.status === "ok" && gst !== rule.rate && !gstReason) {
+      await client.query("ROLLBACK");
+      return res.status(400).json({ error: "GST " + gst + "% differs from the standard " + rule.rate + "% for HSN " + rule.hsn + ". Enter a reason for the change.", needsReason: true, suggestedRate: rule.rate });
+    }
     const oldPack = Number(cur.rows[0].pack_size) || 1;
     const tablets = Math.round(Number(cur.rows[0].quantity) * oldPack);
     const newQty = Math.round((tablets / tps) * 1000000) / 1000000;
     await client.query(
       "UPDATE inventory_items SET pack_size=$1, strips_per_box=$2, quantity=$3, selling_price=$4, " +
-      "purchase_price=COALESCE($5,purchase_price), schedule=COALESCE($6,schedule), gst_percent=COALESCE($7,gst_percent), min_quantity=COALESCE($8,min_quantity), hsn_code=CASE WHEN $11::boolean THEN $12::text ELSE hsn_code END, updated_at=now() " +
+      "purchase_price=COALESCE($5,purchase_price), schedule=COALESCE($6,schedule), gst_percent=COALESCE($7,gst_percent), min_quantity=COALESCE($8,min_quantity), hsn_code=CASE WHEN $11::boolean THEN $12::text ELSE hsn_code END, " +
+      "other_direct_cost=CASE WHEN $13::boolean THEN $14::real ELSE other_direct_cost END, " +
+      "purchase_discount_pct=CASE WHEN $15::boolean THEN $16::real ELSE purchase_discount_pct END, " +
+      "purchase_includes_gst=CASE WHEN $17::boolean THEN $18::boolean ELSE purchase_includes_gst END, updated_at=now() " +
       "WHERE id=$9 AND hospital_id=$10",
-      [tps, spb, newQty, mrp, pp, sched, gst, reorder, req.params.id, req.hid, hsnGiven, hsn]);
+      [tps, spb, newQty, mrp, pp, sched, gst, reorder, req.params.id, req.hid, hsnGiven, hsn, ocGiven, oc, pdGiven, pd, piGiven, pi]);
+    if (gstChanged) {
+      await gstAudit.record(client, req, {
+        itemId: req.params.id, itemName: cur.rows[0].name, hsn: effHsn, oldRate: oldGst, newRate: gst, suggested: rule.rate, status: rule.status,
+        source: rule.status === "ok" && gst === rule.rate ? "auto" : "manual", reason: gstReason,
+      });
+    }
     await client.query("COMMIT");
     try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
     res.json({ ok: true, tabletsAvailable: tablets, breakdown: breakdownOf(tablets, tps, spb) });
@@ -535,6 +635,79 @@ router.post("/inventory/:id/packing", guard, async (req, res) => {
     try { await client.query("ROLLBACK"); } catch (_) {}
     res.status(500).json({ error: e.message });
   } finally { client.release(); }
+});
+
+// ── GST by HSN: lookup, review of missing / different rates, bulk fix, history ──
+router.get("/gst/lookup", guard, (req, res) => {
+  res.set("Cache-Control", "no-store");
+  res.json(gstRules.lookup(req.query.hsn, req.query.date));
+});
+
+router.get("/gst/review", guard, async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      "SELECT id, name, brand_name, hsn_code, gst_percent FROM inventory_items WHERE hospital_id=$1 AND category='medicines' AND archived_at IS NULL ORDER BY name ASC", [req.hid]);
+    const missing = [], different = [];
+    let withRate = 0;
+    for (const r of rows) {
+      const rule = gstRules.lookup(r.hsn_code);
+      const cur = r.gst_percent == null ? null : Number(r.gst_percent);
+      const base = { id: r.id, name: r.name, brandName: r.brand_name || null, hsn: r.hsn_code || null, status: rule.status, suggestedRate: rule.status === "ok" ? rule.rate : null, message: rule.message, note: rule.note };
+      if (cur === null) missing.push(base);
+      else { withRate++; if (rule.status === "ok" && cur !== rule.rate) different.push(Object.assign(base, { currentRate: cur })); }
+    }
+    res.set("Cache-Control", "no-store");
+    res.json({
+      counts: { total: rows.length, withRate, missing: missing.length, missingFixable: missing.filter(m => m.status === "ok").length,
+        missingManual: missing.filter(m => m.status !== "ok").length, different: different.length },
+      missing: missing.slice(0, 500), different: different.slice(0, 500),
+    });
+  } catch (e) { res.status(500).json({ error: e.message }); }
+});
+
+// Applies the HSN rule rate to the chosen medicines, all or nothing. Only clear rules (status ok) are applied; the rest are reported, never guessed.
+router.post("/gst/bulk-apply", guard, async (req, res) => {
+  const ids = Array.isArray(req.body && req.body.ids) ? Array.from(new Set(req.body.ids.map(String))).slice(0, 500) : [];
+  const kind = req.body && req.body.kind === "different" ? "different" : "missing";
+  if (!ids.length) return res.status(400).json({ error: "Select at least one medicine" });
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const updated = [], skipped = [];
+    for (const id of ids) {
+      const { rows } = await client.query("SELECT id, name, hsn_code, gst_percent FROM inventory_items WHERE id=$1 AND hospital_id=$2 AND category='medicines' AND archived_at IS NULL FOR UPDATE", [id, req.hid]);
+      if (!rows.length) { skipped.push({ id, reason: "Medicine not found" }); continue; }
+      const r = rows[0];
+      const cur = r.gst_percent == null ? null : Number(r.gst_percent);
+      const rule = gstRules.lookup(r.hsn_code);
+      if (rule.status !== "ok") { skipped.push({ id, name: r.name, reason: rule.message }); continue; }
+      if (kind === "missing" && cur !== null) { skipped.push({ id, name: r.name, reason: "GST % is already set" }); continue; }
+      if (kind === "different" && (cur === null || cur === rule.rate)) { skipped.push({ id, name: r.name, reason: "Already matches the rule" }); continue; }
+      await client.query("UPDATE inventory_items SET gst_percent=$1, updated_at=now() WHERE id=$2 AND hospital_id=$3", [rule.rate, id, req.hid]);
+      await gstAudit.record(client, req, { itemId: id, itemName: r.name, hsn: r.hsn_code, oldRate: cur, newRate: rule.rate, suggested: rule.rate, status: rule.status,
+        source: "bulk", reason: (kind === "missing" ? "Filled missing GST from HSN rule" : "Aligned to HSN rule") + " (" + rule.source + ", from " + rule.effectiveFrom + ")" });
+      updated.push({ id, name: r.name, rate: rule.rate });
+    }
+    await client.query("COMMIT");
+    try { broadcast("hospital_" + req.hid, { type: "pharmacy_update", status: "stock" }); } catch (_) {}
+    res.json({ ok: true, updated: updated.length, skipped });
+  } catch (e) {
+    try { await client.query("ROLLBACK"); } catch (_) {}
+    res.status(500).json({ error: e.message });
+  } finally { client.release(); }
+});
+
+router.get("/inventory/:id/gst-history", guard, async (req, res) => {
+  try {
+    await gstAudit.ready;
+    const { rows } = await pool.query(
+      "SELECT old_rate, new_rate, suggested_rate, rule_status, source, reason, changed_by, changed_by_role, changed_at FROM gst_rate_audit WHERE hospital_id=$1 AND item_id=$2 ORDER BY changed_at DESC LIMIT 20",
+      [req.hid, req.params.id]);
+    res.set("Cache-Control", "no-store");
+    res.json(rows.map(r => ({ oldRate: r.old_rate == null ? null : Number(r.old_rate), newRate: r.new_rate == null ? null : Number(r.new_rate),
+      suggestedRate: r.suggested_rate == null ? null : Number(r.suggested_rate), ruleStatus: r.rule_status, source: r.source, reason: r.reason,
+      changedBy: r.changed_by, role: r.changed_by_role, at: r.changed_at })));
+  } catch (e) { res.status(500).json({ error: e.message }); }
 });
 
 // ── Receive stock as boxes / strips / loose tablets, with batch and expiry ──
@@ -859,6 +1032,10 @@ async function sendTax(rx, res, obj) {
     obj.gstType = prof.gstType || "";
     obj.seller = { name: prof.name || "", address: prof.address || "", gstin: prof.gstin || "", drugLicence: prof.drugLicence || "" };
     if (prof.gstType === "registered") {
+      // Same state -> CGST + SGST, different state -> IGST. Only a valid buyer GSTIN (staff-entered) can make a sale inter-state.
+      const buyerRaw = String((res.locals && res.locals.buyerGstin) || "").trim().toUpperCase();
+      const sp = gstRules.supplyType(prof.gstin, buyerRaw);
+      obj.supplyType = sp.supply; obj.buyerGstin = sp.buyerValid ? buyerRaw : ""; obj.buyerStateCode = sp.buyerState; obj.buyerGstinInvalid = !sp.buyerValid;
       const it = await pool.query("SELECT name, hsn_code, gst_percent FROM inventory_items WHERE hospital_id=$1", [hid]);
       const byName = new Map(), byBase = new Map();
       const put = (m, k, r) => { const o = m.get(k); if (!o || (!o.hsn_code && r.hsn_code)) m.set(k, r); };
@@ -882,6 +1059,7 @@ router.get("/invoice/:id", guard, async (req, res) => {
     if (!rows.length) return res.status(404).json({ error: "Prescription not found" });
     const rx = rows[0];
     const lines = invoiceLines(rx, await invMap(req.hid));
+    res.locals.buyerGstin = req.query.buyerGstin || "";
     await sendTax(rx, res, {
       billNo: rx.bill_no == null ? null : Number(rx.bill_no),
       invoiceNo: rx.bill_no == null ? "Bill pending" : "Bill No: " + rx.bill_no, prescriptionId: rx.id, hospitalName: rx.hospital_name,
