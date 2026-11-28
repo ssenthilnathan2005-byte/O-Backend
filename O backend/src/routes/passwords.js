@@ -292,6 +292,7 @@ router.post("/:type/:id/change", async (req, res) => {
     const ok = await applyPassword(req.params.type, req.params.id, req.user.hospitalId, pw);
     if (!ok) return res.status(404).json({ error: "User not found" });
     await audit(req, req.params.type, req.params.id, "change");
+    try { require("../services/ws").broadcast("pwd_" + req.user.hospitalId, { type: "password" }); } catch (_) { /* ignore */ }
     res.json({ success: true });
   } catch (err) { res.status(500).json({ error: err.message }); }
 });

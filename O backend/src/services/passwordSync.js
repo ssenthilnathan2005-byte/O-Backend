@@ -33,6 +33,8 @@ async function syncPassword({ type, id, hospitalId, plain, action, actorId }) {
     await pool.query(
       "INSERT INTO password_audit (hospital_id, actor_id, login_type, login_id, action) VALUES ($1,$2,$3,$4,$5)",
       [hid, actorId || null, type, id, action || "change"]);
+    // Tiny content-free ping so an open Password Management page re-reads the list at once.
+    try { require("./ws").broadcast("pwd_" + hid, { type: "password" }); } catch (_) { /* ignore */ }
   } catch (e) { console.warn("[password-sync]", type, id, e.message); }
 }
 
